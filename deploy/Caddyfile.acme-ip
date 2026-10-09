@@ -1,0 +1,52 @@
+# Caddy in front of the panel on a public IP address, with a real Let's
+# Encrypt certificate.
+#
+# Let's Encrypt does issue certificates for public IPv4 and IPv6 addresses,
+# but only under the "shortlived" profile: they last about six days, so they
+# have to be renewed several times a week. Caddy's own certificate management
+# does not handle IP addresses reliably yet, so Certbot issues and renews in
+# the sidecar container and Caddy only loads the files.
+#
+# From the environment:
+#   PANEL_SITE      this server's address, bare (no brackets around IPv6)
+#   PANEL_UPSTREAM  where the agent listens, 127.0.0.1:9477
+#
+# Port 443 serves the panel. Port 80 is left free for Certbot, which answers
+# the challenge there every few days; it has to stay open and unused.
+#
+# The certificate files are written by the certbot container, which then asks
+# Caddy to reload through its admin API on loopback.
+
+{
+	admin 127.0.0.1:2019
+	# Caddy would otherwise open port 80 to redirect to HTTPS, and then the
+	# certbot container could not bind it to answer the challenge when it
+	# renews. Port 80 has to stay free for certbot.
+	auto_https disable_redirects
+}
+
+https://{$PANEL_SITE} {
+	tls /certs/fullchain.pem /certs/privkey.pem
+
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy {$PANEL_UPSTREAM} {
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	log {
+		output file /var/log/caddy/panel.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+		format json
+	}
+}

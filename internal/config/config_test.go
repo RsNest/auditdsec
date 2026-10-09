@@ -354,7 +354,7 @@ func TestPanelURLAndReachability(t *testing.T) {
 	}{
 		{"127.0.0.1:9477", "", "http://127.0.0.1:9477", true},
 		{"localhost:9477", "", "http://localhost:9477", true},
-		{"0.0.0.0:9477", "", "http://127.0.0.1:9477", false},
+		{"192.168.1.5:9477", "", "http://192.168.1.5:9477", false},
 		{"127.0.0.1:9477", "https://panel.example.com", "https://panel.example.com", false},
 		{"127.0.0.1:9477", "https://panel.example.com/", "https://panel.example.com", false},
 		{"[::1]:9477", "", "http://[::1]:9477", true},
@@ -380,14 +380,14 @@ func TestPublicListenAddressIsRefused(t *testing.T) {
 		c.Web.Enabled, c.Web.Password = true, "a-long-test-password"
 		return c
 	}
-	for _, listen := range []string{"203.0.113.4:9477", "[2001:db8::1]:9477"} {
+	for _, listen := range []string{"203.0.113.4:9477", "[2001:db8::1]:9477", "0.0.0.0:9477", "[::]:9477", ":9477"} {
 		c := base()
 		c.Web.Listen = listen
 		if err := c.validate(); err == nil {
 			t.Errorf("listen %q was accepted", listen)
 		}
 	}
-	for _, listen := range []string{"127.0.0.1:9477", "0.0.0.0:9477", "192.168.1.5:9477"} {
+	for _, listen := range []string{"127.0.0.1:9477", "[::1]:9477", "localhost:9477", "192.168.1.5:9477"} {
 		c := base()
 		c.Web.Listen = listen
 		if err := c.validate(); err != nil {

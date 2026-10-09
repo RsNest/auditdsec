@@ -1,0 +1,30 @@
+# The panel, reachable only through an SSH tunnel.
+#
+#   docker compose -f docker-compose.yml -f deploy/compose.tunnel.yml up -d
+#
+# written for you by ./install.sh, which also fills in .env.
+#
+# How it is built, and why:
+#
+#   The agent shares the host's network namespace and listens on 127.0.0.1
+#   there. That is the host's own loopback, so `ssh -L` on the server's side
+#   of the tunnel reaches it, and nothing arriving from the network can: it is
+#   not bound to any other address. The agent's own check enforces this: it
+#   refuses to start with the panel on a public address or on 0.0.0.0.
+#
+#   The alternative, listening on 0.0.0.0 inside a private container network
+#   and publishing the port on 127.0.0.1, also works, but it leaves the panel
+#   one mistake away from every interface the moment the container is moved to
+#   host networking — for instance by adding deploy/compose.enforce.yml, which
+#   is allowed to be combined with this file. So the listen address stays
+#   loopback in both cases.
+#
+# Because the container is in the host's network namespace, no port mapping
+# exists or is needed.
+services:
+  auditdsec:
+    network_mode: host
+    environment:
+      AUDITDSEC_WEB: "1"
+      AUDITDSEC_WEB_LISTEN: 127.0.0.1:${PANEL_PORT:-9477}
+      AUDITDSEC_WEB_PUBLIC_URL: http://127.0.0.1:${PANEL_PORT:-9477}

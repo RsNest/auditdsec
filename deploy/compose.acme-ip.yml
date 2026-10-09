@@ -1,0 +1,64 @@
+# A real Let's Encrypt certificate for a public IP address.
+#
+#   docker compose -f docker-compose.yml -f deploy/compose.proxy.yml \
+#                  -f deploy/compose.acme-ip.yml up -d
+#
+# written for you by ./install.sh, which also performs the first issuance.
+#
+# Let's Encrypt issues certificates for public IPv4 and IPv6 addresses, but
+# only under the "shortlived" profile: they last about six days. Caddy's own
+# certificate management does not handle IP addresses reliably yet, so
+# Certbot issues and renews here and Caddy only loads the files.
+#
+# Both ports must stay open: 443 serves the panel, 80 answers the challenge
+# every few days. Nothing else may use port 80 — Caddyfile.acme-ip leaves it
+# alone for exactly this reason.
+#
+# First issuance (install.sh runs this; certbot 5.3 or newer is required):
+#
+#   docker compose ... run --rm --entrypoint certbot certbot \
+#     certonly --standalone --non-interactive --agree-tos -m you@example.com \
+#     --preferred-profile shortlived --ip-address 203.0.113.4 \
+#     --deploy-hook /hooks/deploy.sh
+#
+# After that the loop below renews it and the hook reloads Caddy.
+services:
+  certbot:
+    image: ${CERTBOT_IMAGE:-certbot/certbot:latest}
+    container_name: auditdsec-certbot
+    restart: unless-stopped
+    network_mode: host
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    environment:
+      PANEL_SITE: ${PANEL_SITE:-${PANEL_DOMAIN:?set PANEL_SITE in .env, or run ./install.sh}}
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - letsencrypt-lib:/var/lib/letsencrypt
+      - panel-certs:/certs
+      - ./deploy/certbot-deploy-hook.sh:/hooks/deploy.sh:ro
+      # Posted back to Caddy's admin API after a renewal, to make it read the
+      # new certificate without a restart.
+      - ${PANEL_CADDYFILE:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro
+    # A six-day certificate is renewed when about two days are left, so
+    # checking twice a day leaves room for several failures.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        trap 'exit 0' TERM INT
+        while :; do
+          certbot renew --standalone --non-interactive --deploy-hook /hooks/deploy.sh || true
+          sleep 43200 & wait $${!}
+        done
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  letsencrypt:
+  letsencrypt-lib:
+  panel-certs:

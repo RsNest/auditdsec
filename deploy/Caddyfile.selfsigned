@@ -1,0 +1,42 @@
+# Caddy in front of the panel with a certificate Caddy issues itself.
+#
+# Use this only when the panel cannot get a real certificate: no domain, and
+# an address Let's Encrypt will not certify — a private or NAT address, or a
+# server whose port 80 cannot be opened.
+#
+# The traffic is encrypted, which is the point: the sign-in password must not
+# cross the network readable. But no browser knows the issuer, so every
+# browser shows a warning the first time, and nothing distinguishes that
+# warning from the one a real attacker would cause. Prefer a domain, or a
+# public address with deploy/Caddyfile.acme-ip, whenever either is possible.
+#
+# Only port 443 has to be open: there is no challenge to answer.
+
+{
+	admin 127.0.0.1:2019
+}
+
+https://{$PANEL_SITE} {
+	tls internal
+
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy {$PANEL_UPSTREAM} {
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	log {
+		output file /var/log/caddy/panel.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+		format json
+	}
+}

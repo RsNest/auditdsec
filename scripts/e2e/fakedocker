@@ -1,0 +1,90 @@
+#!/bin/bash
+# A stand-in for `docker` on a machine with the CLI but no daemon.
+# - `compose config` goes to the real docker, so .env interpolation is real.
+# - `compose up` reads the real resolved environment of the agent and starts
+#   the real agent binary (and a real Caddy for proxy modes) with it.
+# - the image-only commands are answered locally.
+SCRIPTS="$(dirname "$(readlink -f "$0")")"
+E2E="${E2E_STATE:-/tmp/auditdsec-e2e}"
+REAL=/usr/bin/docker; [ -x "$REAL" ] || REAL="$(command -v -p docker)"
+LOG="$E2E/calls.log"
+echo "docker $*" >> "$LOG"
+
+case "$1" in
+  info) exit 0 ;;
+  image) exit 1 ;;
+  run)
+    # docker run --rm -i IMAGE hash-password -stdin   |   check-site ...
+    shift; while [ "${1:-}" = "--rm" ] || [ "${1:-}" = "-i" ] || [ "${1:-}" = "--network" ]; do
+      [ "$1" = "--network" ] && shift; shift; done
+    shift   # the image
+    exec "$E2E/auditdsec" "$@" ;;
+esac
+
+[ "$1" = compose ] || exit 0
+shift
+if [ "$1" = version ]; then exit 0; fi
+
+files=(); while [ "$1" = "-f" ]; do files+=(-f "$2"); shift 2; done
+cmd="$1"; shift
+
+resolved() { "$REAL" compose "${files[@]}" config --format json 2>>"$LOG"; }
+
+case "$cmd" in
+  build|ps|logs) echo "(stub) $cmd"; exit 0 ;;
+  run)
+    # certbot emulation for the address mode
+    args="$*"
+    case "$args" in
+      *"test -s /certs/fullchain.pem"*)
+        [ -s "$E2E/certs/fullchain.pem" ] && exit 0 || exit 1 ;;
+      *"--version"*) echo "certbot 5.4.0"; exit 0 ;;
+      *certonly*)
+        site="$(echo "$args" | sed -n 's/.*--ip-address \([^ ]*\).*/\1/p')"
+        echo "(stub certbot) issuing for $site; flags: $(echo "$args" | grep -o -- '--preferred-profile [a-z]*')"
+        mkdir -p "$E2E/lineage" "$E2E/certs"
+        openssl req -x509 -newkey rsa:2048 -keyout "$E2E/lineage/privkey.pem" -out "$E2E/lineage/fullchain.pem" \
+          -days 6 -nodes -subj "/CN=stub" -addext "subjectAltName=IP:$site" 2>/dev/null
+        RENEWED_LINEAGE="$E2E/lineage" CERT_DIR="$E2E/certs" CADDYFILE=/dev/null sh "$E2E_REPO/deploy/certbot-deploy-hook.sh" >/dev/null 2>&1 || true
+        exit 0 ;;
+    esac
+    exit 0 ;;
+  up)
+    json="$(resolved)" || { echo "compose config failed" >&2; exit 1; }
+    "$SCRIPTS/stop.sh"
+    # Export the agent's resolved environment. config re-escapes $ as $$.
+    envs="$(echo "$json" | python3 -c '
+import json,sys,shlex
+e=json.load(sys.stdin)["services"]["auditdsec"]["environment"]
+for k,v in e.items():
+    if v is None: continue
+    print("export %s=%s" % (k, shlex.quote(str(v).replace("$$","$"))))
+')"
+    ( eval "$envs"
+      export AUDITDSEC_TG_API_BASE=http://127.0.0.1:1 AUDITDSEC_AUDIT_LOG="$E2E/audit.log" \
+             AUDITDSEC_STATE_DIR="$E2E/state" AUDITDSEC_LOG_FILE="$E2E/agent.log"
+      mkdir -p "$E2E/state"; : > "$E2E/audit.log"
+      nohup "$E2E/auditdsec" run > "$E2E/agent.out" 2>&1 &
+      echo $! > "$E2E/agent.pid" )
+    # Proxy modes: start Caddy with the file compose mounts and the env it gets.
+    caddyfile="$(echo "$json" | python3 -c '
+import json,sys
+s=json.load(sys.stdin)["services"]
+c=s.get("caddy")
+if c:
+    for v in c.get("volumes",[]):
+        if v.get("target")=="/etc/caddy/Caddyfile": print(v["source"])
+')"
+    if [ -n "$caddyfile" ]; then
+      site="$(echo "$json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["services"]["caddy"]["environment"]["PANEL_SITE"])')"
+      up="$(echo "$json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["services"]["caddy"]["environment"]["PANEL_UPSTREAM"])')"
+      ( export PANEL_SITE="$site" PANEL_UPSTREAM="$up" PANEL_EMAIL=a@b.c
+        export XDG_DATA_HOME="$E2E/cdata" XDG_CONFIG_HOME="$E2E/ccfg"
+        # certificates the agent's Caddyfile expects at /certs
+        mkdir -p /certs; [ -s "$E2E/certs/fullchain.pem" ] && cp "$E2E/certs/"*.pem /certs/
+        nohup "${CADDY_BIN:-caddy}" run --config "$caddyfile" --adapter caddyfile > "$E2E/caddy.out" 2>&1 &
+        echo $! > "$E2E/caddy.pid" )
+    fi
+    exit 0 ;;
+esac
+exit 0

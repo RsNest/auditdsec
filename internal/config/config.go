@@ -594,15 +594,14 @@ func (c *Config) validateWeb(add func(string, ...any)) {
 		add("web.listen: expected host:port, got %q", w.Listen)
 		return
 	}
-	if ip := net.ParseIP(host); host != "" && host != "localhost" && ip != nil && !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsUnspecified() {
+	// An empty host, 0.0.0.0 and :: all mean "every interface", which on a
+	// server with a public address is the same as listening on it.
+	if ip := net.ParseIP(host); host == "" || (host != "localhost" && ip != nil && !ip.IsLoopback() && !ip.IsPrivate()) {
 		// Listening on a public address means the sign-in password crosses
 		// the internet in clear text, and this panel can ban addresses.
-		add("web.listen: %q is a public address, and the panel speaks plain HTTP: the password would "+
-			"cross the network readable by anyone in the way.\n    Keep listen on 127.0.0.1 and pick one of:\n"+
-			"      - an SSH tunnel:  ssh -L 9477:127.0.0.1:9477 this-server\n"+
-			"      - a domain:       deploy/compose.public.yml, a real certificate, nothing to click through\n"+
-			"      - this server's IP: deploy/compose.public.yml with PANEL_CADDYFILE=./deploy/Caddyfile.ip,\n"+
-			"                        which serves HTTPS with its own certificate (one browser warning)", host)
+		add("web.listen: %q would put the panel on a public interface, and it speaks plain HTTP: the "+
+			"password would cross the network readable by anyone in the way.\n    Listen on 127.0.0.1 and let "+
+			"./install.sh set up the way in: an SSH tunnel, or a domain / public address with a proxy that adds TLS", host)
 	}
 	if u := strings.TrimSpace(w.PublicURL); u != "" {
 		parsed, err := url.Parse(u)

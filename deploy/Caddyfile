@@ -1,22 +1,20 @@
-# Caddy in front of the panel, on a domain name, with a real certificate from
-# Let's Encrypt. Mounted by deploy/compose.public.yml.
+# Caddy in front of the panel, on a domain name. Caddy gets the certificate
+# from Let's Encrypt itself and renews it on its own.
 #
 # From the environment:
 #   PANEL_SITE      the domain the certificate is issued for
 #   PANEL_EMAIL     where Let's Encrypt sends expiry warnings
 #   PANEL_UPSTREAM  where the agent listens, 127.0.0.1:9477
 #
-# The name must already point at this server and ports 80 and 443 must be
-# open, or the certificate cannot be issued. Check with:
-#   auditdsec check-domain panel.example.com
+# Ports 80 and 443 must be open: 80 answers the certificate challenge and
+# redirects to HTTPS, 443 serves the panel.
 #
-# For a server without a domain, use deploy/Caddyfile.ip instead.
+# ./install.sh writes all of this; it is here to be read and edited, not
+# copied by hand.
 
 {
 	email {$PANEL_EMAIL}
-	# While testing, use the staging CA so a mistake does not burn through
-	# Let's Encrypt's rate limit for the real certificate.
-	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+	admin 127.0.0.1:2019
 }
 
 {$PANEL_SITE} {

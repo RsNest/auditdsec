@@ -37,6 +37,18 @@ services:
       AUDITDSEC_LOG_LEVEL: ${AUDITDSEC_LOG_LEVEL:-info}
       TZ: ${TZ:-UTC}
 
+      # The web panel. Off unless AUDITDSEC_WEB=1, and it refuses to start
+      # without a password. ./install.sh writes these; the overlay files in
+      # deploy/ set the ones that depend on how the panel is published.
+      AUDITDSEC_WEB: ${AUDITDSEC_WEB:-}
+      AUDITDSEC_WEB_LISTEN: ${AUDITDSEC_WEB_LISTEN:-}
+      AUDITDSEC_WEB_LOGIN: ${AUDITDSEC_WEB_LOGIN:-}
+      # The hash, never the password. Values from .env are passed through
+      # unchanged, so the $ signs inside it need no escaping.
+      AUDITDSEC_WEB_PASSWORD_HASH: ${AUDITDSEC_WEB_PASSWORD_HASH:-}
+      AUDITDSEC_WEB_PUBLIC_URL: ${AUDITDSEC_WEB_PUBLIC_URL:-}
+      AUDITDSEC_WEB_TRUSTED_PROXIES: ${AUDITDSEC_WEB_TRUSTED_PROXIES:-}
+
     volumes:
       - /var/log/audit:/var/log/audit:ro
       - auditdsec-state:/var/lib/auditdsec

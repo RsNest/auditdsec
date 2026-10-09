@@ -1,0 +1,67 @@
+# Caddy in front of the panel, terminating TLS.
+#
+#   docker compose -f docker-compose.yml -f deploy/compose.proxy.yml up -d
+#
+# written for you by ./install.sh. Relative paths below resolve against the
+# project directory, which is the directory of the FIRST -f file, so
+# docker-compose.yml must come first on the command line.
+#
+# Which certificate is used depends on PANEL_CADDYFILE:
+#
+#   deploy/Caddyfile             a domain, certificate from Let's Encrypt,
+#                                managed by Caddy itself (the default)
+#   deploy/Caddyfile.acme-ip     a public IP address, certificate from
+#                                Let's Encrypt, issued and renewed by the
+#                                certbot container in compose.acme-ip.yml
+#   deploy/Caddyfile.selfsigned  a certificate Caddy issues itself, for when
+#                                neither of the above is possible
+#
+# The agent shares the host's network namespace so that Caddy, which also
+# does, can reach it on 127.0.0.1 while that port stays off the wire. Caddy
+# is the only process with a port open to the world.
+services:
+  auditdsec:
+    network_mode: host
+    environment:
+      AUDITDSEC_WEB: "1"
+      AUDITDSEC_WEB_LISTEN: 127.0.0.1:${PANEL_PORT:-9477}
+      AUDITDSEC_WEB_PUBLIC_URL: https://${PANEL_SITE:-${PANEL_DOMAIN:?set PANEL_SITE in .env, or run ./install.sh}}
+      # Only Caddy, on loopback, may state the client's address.
+      AUDITDSEC_WEB_TRUSTED_PROXIES: 127.0.0.1,::1
+
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2.10-alpine}
+    container_name: auditdsec-caddy
+    restart: unless-stopped
+    network_mode: host
+    depends_on: [auditdsec]
+    cap_drop: ["ALL"]
+    # Binding 80 and 443 is the one privilege it needs.
+    cap_add: ["NET_BIND_SERVICE"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    pids_limit: 128
+    environment:
+      PANEL_SITE: ${PANEL_SITE:-${PANEL_DOMAIN:?set PANEL_SITE in .env, or run ./install.sh}}
+      PANEL_EMAIL: ${PANEL_EMAIL:-}
+      PANEL_UPSTREAM: 127.0.0.1:${PANEL_PORT:-9477}
+    volumes:
+      - ${PANEL_CADDYFILE:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro
+      # Certificates from the certbot container, used only by Caddyfile.acme-ip.
+      - panel-certs:/certs:ro
+      # Caddy's own certificates and account key. Losing this volume means
+      # asking Let's Encrypt for a new certificate, which is rate limited.
+      - caddy-data:/data
+      - caddy-config:/config
+      - caddy-logs:/var/log/caddy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy-data:
+  caddy-config:
+  caddy-logs:
+  panel-certs:

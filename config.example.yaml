@@ -106,15 +106,15 @@ ban:
 # Web panel: the same information as the bot, in a browser. Off by default.
 #
 # Reachable on 127.0.0.1 only, which is what you want: open it over an SSH
-# tunnel (ssh -L 9477:127.0.0.1:9477 server), or put it on a domain with
-# deploy/compose.public.yml, which runs Caddy in front and handles the
-# certificate. Do not listen on a public address directly — the panel would
-# then be answering strangers over plain HTTP.
+# tunnel (ssh -L 9477:127.0.0.1:9477 server), or behind Caddy on a domain or
+# public IP; ./install.sh sets either up and checks it. Do not listen on a
+# public address or 0.0.0.0 — the panel would then be answering strangers over
+# plain HTTP, and the agent refuses to start that way.
 web:
   enabled: false
   listen: 127.0.0.1:9477
   login: admin
-  # Make the hash with `auditdsec hash-password`; the password itself is never
+  # Make the hash with `auditdsec hash-password` (or let ./install.sh do it); the password itself is never
   # stored. The agent refuses to start the panel without one.
   password_hash: ""
   # How long a sign-in lasts. A restart ends every session regardless.
