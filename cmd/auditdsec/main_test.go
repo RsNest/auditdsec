@@ -3,7 +3,10 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/RsNest/auditdsec/internal/config"
 )
 
 // Inside a container os.Hostname() is the container id, so the host's own name
@@ -53,5 +56,30 @@ func TestConfigPathPrefersTheFlag(t *testing.T) {
 	}
 	if got := configPath(""); got != "/from/env.yaml" {
 		t.Errorf("got %q", got)
+	}
+}
+
+// The link is what the person needs after installing, so it must be right in
+// both shapes: behind a proxy, and reachable only through a tunnel.
+func TestPrintPanelBanner(t *testing.T) {
+	cfg := config.Defaults(config.ProfileSimple)
+	cfg.Web.Listen, cfg.Web.Login = "127.0.0.1:9477", "admin"
+
+	var local strings.Builder
+	printPanelBanner(&local, cfg)
+	for _, want := range []string{"http://127.0.0.1:9477", "admin", "ssh -L 9477:127.0.0.1:9477"} {
+		if !strings.Contains(local.String(), want) {
+			t.Errorf("the loopback banner does not mention %q:\n%s", want, local.String())
+		}
+	}
+
+	cfg.Web.PublicURL = "https://panel.example.com"
+	var public strings.Builder
+	printPanelBanner(&public, cfg)
+	if !strings.Contains(public.String(), "https://panel.example.com") {
+		t.Errorf("the banner does not show the public address:\n%s", public.String())
+	}
+	if strings.Contains(public.String(), "ssh -L") {
+		t.Errorf("the banner offers a tunnel for a panel that is already published:\n%s", public.String())
 	}
 }

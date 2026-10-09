@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -119,6 +120,10 @@ type WebConfig struct {
 	PasswordHash string
 	Password     string
 	SessionTTL   time.Duration
+	// PublicURL is the address a person types into a browser, which is not
+	// the listen address when a reverse proxy is in front. It is used for the
+	// link the agent prints at startup; nothing depends on it being right.
+	PublicURL string
 	// TrustedProxies are the networks a reverse proxy may connect from. Only
 	// a request whose peer is in one of them has its X-Forwarded-For believed;
 	// anyone else could otherwise forge the address the rate limiter counts
@@ -330,11 +335,12 @@ func (c *Config) decode(root *node) error {
 	}
 
 	if n := d.section(root, "web"); n != nil {
-		d.strict(n, "web", "enabled", "listen", "login", "password_hash", "session_ttl", "trusted_proxies")
+		d.strict(n, "web", "enabled", "listen", "login", "password_hash", "public_url", "session_ttl", "trusted_proxies")
 		d.boolean(n, "enabled", &c.Web.Enabled)
 		d.str(n, "listen", &c.Web.Listen)
 		d.str(n, "login", &c.Web.Login)
 		d.str(n, "password_hash", &c.Web.PasswordHash)
+		d.str(n, "public_url", &c.Web.PublicURL)
 		d.duration(n, "session_ttl", &c.Web.SessionTTL)
 		d.strList(n, "trusted_proxies", &c.Web.TrustedProxies)
 	}
@@ -399,6 +405,7 @@ func (c *Config) applyEnv() {
 	envStr("AUDITDSEC_WEB_LOGIN", &c.Web.Login)
 	envStr("AUDITDSEC_WEB_PASSWORD_HASH", &c.Web.PasswordHash)
 	envStr("AUDITDSEC_WEB_PASSWORD", &c.Web.Password)
+	envStr("AUDITDSEC_WEB_PUBLIC_URL", &c.Web.PublicURL)
 	if v := os.Getenv("AUDITDSEC_WEB"); v != "" {
 		switch strings.ToLower(strings.TrimSpace(v)) {
 		case "1", "true", "yes", "on":
@@ -588,7 +595,23 @@ func (c *Config) validateWeb(add func(string, ...any)) {
 		return
 	}
 	if ip := net.ParseIP(host); host != "" && host != "localhost" && ip != nil && !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsUnspecified() {
-		add("web.listen: %q is a public address; put the panel behind the bundled reverse proxy and listen on 127.0.0.1 instead", host)
+		// Listening on a public address means the sign-in password crosses
+		// the internet in clear text, and this panel can ban addresses.
+		add("web.listen: %q is a public address, and the panel speaks plain HTTP: the password would "+
+			"cross the network readable by anyone in the way.\n    Keep listen on 127.0.0.1 and pick one of:\n"+
+			"      - an SSH tunnel:  ssh -L 9477:127.0.0.1:9477 this-server\n"+
+			"      - a domain:       deploy/compose.public.yml, a real certificate, nothing to click through\n"+
+			"      - this server's IP: deploy/compose.public.yml with PANEL_CADDYFILE=./deploy/Caddyfile.ip,\n"+
+			"                        which serves HTTPS with its own certificate (one browser warning)", host)
+	}
+	if u := strings.TrimSpace(w.PublicURL); u != "" {
+		parsed, err := url.Parse(u)
+		switch {
+		case err != nil || parsed.Host == "":
+			add("web.public_url: %q is not a URL", u)
+		case parsed.Scheme != "http" && parsed.Scheme != "https":
+			add("web.public_url: %q must start with http:// or https://", u)
+		}
 	}
 	for _, p := range w.TrustedProxies {
 		if _, _, err := net.ParseCIDR(p); err != nil {
@@ -600,6 +623,40 @@ func (c *Config) validateWeb(add func(string, ...any)) {
 	if w.SessionTTL <= 0 {
 		add("web.session_ttl: must be positive")
 	}
+}
+
+// PanelURL is where a person opens the panel: the configured public address
+// when a reverse proxy is in front, otherwise the listen address itself.
+func (c *Config) PanelURL() string {
+	if u := strings.TrimSpace(c.Web.PublicURL); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	host, port, err := net.SplitHostPort(c.Web.Listen)
+	if err != nil {
+		return "http://" + c.Web.Listen
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+// PanelIsLoopbackOnly reports whether the panel can only be reached from the
+// machine it runs on, which is what decides whether the startup line should
+// explain the SSH tunnel.
+func (c *Config) PanelIsLoopbackOnly() bool {
+	if strings.TrimSpace(c.Web.PublicURL) != "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(c.Web.Listen)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Language returns the validated UI language.
@@ -666,6 +723,7 @@ func (c *Config) Redacted() string {
 		}
 		fmt.Fprintf(&b, "web:              listen=%s login=%s password=%s session=%s trusted_proxies=%s\n",
 			c.Web.Listen, c.Web.Login, pw, shortDur(c.Web.SessionTTL), proxies)
+		fmt.Fprintf(&b, "web.url:          %s\n", c.PanelURL())
 	} else {
 		fmt.Fprintf(&b, "web:              off\n")
 	}

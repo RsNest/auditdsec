@@ -1,25 +1,30 @@
-# Caddy in front of the panel. It terminates TLS, gets and renews the
-# certificate from Let's Encrypt on its own, and passes requests to the agent
-# on the host's loopback address.
+# Caddy in front of the panel, on a domain name, with a real certificate from
+# Let's Encrypt. Mounted by deploy/compose.public.yml.
 #
-# Two variables come from the environment (see .env.example):
-#   PANEL_DOMAIN  the name the certificate is issued for
-#   PANEL_EMAIL   where Let's Encrypt sends expiry warnings
-#   PANEL_UPSTREAM  where the agent listens, 127.0.0.1:9477 by default
+# From the environment:
+#   PANEL_SITE      the domain the certificate is issued for
+#   PANEL_EMAIL     where Let's Encrypt sends expiry warnings
+#   PANEL_UPSTREAM  where the agent listens, 127.0.0.1:9477
+#
+# The name must already point at this server and ports 80 and 443 must be
+# open, or the certificate cannot be issued. Check with:
+#   auditdsec check-domain panel.example.com
+#
+# For a server without a domain, use deploy/Caddyfile.ip instead.
 
 {
 	email {$PANEL_EMAIL}
-	# Comment the next line in while testing, so a mistake does not burn
-	# through Let's Encrypt's rate limit for the real certificate.
+	# While testing, use the staging CA so a mistake does not burn through
+	# Let's Encrypt's rate limit for the real certificate.
 	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
 }
 
-{$PANEL_DOMAIN} {
+{$PANEL_SITE} {
 	encode zstd gzip
 
 	header {
-		# The panel is only ever served over TLS once this proxy is in front
-		# of it, so tell the browser never to try plain HTTP again.
+		# Served over TLS from here on, so the browser should never try plain
+		# HTTP for this name again.
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
@@ -28,7 +33,7 @@
 	}
 
 	# The agent sets its own content policy, so nothing here needs to.
-	reverse_proxy {$PANEL_UPSTREAM:127.0.0.1:9477} {
+	reverse_proxy {$PANEL_UPSTREAM} {
 		header_up X-Forwarded-For {remote_host}
 	}
 

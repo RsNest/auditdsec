@@ -345,3 +345,58 @@ func TestAllowedChat(t *testing.T) {
 		t.Error("AllowedChat is wrong")
 	}
 }
+
+func TestPanelURLAndReachability(t *testing.T) {
+	cases := []struct {
+		listen, public string
+		wantURL        string
+		wantLoopback   bool
+	}{
+		{"127.0.0.1:9477", "", "http://127.0.0.1:9477", true},
+		{"localhost:9477", "", "http://localhost:9477", true},
+		{"0.0.0.0:9477", "", "http://127.0.0.1:9477", false},
+		{"127.0.0.1:9477", "https://panel.example.com", "https://panel.example.com", false},
+		{"127.0.0.1:9477", "https://panel.example.com/", "https://panel.example.com", false},
+		{"[::1]:9477", "", "http://[::1]:9477", true},
+	}
+	for _, c := range cases {
+		cfg := Defaults(ProfileSimple)
+		cfg.Web.Listen, cfg.Web.PublicURL = c.listen, c.public
+		if got := cfg.PanelURL(); got != c.wantURL {
+			t.Errorf("listen %q public %q: url = %q, want %q", c.listen, c.public, got, c.wantURL)
+		}
+		if got := cfg.PanelIsLoopbackOnly(); got != c.wantLoopback {
+			t.Errorf("listen %q public %q: loopback = %t, want %t", c.listen, c.public, got, c.wantLoopback)
+		}
+	}
+}
+
+// A panel on a public address speaks plain HTTP, so the password would cross
+// the network readable. The agent must refuse rather than warn.
+func TestPublicListenAddressIsRefused(t *testing.T) {
+	base := func() *Config {
+		c := Defaults(ProfileSimple)
+		c.Telegram.Token, c.Telegram.ChatIDs = "t", []int64{1}
+		c.Web.Enabled, c.Web.Password = true, "a-long-test-password"
+		return c
+	}
+	for _, listen := range []string{"203.0.113.4:9477", "[2001:db8::1]:9477"} {
+		c := base()
+		c.Web.Listen = listen
+		if err := c.validate(); err == nil {
+			t.Errorf("listen %q was accepted", listen)
+		}
+	}
+	for _, listen := range []string{"127.0.0.1:9477", "0.0.0.0:9477", "192.168.1.5:9477"} {
+		c := base()
+		c.Web.Listen = listen
+		if err := c.validate(); err != nil {
+			t.Errorf("listen %q was refused: %v", listen, err)
+		}
+	}
+	c := base()
+	c.Web.PublicURL = "not a url"
+	if err := c.validate(); err == nil {
+		t.Error("a malformed public_url was accepted")
+	}
+}

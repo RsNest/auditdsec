@@ -16,10 +16,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -111,7 +114,9 @@ func resolveHost(configured, mounted string) string {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "auditdsec: %v\n", err)
+		if err.Error() != "" {
+			fmt.Fprintf(os.Stderr, "auditdsec: %v\n", err)
+		}
 		os.Exit(1)
 	}
 }
@@ -130,6 +135,8 @@ func run(args []string) error {
 		return cmdExplain(args)
 	case "hash-password":
 		return cmdHashPassword(args)
+	case "check-domain":
+		return cmdCheckDomain(args)
 	case "version":
 		fmt.Printf("auditdsec %s (commit %s, built %s, %s)\n", version, commit, date, runtime.Version())
 		return nil
@@ -151,6 +158,7 @@ Usage:
   auditdsec check-config [-config F] load the settings and report problems
   auditdsec explain KIND [-lang ru]  explain one kind of event
   auditdsec hash-password [-stdin]   hash a panel password for the web panel
+  auditdsec check-domain NAME        does this name point at this server?
   auditdsec version                  print the build version
 
 Environment (overrides the file):
@@ -313,6 +321,115 @@ func readPassword(fromStdin bool) (string, error) {
 		return "", fmt.Errorf("the two passwords do not match")
 	}
 	return first, nil
+}
+
+// printPanelBanner says where the panel is, in the form the person will type.
+func printPanelBanner(w io.Writer, cfg *config.Config) {
+	fmt.Fprintf(w, "\n  panel:  %s\n  sign in as:  %s\n", cfg.PanelURL(), cfg.Web.Login)
+	if cfg.PanelIsLoopbackOnly() {
+		_, port, err := net.SplitHostPort(cfg.Web.Listen)
+		if err != nil {
+			port = "9477"
+		}
+		fmt.Fprintf(w, "\n  It listens on this machine only. From your own computer:\n"+
+			"    ssh -L %s:127.0.0.1:%s %s@this-server\n"+
+			"  then open %s there.\n"+
+			"  To put it on a domain or this server's address instead, see deploy/compose.public.yml.\n",
+			port, port, currentUser(), cfg.PanelURL())
+	}
+	fmt.Fprintln(w)
+}
+
+func currentUser() string {
+	if u := os.Getenv("SUDO_USER"); u != "" {
+		return u
+	}
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	return "root"
+}
+
+// cmdCheckDomain answers the question that decides whether a certificate can
+// be issued at all: does this name point at this machine? Let's Encrypt has to
+// reach port 80 on the address the name resolves to, so a name pointing
+// somewhere else fails in a way that is hard to read in Caddy's log.
+func cmdCheckDomain(args []string) error {
+	fs := flag.NewFlagSet("check-domain", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: auditdsec check-domain panel.example.com")
+	}
+	name := strings.TrimSuffix(strings.TrimSpace(fs.Arg(0)), ".")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupHost(ctx, name)
+	if err != nil {
+		fmt.Printf("%s does not resolve: %v\n\nAdd an A record pointing at this server, wait for it to\n"+
+			"propagate, then run this again.\n", name, err)
+		return errCheckFailed
+	}
+	mine, err := localAddresses()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s resolves to: %s\n", name, strings.Join(addrs, ", "))
+	if len(mine) > 0 {
+		fmt.Printf("this server has:  %s\n", strings.Join(mine, ", "))
+	}
+
+	for _, a := range addrs {
+		if slices.Contains(mine, a) {
+			fmt.Printf("\nThe name points at this server. You can use it:\n\n"+
+				"  PANEL_SITE=%s\n  PANEL_EMAIL=you@example.com\n\n"+
+				"in .env, then\n\n  docker compose -f docker-compose.yml -f deploy/compose.public.yml up -d\n\n"+
+				"Ports 80 and 443 must be open, or the certificate cannot be issued.\n", name)
+			return nil
+		}
+	}
+	fmt.Printf("\nThe name does NOT point at this server, so Let's Encrypt would fail.\n" +
+		"Either fix the A record, or serve the panel on this server's address with\n" +
+		"its own certificate:\n\n  PANEL_SITE=<this server's address>\n  PANEL_CADDYFILE=./deploy/Caddyfile.ip\n\n" +
+		"(the browser shows one warning you accept once).\n" +
+		"If this server is behind NAT, the addresses above can differ legitimately;\n" +
+		"compare the A record with the address your provider gave you.\n")
+	return errCheckFailed
+}
+
+// errCheckFailed makes the command exit non-zero without printing twice: the
+// explanation is already on stdout, in full sentences.
+var errCheckFailed = errors.New("")
+
+// localAddresses lists the routable addresses of this machine.
+func localAddresses() ([]string, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("cannot list the network interfaces: %w", err)
+	}
+	var out []string
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+				continue
+			}
+			out = append(out, ip.String())
+		}
+	}
+	return out, nil
 }
 
 func cmdRun(args []string) error {
@@ -489,6 +606,10 @@ func cmdRun(args []string) error {
 		}
 		log.Info("web panel enabled", "listen", cfg.Web.Listen, "login", cfg.Web.Login,
 			"session_ttl", cfg.Web.SessionTTL, "trusted_proxies", cfg.Web.TrustedProxies)
+		// The link is the one thing the person actually needs after
+		// installing, and hunting for it in a log line of key=value pairs is
+		// a poor way to find it.
+		printPanelBanner(os.Stdout, cfg)
 	}
 
 	var wg sync.WaitGroup

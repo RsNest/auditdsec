@@ -9,10 +9,15 @@
 #
 # What you need first:
 #
-#   1. A domain or subdomain with an A record pointing at this server, and
-#      ports 80 and 443 open. Let's Encrypt has to reach port 80 to issue the
-#      certificate.
-#   2. PANEL_DOMAIN, PANEL_EMAIL and a password in .env. Make the hash with
+#   1. Somewhere to serve it from, one of:
+#      - a domain pointing at this server, with ports 80 and 443 open. Check
+#        it first: `auditdsec check-domain panel.example.com`. This gives a
+#        real certificate and no browser warning.
+#      - this server's own address, with port 443 open and
+#        PANEL_CADDYFILE=./deploy/Caddyfile.ip in .env. Caddy then issues its
+#        own certificate: encrypted, but the browser warns once.
+#      Either way the address goes in PANEL_SITE.
+#   2. A password. Make the hash with
 #        docker compose run --rm --entrypoint /usr/local/bin/auditdsec \
 #          auditdsec hash-password
 #      and put it in AUDITDSEC_WEB_PASSWORD_HASH.
@@ -42,6 +47,8 @@ services:
       AUDITDSEC_WEB_LOGIN: ${AUDITDSEC_WEB_LOGIN:-admin}
       AUDITDSEC_WEB_PASSWORD_HASH: ${AUDITDSEC_WEB_PASSWORD_HASH:?run `auditdsec hash-password` and put the result in .env}
       AUDITDSEC_WEB_TRUSTED_PROXIES: 127.0.0.1,::1
+      # Only used for the link the agent prints at startup.
+      AUDITDSEC_WEB_PUBLIC_URL: https://${PANEL_SITE:?set PANEL_SITE in .env to the domain or address the panel is served on}
 
   caddy:
     image: caddy:2.9-alpine
@@ -56,11 +63,13 @@ services:
     mem_limit: 128m
     pids_limit: 128
     environment:
-      PANEL_DOMAIN: ${PANEL_DOMAIN:?set PANEL_DOMAIN in .env}
-      PANEL_EMAIL: ${PANEL_EMAIL:?set PANEL_EMAIL in .env}
+      PANEL_SITE: ${PANEL_SITE:?set PANEL_SITE in .env to the domain or address the panel is served on}
+      # Not needed with Caddyfile.ip, which issues its own certificate.
+      PANEL_EMAIL: ${PANEL_EMAIL:-}
       PANEL_UPSTREAM: 127.0.0.1:9477
     volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # ./deploy/Caddyfile.ip for a server without a domain.
+      - ${PANEL_CADDYFILE:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro
       # The certificate and the account key. Losing this volume means asking
       # Let's Encrypt for a new certificate, which is rate limited.
       - caddy-data:/data
