@@ -37,7 +37,13 @@ ENFORCE=""        # yes | no
 ASSUME_YES=no
 DO_START=yes
 DO_VERIFY=yes
-STAGING=no
+ACME=""           # staging | production (domain and ip modes)
+CACERT="${PANEL_CACERT:-}"   # a CA file to verify the panel's certificate against
+NO_BUILD=no
+RESTORE=no
+
+LE_PRODUCTION="https://acme-v02.api.letsencrypt.org/directory"
+LE_STAGING="https://acme-staging-v02.api.letsencrypt.org/directory"
 
 # --------------------------------------------------------------- utilities --
 
@@ -66,11 +72,22 @@ With no options it asks what it needs. Options are for scripts and tests.
   --port N                             port the agent listens on (default: 9477)
   --password-file PATH                 read the panel password from this file
   --enforce / --no-enforce             apply bans with nftables, or only record them
-  --staging                            Let's Encrypt staging CA, for a dry run
+  --staging                            Let's Encrypt staging CA: a dry run whose certificates
+                                       no browser trusts. Kept apart from production.
+  --production                         the real Let's Encrypt CA. This is also the way out of
+                                       --staging; nothing is deleted on the way.
+  --cacert FILE                        verify the panel's certificate against this CA instead
+                                       of the system store (for a staging or private CA)
+  --restore                            put back the last configuration that was verified working
+  --no-build                           do not build the image; use the one that exists
   --yes                                do not ask anything that has an answer already
   --no-start                           write the configuration and stop
   --no-verify                          start, but skip checking the panel answers
   -h, --help                           this text
+
+The password is only ever sent to the panel over a connection whose certificate
+was verified. When it cannot be verified (staging, an unknown CA) it is sent to
+the agent on this machine's loopback address instead, and the summary says so.
 
 The modes:
 
@@ -97,7 +114,11 @@ while [ $# -gt 0 ]; do
         --password-file) PASSWORD_FILE="${2:-}"; shift 2 ;;
         --enforce) ENFORCE=yes; shift ;;
         --no-enforce) ENFORCE=no; shift ;;
-        --staging) STAGING=yes; shift ;;
+        --staging) ACME=staging; shift ;;
+        --production) ACME=production; shift ;;
+        --cacert) CACERT="${2:-}"; shift 2 ;;
+        --restore) RESTORE=yes; shift ;;
+        --no-build) NO_BUILD=yes; shift ;;
         --yes|-y) ASSUME_YES=yes; shift ;;
         --no-start) DO_START=no; shift ;;
         --no-verify) DO_VERIFY=no; shift ;;
@@ -136,6 +157,13 @@ confirm() {
     interactive || return 0
     read -r -p "$prompt [Y/n]: " reply </dev/tty || true
     case "$reply" in [nN]*) return 1 ;; *) return 0 ;; esac
+}
+
+confirm_no() {
+    local prompt="$1" reply=""
+    interactive || return 1
+    read -r -p "$prompt [y/N]: " reply </dev/tty || true
+    case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
 }
 
 # --------------------------------------------------------------- .env edits --
@@ -198,6 +226,10 @@ build_compose_files() {
         tunnel)               COMPOSE_FILES+=(-f deploy/compose.tunnel.yml) ;;
     esac
     if [ "$MODE" = ip ]; then COMPOSE_FILES+=(-f deploy/compose.acme-ip.yml); fi
+    # Extra overlays, for a test harness or a site-specific tweak. Last, so
+    # they can override anything above.
+    local extra
+    for extra in ${PANEL_COMPOSE_EXTRA:-}; do COMPOSE_FILES+=(-f "$extra"); done
     return 0
 }
 
@@ -210,6 +242,25 @@ require_docker() {
 }
 
 # ------------------------------------------------------------------ asking --
+
+# cfg NAME — the value from the environment of this run, else from .env. Used
+# for the few settings (a private ACME server) that are given once and then
+# remembered.
+cfg() {
+    local v="${!1:-}"
+    [ -n "$v" ] || v="$(env_get "$1")"
+    printf '%s' "$v"
+}
+
+# acme_url_for ENV — the ACME directory for staging or production. The two
+# overrides exist for a private ACME server (and for the tests, which run
+# one); without them these are Let's Encrypt's.
+acme_url_for() {
+    case "$1" in
+        staging)    local o; o="$(cfg PANEL_ACME_URL_STAGING)";    printf '%s' "${o:-$LE_STAGING}" ;;
+        production) local o; o="$(cfg PANEL_ACME_URL_PRODUCTION)"; printf '%s' "${o:-$LE_PRODUCTION}" ;;
+    esac
+}
 
 valid_mode() { case "$1" in domain|ip|selfsigned|tunnel) return 0 ;; *) return 1 ;; esac; }
 
@@ -303,6 +354,45 @@ ask_email() {
     EMAIL="${EMAIL:-$(ask "Email for certificate expiry warnings (optional for an address)" "$(env_get PANEL_EMAIL)")}"
     if [ "$MODE" = domain ] && [ -z "$EMAIL" ]; then
         die "Let's Encrypt needs an address to warn you at"
+    fi
+}
+
+# ask_acme settles staging or production for the two modes that use Let's
+# Encrypt. Nothing is switched silently: an installation that was set up on
+# staging stays on staging until --production says otherwise.
+ask_acme() {
+    case "$MODE" in domain|ip) ;; *) ACME=""; return 0 ;; esac
+    local stored
+    stored="$(env_get PANEL_ACME)"
+    if [ -z "$ACME" ]; then
+        if [ -n "$stored" ]; then
+            ACME="$stored"
+        elif interactive; then
+            cat <<EOF
+
+${B}Let's Encrypt: dry run first?${N}
+Let's Encrypt has a staging CA for trying this out: the same steps with much
+higher limits, but its certificates are not trusted by any browser. The real
+CA limits how often you may ask (for addresses: 5 certificates a week), so a
+new setup is better tried on staging first. Later, ./install.sh --production
+moves to the real one and deletes nothing.
+
+EOF
+            if confirm_no "Use the staging CA for this run?"; then ACME=staging; else ACME=production; fi
+        else
+            ACME=production
+        fi
+    fi
+    case "$ACME" in staging|production) ;; *) die "unknown ACME environment '$ACME'" ;; esac
+    ACME_URL="$(acme_url_for "$ACME")"
+    ACME_CA_ROOT="$(cfg PANEL_ACME_CA_ROOT)"
+    if [ -n "$ACME_CA_ROOT" ]; then
+        [ -r "$ACME_CA_ROOT" ] || die "PANEL_ACME_CA_ROOT=$ACME_CA_ROOT is not a readable file"
+        ACME_CA_ROOT="$(readlink -f "$ACME_CA_ROOT")"
+    fi
+    if [ -n "$stored" ] && [ "$stored" != "$ACME" ]; then
+        say "Switching from $stored to $ACME. The $stored certificates, account and"
+        say "settings stay in their own volumes; nothing is deleted."
     fi
 }
 
@@ -403,6 +493,8 @@ ask_password() {
 # ----------------------------------------------------------- writing config --
 
 PANEL_URL=""
+ACME_URL=""
+ACME_CA_ROOT=""
 
 # url_host puts an IPv6 address in brackets, which a URL requires.
 url_host() {
@@ -433,6 +525,11 @@ write_config() {
     env_unset PANEL_EMAIL
     env_unset AUDITDSEC_WEB_LISTEN
     env_unset AUDITDSEC_WEB_PUBLIC_URL
+    env_unset PANEL_ACME
+    env_unset PANEL_ACME_URL
+    env_unset PANEL_ACME_SUFFIX
+    env_unset PANEL_HSTS
+    env_unset PANEL_ACME_CA_ROOT
 
     case "$MODE" in
         domain)
@@ -455,6 +552,27 @@ write_config() {
             PANEL_URL="http://127.0.0.1:$PORT"
             ;;
     esac
+    case "$MODE" in
+        domain|ip)
+            env_set PANEL_ACME "$ACME"
+            env_set PANEL_ACME_URL "$ACME_URL"
+            # Staging and production keep separate volumes: an account, a
+            # certificate and a renewal state from one must never be mistaken
+            # for the other's. Production keeps the plain names, so an
+            # installation made before staging existed is still production.
+            if [ "$ACME" = staging ]; then
+                env_set PANEL_ACME_SUFFIX -staging
+                # HSTS would remove the browser's "continue anyway" button on a
+                # certificate that is untrusted on purpose.
+                env_set PANEL_HSTS 'max-age=0'
+            fi
+            [ -z "$ACME_CA_ROOT" ] || env_set PANEL_ACME_CA_ROOT "$ACME_CA_ROOT"
+            local o
+            for o in PANEL_ACME_URL_STAGING PANEL_ACME_URL_PRODUCTION; do
+                [ -z "$(cfg "$o")" ] || env_set "$o" "$(cfg "$o")"
+            done
+            ;;
+    esac
     ok "saved; existing settings and the Telegram credentials were kept"
 }
 
@@ -469,15 +587,15 @@ hash_password() {
     if ! hash="$(printf '%s\n' "$PASSWORD" | $DOCKER run --rm -i "$IMAGE_TAG" hash-password -stdin 2>"$errfile")"; then
         warn "the agent refused the password: $(head -c 300 "$errfile")"
         rm -f "$errfile"
-        die "could not hash the password"
+        return 1
     fi
     rm -f "$errfile"
-    case "$hash" in 'pbkdf2-sha256$'*) ;; *) die "the hash looks wrong; not saving it" ;; esac
+    case "$hash" in 'pbkdf2-sha256$'*) ;; *) warn "the hash looks wrong; not saving it"; return 1 ;; esac
     env_set AUDITDSEC_WEB_PASSWORD_HASH "$hash"
     ok "stored as a hash; the password itself is not written anywhere"
 }
 
-# ---------------------------------------------------------------- certbot ---
+# ------------------------------------------------------------- the proxy ---
 
 # version_at_least A B — true when A >= B, comparing dotted numbers.
 version_at_least() {
@@ -485,48 +603,121 @@ version_at_least() {
     [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]
 }
 
-# issue_ip_certificate asks Let's Encrypt for the address's certificate before
-# the proxy starts, because Caddyfile.acme-ip refuses to load without files.
+# port_busy N — something is listening on the port.
+port_busy() {
+    if command -v ss >/dev/null 2>&1; then
+        [ -n "$(ss -H -ltn "sport = :$1" 2>/dev/null)" ]
+    else
+        (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+    fi
+}
+
+# release_port80 gets port 80 free for Let's Encrypt's challenge. The one
+# thing that may legitimately hold it is this installation's own proxy from an
+# earlier mode: a domain setup keeps port 80 open to redirect to HTTPS, and
+# the address setup needs the same port for a few seconds. That proxy is
+# stopped, not removed; the next `up` starts the right one again. Anything
+# else on port 80 is not ours to stop.
+release_port80() {
+    port_busy 80 || return 0
+    if [ "$($DOCKER inspect -f '{{.State.Running}}' auditdsec-caddy 2>/dev/null || true)" = true ]; then
+        say "Port 80 is held by the proxy of the previous setup; stopping it while the"
+        say "certificate is issued. It is started again below."
+        $DOCKER stop -t 10 auditdsec-caddy >/dev/null 2>&1 || warn "could not stop auditdsec-caddy"
+        sleep 1
+    fi
+    if port_busy 80; then
+        warn "port 80 is in use by something that is not this installation's proxy:"
+        ss -ltnp 'sport = :80' 2>/dev/null | sed 's/^/    /' >&2 || true
+        say "Let's Encrypt validates an address over port 80. Free it, or choose the SSH-tunnel option."
+        return 1
+    fi
+}
+
+# certtool runs the certificate helper in a throw-away certbot container that
+# has the same volumes as the real one.
+certtool() {
+    compose run --rm --no-deps -T --entrypoint python3 certbot /hooks/certtool.py "$@"
+}
+
+# issue_ip_certificate makes sure /certs holds a certificate the proxy can
+# rightly use, and issues one only when it does not. A file being there
+# proves nothing: it may be for another address, a staging certificate, an
+# expired one, or one whose key was lost.
 issue_ip_certificate() {
     [ "$MODE" = ip ] || return 0
-    step "Requesting a Let's Encrypt certificate for $SITE"
+    step "Certificate for $SITE (Let's Encrypt $ACME)"
 
-    if compose run --rm --no-deps --entrypoint sh certbot \
-            -c 'test -s /certs/fullchain.pem' >/dev/null 2>&1; then
-        ok "a certificate is already in place; the renewal loop keeps it current"
+    local reasons rc=0
+    if reasons="$(certtool check --cert /certs/fullchain.pem --key /certs/privkey.pem \
+            --site "$SITE" --acme "$ACME" --directory "$ACME_URL" --meta /certs/meta.json 2>/dev/null)"; then
+        ok "the certificate already in place fits: this address, still valid, issued by this CA, key matches"
+        return 0
+    else
+        rc=$?
+    fi
+    if [ "$rc" != 3 ]; then
+        warn "could not inspect the certificate (exit $rc). Is the certbot image available? (CERTBOT_IMAGE)"
+        return 1
+    fi
+    case "$reasons" in
+        *"no usable certificate file"*) say "No certificate yet." ;;
+        *)
+            say "The certificate that is there cannot be reused:"
+            printf '%s\n' "$reasons" | sed 's/^/  - /'
+            ;;
+    esac
+
+    # certbot's own copy may be fine when only /certs was lost or is stale.
+    if certtool adopt >/dev/null 2>&1; then
+        ok "certbot already held a fitting certificate; copied it into place"
         return 0
     fi
 
     local version
-    version="$(compose run --rm --no-deps --entrypoint certbot certbot --version 2>/dev/null \
+    version="$(compose run --rm --no-deps -T --entrypoint certbot certbot --version 2>/dev/null \
         | awk '{print $2}' | tail -n 1 || true)"
-    [ -n "$version" ] || die "cannot run the certbot image; check the network and CERTBOT_IMAGE"
+    [ -n "$version" ] || { warn "cannot run the certbot image; check the network and CERTBOT_IMAGE"; return 1; }
     version_at_least "$version" 5.3 \
-        || die "certbot $version cannot issue certificates for addresses; 5.3 or newer is needed (set CERTBOT_IMAGE)"
+        || { warn "certbot $version cannot issue certificates for addresses; 5.3 or newer is needed (set CERTBOT_IMAGE)"; return 1; }
 
-    local extra=()
-    [ "$STAGING" = yes ] && extra+=(--staging)
-    if [ -n "$EMAIL" ]; then extra+=(-m "$EMAIL"); else extra+=(--register-unsafely-without-email); fi
+    release_port80 || return 1
 
-    say "Let's Encrypt will connect to port 80 on this address. Nothing may be using it."
-    if compose run --rm --no-deps --entrypoint certbot certbot \
-            certonly --standalone --non-interactive --agree-tos \
-            --cert-name panel --preferred-profile shortlived \
-            --ip-address "$SITE" --deploy-hook /hooks/deploy.sh \
-            "${extra[@]}"; then
-        ok "certificate issued"
+    local args=(certonly --standalone --non-interactive --agree-tos
+        --server "$ACME_URL" --cert-name panel --preferred-profile shortlived
+        --ip-address "$SITE" --deploy-hook /hooks/deploy.sh)
+    if [ -n "$EMAIL" ]; then args+=(-m "$EMAIL"); else args+=(--register-unsafely-without-email); fi
+    # An existing lineage that is not fit (another address, nearly expired) has
+    # to be replaced even though certbot would call it "not yet due".
+    if compose run --rm --no-deps -T --entrypoint sh certbot -c 'test -s /etc/letsencrypt/renewal/panel.conf' >/dev/null 2>&1; then
+        args+=(--force-renewal)
+    fi
+
+    say "Let's Encrypt ($ACME) will connect to port 80 on this address. Nothing else may be using it."
+    # PANEL_NO_RELOAD: the proxy is not running yet, so the hook only copies.
+    if compose run --rm --no-deps -T -e PANEL_NO_RELOAD=1 --entrypoint certbot certbot "${args[@]}"; then
+        :
     else
-        cat >&2 <<EOF
+        cat >&2 <<EOT
 
 ${R}The certificate was not issued.${N} The usual reasons, in order of likelihood:
   - port 80 is not reachable from the internet at $SITE
     (a firewall, the provider's security group, or something else listening)
   - $SITE is not this server's public address
-  - Let's Encrypt's limit of 5 certificates per address per week was reached
-Fix that and run ./install.sh again; nothing else needs redoing. If port 80
-cannot be opened, the self-signed option works without it.
-EOF
-        exit 1
+  - the CA's limit was reached (production: 5 certificates per address per week);
+    try --staging to test the rest without spending it
+Nothing else needs redoing: fix that and run ./install.sh again.
+EOT
+        return 1
+    fi
+
+    if reasons="$(certtool check --cert /certs/fullchain.pem --key /certs/privkey.pem \
+            --site "$SITE" --acme "$ACME" --directory "$ACME_URL" --meta /certs/meta.json 2>/dev/null)"; then
+        ok "certificate issued and checked: this address, valid, key matches"
+    else
+        warn "certbot reported success, but the certificate in place is not fit:"
+        printf '%s\n' "$reasons" | sed 's/^/  - /' >&2
+        return 1
     fi
 }
 
@@ -534,20 +725,93 @@ EOF
 
 start_stack() {
     step "Building and starting"
-    compose build
-    hash_password
-    issue_ip_certificate
+    if [ "$NO_BUILD" = yes ]; then
+        $DOCKER image inspect "$IMAGE_TAG" >/dev/null 2>&1 \
+            || { warn "--no-build was given but the image $IMAGE_TAG does not exist"; return 1; }
+    else
+        compose build || { warn "the image did not build"; return 1; }
+    fi
+    hash_password || return 1
+    issue_ip_certificate || return 1
     if [ "$DO_START" != yes ]; then say "(--no-start: not starting)"; return 0; fi
-    compose up -d --remove-orphans
+    local up=(up -d --remove-orphans)
+    [ "$NO_BUILD" = yes ] && up+=(--no-build)
+    compose "${up[@]}" || { warn "docker compose up failed"; return 1; }
+}
+
+# ------------------------------------------------------- last known good ---
+
+LAST_GOOD="${ENV_FILE}.last-good"
+RESTORED=no
+FAIL_REASON=""
+
+# save_last_good keeps the configuration that has just been shown to work, so
+# that a later attempt which fails can put it back. It holds the same secrets
+# as .env and has the same permissions.
+save_last_good() {
+    local tmp
+    tmp="$(mktemp "${LAST_GOOD}.XXXXXX")"
+    cp "$ENV_FILE" "$tmp"
+    chmod 0600 "$tmp"
+    mv "$tmp" "$LAST_GOOD"
+}
+
+# compute_panel_url derives the link from the mode and the site.
+compute_panel_url() {
+    case "$MODE" in
+        tunnel) PANEL_URL="http://127.0.0.1:$PORT" ;;
+        *)      PANEL_URL="https://$(url_host "$SITE")" ;;
+    esac
+}
+
+load_state_from_env() {
+    MODE="$(env_get PANEL_MODE)"
+    SITE="$(env_get PANEL_SITE)"; [ -n "$SITE" ] || SITE="$(env_get PANEL_DOMAIN)"
+    PORT="$(env_get PANEL_PORT)"; PORT="${PORT:-9477}"
+    ENFORCE="$(env_get PANEL_ENFORCE)"; ENFORCE="${ENFORCE:-no}"
+    LOGIN="$(env_get AUDITDSEC_WEB_LOGIN)"; LOGIN="${LOGIN:-admin}"
+    EMAIL="$(env_get PANEL_EMAIL)"
+    ACME="$(env_get PANEL_ACME)"
+    ACME_URL="$(env_get PANEL_ACME_URL)"
+    PASSWORD=""
+    compute_panel_url
+    build_compose_files
+}
+
+# restore_last_good puts the last verified configuration back and starts it.
+# The failed one is kept beside it as .env.failed for diagnosis; no volume is
+# touched, so certificates and stored events are exactly as they were.
+restore_last_good() {
+    [ -s "$LAST_GOOD" ] || return 1
+    step "Restoring the last configuration that was verified working"
+    if [ -f "$ENV_FILE" ]; then
+        cp "$ENV_FILE" "${ENV_FILE}.failed"
+        chmod 0600 "${ENV_FILE}.failed"
+    fi
+    cp "$LAST_GOOD" "$ENV_FILE"
+    chmod 0600 "$ENV_FILE"
+    load_state_from_env
+    local up=(up -d --remove-orphans)
+    [ "$NO_BUILD" = yes ] && up+=(--no-build)
+    compose "${up[@]}" || { warn "could not start the previous configuration either"; return 1; }
+    RESTORED=yes
+    ok "started again: mode $MODE${SITE:+, $SITE}${ACME:+, $ACME}"
 }
 
 # ------------------------------------------------------------ verification ---
 
-CURL_ARGS=()
 TLS_STATE=""
 LOGIN_STATE=""
+LOGIN_ROUTE=""
 PAGE_STATE=""
+RENEW_STATE=""
 TLS_UNTRUSTED=no
+TLS_TRUSTED=no
+RELOAD_PROBLEM=no
+CA_TMP=""
+
+cleanup() { [ -z "$CA_TMP" ] || rm -f "$CA_TMP"; }
+trap cleanup EXIT
 
 # json_escape is enough for a password: backslash and quote are the only
 # printable characters that break a JSON string.
@@ -566,17 +830,62 @@ compose_prefix() {
     printf '%s' "$base"
 }
 
+# wait_for_page URL — waits for the sign-in page to answer. It sends no
+# credentials, only a GET for the page itself, which is why it may skip
+# certificate verification (-k) so that "the proxy is up but its certificate
+# is wrong" can be told from "nothing answers".
 wait_for_page() {
-    local url="$1" code tries=0
+    local url="$1" code tries=0 k=()
+    case "$url" in https://*) k=(-k) ;; esac
     while [ "$tries" -lt 45 ]; do
         tries=$((tries + 1))
-        code="$(curl -sS --noproxy '*' "${CURL_ARGS[@]}" -o /dev/null -w '%{http_code}' --max-time 4 "$url/" 2>/dev/null || true)"
+        code="$(curl -sS --noproxy '*' "${k[@]}" -o /dev/null -w '%{http_code}' --max-time 4 "$url/" 2>/dev/null || true)"
         [ "$code" = 200 ] && return 0
         sleep 2
     done
     return 1
 }
 
+# fetch_internal_ca copies the root certificate of the proxy's own CA out of
+# the container, for the self-signed mode. Verifying against exactly that one
+# certificate is verification: the connection is shown to end at this
+# installation's proxy. Browsers do not know the CA, which is why they warn.
+fetch_internal_ca() {
+    local tries=0
+    CA_TMP="$(mktemp)"
+    while [ "$tries" -lt 10 ]; do
+        tries=$((tries + 1))
+        if compose cp caddy:/data/caddy/pki/authorities/local/root.crt "$CA_TMP" >/dev/null 2>&1 && [ -s "$CA_TMP" ]; then
+            printf '%s' "$CA_TMP"
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# post_login URL [CURL TRUST ARGS...] — prints the reply. It refuses to run
+# when asked to skip certificate verification: a password is never sent over a
+# connection whose other end was not verified.
+post_login() {
+    local url="$1" a body
+    shift
+    for a in "$@"; do
+        case "$a" in
+            --insecure|--proxy-insecure|-k|-[a-zA-Z]*k*)
+                die "internal error: refusing to send a password without verifying TLS" ;;
+        esac
+    done
+    body="{\"login\":\"$(json_escape "$LOGIN")\",\"password\":\"$(json_escape "$PASSWORD")\"}"
+    printf '%s' "$body" | curl -sS --noproxy '*' "$@" --max-time 15 -X POST \
+        -H 'X-Requested-With: auditdsec' -H 'Content-Type: application/json' \
+        --data-binary @- "$url/api/v1/login" 2>/dev/null || true
+}
+
+# verify_stack returns 0 when everything checked out, 1 when the panel is not
+# working (a reason to put the previous configuration back) and 2 when it
+# works but something a person must look at is wrong (an untrusted production
+# certificate, a certificate that is on disk but not being served).
 verify_stack() {
     if [ "$DO_START" != yes ] || [ "$DO_VERIFY" != yes ]; then
         PAGE_STATE="not checked"
@@ -584,41 +893,54 @@ verify_stack() {
     fi
     step "Checking that the panel actually answers"
 
-    local url="$PANEL_URL"
-    # Whether the page answers and whether its certificate is trusted are two
-    # separate facts. Waiting and signing in ignore trust (-k), so that an
-    # untrusted certificate is reported as exactly that and not as a panel
-    # that is down; trust is judged on its own below.
-    CURL_ARGS=()
-    case "$MODE" in domain|ip|selfsigned) CURL_ARGS=(-k) ;; esac
+    local url="$PANEL_URL" local_url="http://127.0.0.1:$PORT" soft=0
+    local trust=()      # curl arguments naming the CA to verify against
 
     if ! wait_for_page "$url"; then
         PAGE_STATE="NOT ANSWERING"
-        warn "the sign-in page at $url did not answer within 90 seconds."
+        FAIL_REASON="the sign-in page at $url did not answer within 90 seconds"
+        warn "$FAIL_REASON."
         say "Look at: $(compose_prefix) logs --tail 80 auditdsec"
+        case "$MODE" in domain|ip|selfsigned) say "      and: $(compose_prefix) logs --tail 40 caddy" ;; esac
         return 1
     fi
     PAGE_STATE="answers"
     ok "the sign-in page answers at $url"
 
-    # TLS: curl without -k both proves the chain validates from this machine
-    # and lets us read when the certificate ends.
+    # Trust: curl WITHOUT -k, against the system store, or against the one CA
+    # the person named (--cacert), or, for the self-signed mode, against the
+    # root of the proxy's own CA. This proves the chain, the name or address,
+    # and the dates all at once.
     case "$MODE" in
-        domain|ip)
-            local verify
-            verify="$(curl -sS --noproxy '*' -o /dev/null -w '%{ssl_verify_result}' --max-time 6 "$url/" 2>/dev/null || echo 99)"
+        domain|ip|selfsigned)
+            local ca="$CACERT" verify
+            if [ -z "$ca" ] && [ "$MODE" = selfsigned ]; then ca="$(fetch_internal_ca || true)"; fi
+            [ -z "$ca" ] || trust=(--cacert "$ca")
+            verify="$(curl -sS --noproxy '*' "${trust[@]}" -o /dev/null -w '%{ssl_verify_result}' --max-time 6 "$url/" 2>/dev/null || true)"
+            verify="${verify:-99}"
             if [ "$verify" = 0 ]; then
-                TLS_STATE="valid and trusted (checked from this server)"
-                ok "the certificate is trusted"
+                TLS_TRUSTED=yes
+                case "$MODE" in
+                    selfsigned) TLS_STATE="encrypted, and verified against this server's own CA (browsers do not know it, so they warn)" ;;
+                    *) if [ -n "$CACERT" ]; then TLS_STATE="valid, verified against the CA file you gave"
+                       else TLS_STATE="valid and trusted (checked from this server against its CA store)"; fi ;;
+                esac
+                ok "the certificate verifies"
             else
-                TLS_STATE="NOT trusted (curl verify code $verify)"
-                [ "$STAGING" = yes ] || TLS_UNTRUSTED=yes
-                warn "the certificate did not validate from here; a browser would warn too."
-                if [ "$STAGING" = yes ]; then say "That is expected with --staging: staging certificates are never trusted."; fi
+                case "$MODE" in
+                    selfsigned) TLS_STATE="encrypted, but this installer could not verify it (curl code $verify)" ;;
+                    *)
+                        if [ "$ACME" = staging ]; then
+                            TLS_STATE="STAGING certificate: not trusted, as expected (curl code $verify)"
+                        else
+                            TLS_STATE="NOT trusted (curl code $verify)"
+                            TLS_UNTRUSTED=yes
+                        fi ;;
+                esac
+                warn "the certificate did not verify from here (curl code $verify)."
             fi
             ;;
-        selfsigned) TLS_STATE="self-signed: encrypted, but no browser trusts it" ;;
-        tunnel)     TLS_STATE="none needed: the connection runs inside the SSH tunnel" ;;
+        tunnel) TLS_STATE="none needed: the connection runs inside the SSH tunnel" ;;
     esac
 
     if [ "$MODE" != tunnel ] && command -v openssl >/dev/null 2>&1; then
@@ -630,18 +952,31 @@ verify_stack() {
 
     # Sign in with the password just chosen. This proves the stored hash
     # survived .env and Compose intact, which is the step that fails silently
-    # when a $ is lost on the way.
+    # when a $ is lost on the way. WHERE it is sent depends on trust: over the
+    # public address only when its certificate verified; otherwise to the
+    # agent's loopback address on this machine, which never leaves it.
     if [ -n "$PASSWORD" ]; then
-        local body reply
-        body="{\"login\":\"$(json_escape "$LOGIN")\",\"password\":\"$(json_escape "$PASSWORD")\"}"
-        reply="$(printf '%s' "$body" | curl -sS --noproxy '*' "${CURL_ARGS[@]}" --max-time 15 -X POST \
-            -H 'X-Requested-With: auditdsec' -H 'Content-Type: application/json' \
-            --data-binary @- "$url/api/v1/login" 2>/dev/null || true)"
+        local target reply
+        case "$MODE" in
+            tunnel)
+                target="$local_url"; trust=()
+                LOGIN_ROUTE="on the server's own loopback address (the tunnel is made from your computer)" ;;
+            *)
+                if [ "$TLS_TRUSTED" = yes ]; then
+                    target="$url"
+                    LOGIN_ROUTE="over the verified TLS connection to $url"
+                else
+                    target="$local_url"; trust=()
+                    LOGIN_ROUTE="on this server's loopback address ONLY: the certificate at $url could not be verified, so the password was not sent there"
+                fi ;;
+        esac
+        reply="$(post_login "$target" "${trust[@]}")"
         case "$reply" in
-            *'"token"'*) LOGIN_STATE="signed in with the chosen password"; ok "$LOGIN_STATE" ;;
+            *'"token"'*) LOGIN_STATE="signed in with the chosen password"; ok "$LOGIN_STATE, $LOGIN_ROUTE" ;;
             *)
                 LOGIN_STATE="SIGN-IN FAILED"
-                warn "the panel is up but refused the password that was just set."
+                FAIL_REASON="the panel is up but refused the password that was just set"
+                warn "$FAIL_REASON."
                 say "Look at: $(compose_prefix) logs --tail 80 auditdsec"
                 return 1
                 ;;
@@ -649,10 +984,31 @@ verify_stack() {
     else
         LOGIN_STATE="not tested (the earlier password was kept)"
     fi
-    # A certificate that does not validate defeats the point of the two modes
+
+    # In address mode the renewal loop owns the certificate. Ask it whether
+    # the file it manages is the one port 443 serves right now.
+    if [ "$MODE" = ip ]; then
+        local st tries=0
+        while [ "$tries" -lt 8 ]; do
+            tries=$((tries + 1))
+            if st="$(compose exec -T certbot python3 /hooks/certtool.py status 2>&1)"; then break; fi
+            sleep 3
+        done
+        if [ "$st" = ok ]; then
+            RENEW_STATE="the certificate on disk is the one port 443 serves; the renewal loop is healthy"
+            ok "$RENEW_STATE"
+        else
+            RENEW_STATE="PROBLEM: $st"
+            RELOAD_PROBLEM=yes
+            warn "the renewal loop reports: $st"
+            soft=2
+        fi
+    fi
+
+    # A certificate that does not verify defeats the point of the two modes
     # that exist to get a trusted one, so it is a failure, not a footnote.
-    [ "$TLS_UNTRUSTED" = no ] || return 1
-    return 0
+    [ "$TLS_UNTRUSTED" = no ] || soft=2
+    return "$soft"
 }
 
 # ssh_command works out the address the person actually reaches this server
@@ -681,16 +1037,27 @@ summary() {
     local line
     line="$(printf '%*s' 66 '' | tr ' ' '-')"
     printf '\n%s\n' "$line"
-    if [ "$PAGE_STATE" = "NOT ANSWERING" ] || [ "$LOGIN_STATE" = "SIGN-IN FAILED" ]; then
+    if [ "$RESTORED" = yes ]; then
+        printf '%sThe new settings did not work; the previous ones are running again.%s\n' "$R$B" "$N"
+    elif [ "$PAGE_STATE" = "NOT ANSWERING" ] || [ "$LOGIN_STATE" = "SIGN-IN FAILED" ]; then
         printf '%sInstalled, but the panel is not working.%s\n' "$R$B" "$N"
     elif [ "$TLS_UNTRUSTED" = yes ]; then
         printf '%sThe panel is up, but its certificate is NOT trusted.%s\n' "$Y$B" "$N"
+    elif [ "$RELOAD_PROBLEM" = yes ]; then
+        printf '%sThe panel is up, but the renewal loop has a problem.%s\n' "$Y$B" "$N"
     elif [ "$DO_START" != yes ]; then
         printf '%sConfigured, not started (--no-start).%s\n' "$B" "$N"
+    elif [ "$ACME" = staging ]; then
+        printf '%sThe panel is up on the Let'"'"'s Encrypt STAGING CA: a dry run.%s\n' "$Y$B" "$N"
     else
         printf '%sThe panel is up.%s\n' "$G$B" "$N"
     fi
     printf '%s\n\n' "$line"
+
+    if [ -n "$FAIL_REASON" ] && [ "$RESTORED" = yes ]; then
+        printf '  What went wrong: %s\n' "$FAIL_REASON"
+        printf '  The failed settings are in %s.failed (same permissions as %s).\n\n' "$ENV_FILE" "$ENV_FILE"
+    fi
 
     if [ "$MODE" = tunnel ]; then
         printf '  1. On your own computer, run and leave open:\n\n       %s\n\n' "$(ssh_command)"
@@ -701,21 +1068,34 @@ summary() {
     printf '  Login:    %s   (and the password you set; only its hash is stored)\n' "$LOGIN"
     printf '  Page:     %s\n' "${PAGE_STATE:-not checked}"
     printf '  Sign-in:  %s\n' "${LOGIN_STATE:-not checked}"
+    [ -z "$LOGIN_ROUTE" ] || printf '            sent %s\n' "$LOGIN_ROUTE"
     printf '  TLS:      %s\n' "${TLS_STATE:-not checked}"
+    [ -z "$RENEW_STATE" ] || printf '  Renewal:  %s\n' "$RENEW_STATE"
 
     case "$MODE" in
         domain)
-            printf '  Renewal:  Caddy renews the certificate itself, about 30 days before it ends.\n' ;;
+            printf '            Caddy renews the certificate itself, about 30 days before it ends.\n' ;;
         ip)
-            printf '  Renewal:  certificates for addresses last about 6 days. The certbot container\n'
-            printf '            checks twice a day and reloads Caddy after each renewal. Port 80 must\n'
-            printf '            stay open and unused for that to keep working.\n' ;;
+            printf '            certificates for addresses last about 6 days. The certbot container checks\n'
+            printf '            twice a day, retries a failed renewal after an hour, and every minute makes\n'
+            printf '            sure port 443 serves the certificate on disk. Port 80 must stay open and\n'
+            printf '            unused for that to keep working.\n' ;;
         selfsigned)
             printf '  Trust:    each browser warns once. Before accepting, compare the fingerprint it\n'
             printf '            shows with the one this server holds:\n'
             printf '              printf "" | openssl s_client -connect %s 2>/dev/null | openssl x509 -noout -fingerprint -sha256\n' "$(hostport "$SITE" 443)"
             printf '            A real domain or public address needs no exception at all.\n' ;;
     esac
+
+    if [ "$ACME" = staging ] && [ "$RESTORED" != yes ]; then
+        printf '\n  %sSTAGING.%s Browsers do not trust this certificate, on purpose. A working staging run\n' "$Y$B" "$N"
+        printf '  shows the steps work; it does NOT show that the real CA will issue a certificate\n'
+        printf '  for this %s (that is a separate request with its own limits).\n' "$([ "$MODE" = ip ] && echo address || echo domain)"
+        printf '  When ready, switch with:  ./install.sh --production\n'
+        printf '  Nothing is deleted: the staging account, certificates and volumes stay where they are.\n'
+    elif [ "$ACME" = production ] && [ "$TLS_TRUSTED" = yes ] && [ "$RESTORED" != yes ]; then
+        printf '\n  Production certificate: issued by the real CA and verified from this server.\n'
+    fi
 
     if [ "$DO_START" = yes ] && [ "$PAGE_STATE" = answers ]; then
         if [ "$MODE" = tunnel ]; then
@@ -728,16 +1108,21 @@ summary() {
 
     if [ "$TLS_UNTRUSTED" = yes ]; then
         printf '\n  Browsers will warn. Likely causes: the name or address in the certificate is not the one in\n'
-        printf '  the link, the issuance failed silently (see the certbot / caddy logs below), or the clock\n'
-        printf '  on this machine is wrong. Nothing was lost: fix it and run ./install.sh again.\n'
+        printf '  the link, the issuance failed silently (see the logs below), or the clock on this machine is\n'
+        printf '  wrong. Nothing was lost: fix it and run ./install.sh again, or put the last working\n'
+        printf '  configuration back with ./install.sh --restore.\n'
     fi
 
     printf '\n  Diagnostics:\n'
     printf '    %s ps\n' "$(compose_prefix)"
     printf '    %s logs --tail 80 auditdsec\n' "$(compose_prefix)"
     case "$MODE" in domain|ip|selfsigned) printf '    %s logs --tail 40 caddy\n' "$(compose_prefix)" ;; esac
-    [ "$MODE" = ip ] && printf '    %s logs --tail 40 certbot\n' "$(compose_prefix)"
+    if [ "$MODE" = ip ]; then
+        printf '    %s logs --tail 40 certbot\n' "$(compose_prefix)"
+        printf '    %s exec certbot python3 /hooks/certtool.py status\n' "$(compose_prefix)"
+    fi
     printf '\n  To change anything, run ./install.sh again: data, certificates and settings are kept.\n'
+    [ ! -s "$LAST_GOOD" ] || printf '  To go back to the last verified configuration: ./install.sh --restore\n'
     printf '%s\n' "$line"
 }
 
@@ -745,9 +1130,20 @@ summary() {
 
 main() {
     require_docker
+
+    if [ "$RESTORE" = yes ]; then
+        [ -s "$LAST_GOOD" ] || die "there is no verified configuration to go back to ($LAST_GOOD)"
+        restore_last_good || die "the previous configuration would not start"
+        local rrc=0
+        verify_stack || rrc=$?
+        summary
+        return "$rrc"
+    fi
+
     choose_mode
     ask_site
     ask_email
+    ask_acme
     ask_telegram
     ask_login
     ask_enforce
@@ -755,12 +1151,40 @@ main() {
 
     write_config
     build_compose_files
-    start_stack
 
-    local failed=0
-    verify_stack || failed=1
+    local vrc=0 started=yes
+    if ! start_stack; then
+        started=no
+        FAIL_REASON="${FAIL_REASON:-the stack could not be started}"
+    else
+        verify_stack || vrc=$?
+    fi
+
+    # The new settings do not work. When there is a configuration that did,
+    # put it back rather than leave a person with nothing; the failed one is
+    # kept for diagnosis.
+    if [ "$started" = no ] || [ "$vrc" = 1 ]; then
+        if [ -s "$LAST_GOOD" ] && ! cmp -s "$ENV_FILE" "$LAST_GOOD"; then
+            local reason="$FAIL_REASON"
+            if restore_last_good; then
+                TLS_UNTRUSTED=no; LOGIN_STATE=""; LOGIN_ROUTE=""; TLS_STATE=""; RENEW_STATE=""; RELOAD_PROBLEM=no
+                PAGE_STATE=""; PASSWORD=""
+                verify_stack || true
+                FAIL_REASON="$reason"
+            fi
+        else
+            say ""
+            say "There is no earlier working configuration to go back to."
+        fi
+        summary
+        return 1
+    fi
+
+    if [ "$DO_START" = yes ] && [ "$DO_VERIFY" = yes ] && [ "$vrc" = 0 ]; then
+        save_last_good
+    fi
     summary
-    return "$failed"
+    return "$vrc"
 }
 
 main

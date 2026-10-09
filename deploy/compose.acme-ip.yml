@@ -14,17 +14,28 @@
 # every few days. Nothing else may use port 80 — Caddyfile.acme-ip leaves it
 # alone for exactly this reason.
 #
-# First issuance (install.sh runs this; certbot 5.3 or newer is required):
+# STAGING AND PRODUCTION ARE KEPT APART. The staging CA issues certificates no
+# browser trusts and has far higher limits; production has the opposite. They
+# must never share an account, a lineage or a /certs directory, or a staging
+# certificate could be reused as if it were real. PANEL_ACME_SUFFIX ("" or
+# "-staging", written by ./install.sh) selects a separate set of volumes, so
+# moving from staging to production starts clean and deletes nothing: the
+# staging volumes stay until you remove them yourself.
 #
-#   docker compose ... run --rm --entrypoint certbot certbot \
+# The certbot image is pinned to the version the issue / renew / deploy-hook
+# path was tested with (CERTBOT_IMAGE overrides it; 5.3 is the oldest that
+# knows --ip-address).
+#
+# First issuance, done by install.sh before the proxy starts:
+#
+#   docker compose ... run --rm --no-deps -e PANEL_NO_RELOAD=1 --entrypoint certbot certbot \
 #     certonly --standalone --non-interactive --agree-tos -m you@example.com \
+#     --server "$PANEL_ACME_URL" --cert-name panel \
 #     --preferred-profile shortlived --ip-address 203.0.113.4 \
 #     --deploy-hook /hooks/deploy.sh
-#
-# After that the loop below renews it and the hook reloads Caddy.
 services:
   certbot:
-    image: ${CERTBOT_IMAGE:-certbot/certbot:latest}
+    image: ${CERTBOT_IMAGE:-certbot/certbot:v5.8.0}
     container_name: auditdsec-certbot
     restart: unless-stopped
     network_mode: host
@@ -34,24 +45,33 @@ services:
     mem_limit: 256m
     environment:
       PANEL_SITE: ${PANEL_SITE:-${PANEL_DOMAIN:?set PANEL_SITE in .env, or run ./install.sh}}
+      PANEL_ACME: ${PANEL_ACME:-production}
+      PANEL_ACME_URL: ${PANEL_ACME_URL:-https://acme-v02.api.letsencrypt.org/directory}
+      # Only for a private ACME server; empty means the normal trust store.
+      REQUESTS_CA_BUNDLE: ${PANEL_ACME_CA_ROOT:+/acme-ca.pem}
     volumes:
-      - letsencrypt:/etc/letsencrypt
-      - letsencrypt-lib:/var/lib/letsencrypt
-      - panel-certs:/certs
+      - letsencrypt${PANEL_ACME_SUFFIX:-}:/etc/letsencrypt
+      - letsencrypt-lib${PANEL_ACME_SUFFIX:-}:/var/lib/letsencrypt
+      - panel-certs${PANEL_ACME_SUFFIX:-}:/certs
       - ./deploy/certbot-deploy-hook.sh:/hooks/deploy.sh:ro
+      - ./deploy/certtool.py:/hooks/certtool.py:ro
+      - ./deploy/certbot-loop.sh:/hooks/loop.sh:ro
       # Posted back to Caddy's admin API after a renewal, to make it read the
       # new certificate without a restart.
       - ${PANEL_CADDYFILE:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro
-    # A six-day certificate is renewed when about two days are left, so
-    # checking twice a day leaves room for several failures.
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        trap 'exit 0' TERM INT
-        while :; do
-          certbot renew --standalone --non-interactive --deploy-hook /hooks/deploy.sh || true
-          sleep 43200 & wait $${!}
-        done
+      - ${PANEL_ACME_CA_ROOT:-/dev/null}:/acme-ca.pem:ro
+    # Renews twice a day, retries a failed renewal after an hour, and every
+    # minute checks that port 443 serves the certificate that is on disk.
+    entrypoint: ["/bin/sh", "/hooks/loop.sh"]
+    # `docker compose ps` shows "unhealthy" when the certificate on disk is not
+    # the one being served, or has expired: a reload that failed is visible
+    # there, not only in the log.
+    healthcheck:
+      test: ["CMD", "python3", "/hooks/certtool.py", "status"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 120s
     logging:
       driver: json-file
       options:
@@ -60,5 +80,8 @@ services:
 
 volumes:
   letsencrypt:
+  letsencrypt-staging:
   letsencrypt-lib:
+  letsencrypt-lib-staging:
   panel-certs:
+  panel-certs-staging:

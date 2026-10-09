@@ -45,15 +45,23 @@ services:
       PANEL_SITE: ${PANEL_SITE:-${PANEL_DOMAIN:?set PANEL_SITE in .env, or run ./install.sh}}
       PANEL_EMAIL: ${PANEL_EMAIL:-}
       PANEL_UPSTREAM: 127.0.0.1:${PANEL_PORT:-9477}
+      # Which ACME directory Caddy asks (domain mode), and the HSTS value. Both
+      # are set by ./install.sh --staging and cleared by --production.
+      PANEL_ACME_URL: ${PANEL_ACME_URL:-https://acme-v02.api.letsencrypt.org/directory}
+      PANEL_HSTS: ${PANEL_HSTS:-max-age=31536000; includeSubDomains}
+      # Only for a private ACME server; empty means the normal trust store.
+      SSL_CERT_FILE: ${PANEL_ACME_CA_ROOT:+/acme-ca.pem}
     volumes:
       - ${PANEL_CADDYFILE:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro
       # Certificates from the certbot container, used only by Caddyfile.acme-ip.
-      - panel-certs:/certs:ro
+      - panel-certs${PANEL_ACME_SUFFIX:-}:/certs:ro
       # Caddy's own certificates and account key. Losing this volume means
       # asking Let's Encrypt for a new certificate, which is rate limited.
-      - caddy-data:/data
-      - caddy-config:/config
+      # Staging and production use separate ones (PANEL_ACME_SUFFIX).
+      - caddy-data${PANEL_ACME_SUFFIX:-}:/data
+      - caddy-config${PANEL_ACME_SUFFIX:-}:/config
       - caddy-logs:/var/log/caddy
+      - ${PANEL_ACME_CA_ROOT:-/dev/null}:/acme-ca.pem:ro
     logging:
       driver: json-file
       options:
@@ -62,6 +70,9 @@ services:
 
 volumes:
   caddy-data:
+  caddy-data-staging:
   caddy-config:
+  caddy-config-staging:
   caddy-logs:
   panel-certs:
+  panel-certs-staging:

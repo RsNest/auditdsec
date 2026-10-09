@@ -6,6 +6,12 @@
 #   PANEL_EMAIL     where Let's Encrypt sends expiry warnings
 #   PANEL_UPSTREAM  where the agent listens, 127.0.0.1:9477
 #
+#   PANEL_ACME_URL  the ACME directory; Let's Encrypt production when unset.
+#                   ./install.sh --staging points it at the staging CA.
+#   PANEL_HSTS      the Strict-Transport-Security value. Staging certificates
+#                   are untrusted, and HSTS would take away the browser's
+#                   "continue anyway" button, so staging sets max-age=0.
+#
 # Ports 80 and 443 must be open: 80 answers the certificate challenge and
 # redirects to HTTPS, 443 serves the panel.
 #
@@ -14,6 +20,7 @@
 
 {
 	email {$PANEL_EMAIL}
+	acme_ca {$PANEL_ACME_URL:https://acme-v02.api.letsencrypt.org/directory}
 	admin 127.0.0.1:2019
 }
 
@@ -23,7 +30,7 @@
 	header {
 		# Served over TLS from here on, so the browser should never try plain
 		# HTTP for this name again.
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		Strict-Transport-Security "{$PANEL_HSTS:max-age=31536000; includeSubDomains}"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"

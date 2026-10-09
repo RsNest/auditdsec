@@ -13,6 +13,7 @@ rm -rf "$E2E_STATE"; mkdir -p "$E2E_STATE/work"
 (cd "$REPO" && CGO_ENABLED=0 go build -o "$E2E_STATE/auditdsec" ./cmd/auditdsec) || exit 1
 cd "$E2E_STATE/work" || exit 1
 printf "AUDITDSEC_TG_TOKEN='123:abc'\nAUDITDSEC_TG_CHAT_ID='42'\n" > .env
+# shellcheck disable=SC2016
 printf 'a-long-test-password-with-$dollar"quote\\slash\n' > "$E2E_STATE/pw.txt"
 export DOCKER="$REPO/scripts/e2e/fakedocker" E2E_REPO="$E2E_STATE/work"
 ./install.sh --mode "$mode" --password-file "$E2E_STATE/pw.txt" --yes --no-enforce --port "${PANEL_PORT:-19477}" "$@"
