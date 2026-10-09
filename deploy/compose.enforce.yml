@@ -1,0 +1,30 @@
+# Enforcement: let the agent actually block the addresses it decides to ban.
+#
+#   docker compose -f docker-compose.yml -f deploy/compose.enforce.yml up -d --build
+#
+# What this changes, and why each part is needed:
+#
+#   target: enforce    the image gains the `nft` command line; the default
+#                      scratch image has no binaries besides the agent
+#   network_mode: host the firewall rules have to live in the host's network
+#                      namespace, not in the container's private one
+#   NET_ADMIN          the capability that permits changing those rules
+#
+# Everything the agent creates lives in its own nftables table, "inet
+# auditdsec", so ufw, firewalld and Docker's own chains are untouched. To
+# inspect or remove it by hand:
+#
+#   nft list table inet auditdsec
+#   nft delete table inet auditdsec
+#
+# Try it with AUDITDSEC_BAN_DRY_RUN first if you are nervous: decisions are
+# logged with the exact nft command and nothing is blocked.
+services:
+  auditdsec:
+    build:
+      target: enforce
+    network_mode: host
+    cap_drop: ["ALL"]
+    cap_add: ["NET_ADMIN"]
+    environment:
+      AUDITDSEC_BAN_BACKEND: nftables

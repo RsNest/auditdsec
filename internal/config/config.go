@@ -58,12 +58,43 @@ type HeartbeatConfig struct {
 	CheckEvery time.Duration
 }
 
-// DetectConfig is the brute-force detector, which lands in v0.2. The settings
-// are parsed now so an existing config file keeps working then.
+// DetectConfig is the brute-force detector.
 type DetectConfig struct {
 	Enabled       bool
 	Window        time.Duration
 	FailThreshold int
+	// SuccessAfterFailures is how many failures from one address make a later
+	// success from it suspicious. Zero switches that signal off.
+	SuccessAfterFailures int
+	MaxTracked           int
+}
+
+// Ban backends.
+const (
+	BanBackendNone     = "none"
+	BanBackendNftables = "nftables"
+)
+
+// Auto-allowlist modes.
+const (
+	AutoAllowFirstLogin = "first_login"
+	AutoAllowOff        = "off"
+)
+
+// BanConfig controls what happens to a ban decision.
+//
+// The backend defaults to "none" because the container the agent normally runs
+// in has every capability dropped and cannot touch the firewall. Decisions are
+// then recorded and reported but not enforced, and the agent says so at
+// startup rather than pretending to protect the host.
+type BanConfig struct {
+	Backend string
+	DryRun  bool
+	Table   string
+	// AutoAllowlist protects the owner's own address. "first_login" adds the
+	// source of the first successful login after the agent starts, which is
+	// almost always the person installing it; "off" disables that.
+	AutoAllowlist string
 }
 
 // CrowdSecConfig is the CrowdSec integration, which lands in v0.3.
@@ -92,6 +123,7 @@ type Config struct {
 	Store     StoreConfig
 	Heartbeat HeartbeatConfig
 	Detect    DetectConfig
+	Ban       BanConfig
 	CrowdSec  CrowdSecConfig
 
 	// Filled by validate.
@@ -101,6 +133,7 @@ type Config struct {
 	quietTo   int
 	badChatID string // a malformed chat id from the environment, reported by validate
 	badDebug  string // a malformed AUDITDSEC_DEBUG value, reported by validate
+	badDryRun string // a malformed AUDITDSEC_BAN_DRY_RUN value
 }
 
 // Defaults returns the preset for a profile. The simple profile is tuned for
@@ -129,11 +162,21 @@ func Defaults(profile string) *Config {
 		},
 		Store:     StoreConfig{RetentionDays: 14, MaxRecent: 200},
 		Heartbeat: HeartbeatConfig{Enabled: true, StaleAfter: 6 * time.Hour, CheckEvery: time.Minute},
-		Detect:    DetectConfig{Enabled: false, Window: 10 * time.Minute, FailThreshold: 10},
-		CrowdSec:  CrowdSecConfig{Enabled: false, Mode: "push", LAPIURL: "http://127.0.0.1:8080"},
+		Detect: DetectConfig{
+			Enabled: true, Window: 10 * time.Minute, FailThreshold: 10,
+			SuccessAfterFailures: 10, MaxTracked: 10000,
+		},
+		Ban: BanConfig{
+			Backend:       BanBackendNone,
+			Table:         "auditdsec",
+			AutoAllowlist: AutoAllowFirstLogin,
+		},
+		CrowdSec: CrowdSecConfig{Enabled: false, Mode: "push", LAPIURL: "http://127.0.0.1:8080"},
 	}
 	if profile == ProfilePro {
 		c.Telegram.MinSeverity = "info"
+		c.Detect.FailThreshold = 5
+		c.Detect.Window = 5 * time.Minute
 		c.Telegram.DedupWindow = 5 * time.Minute
 		c.Telegram.RatePerMinute = 30
 		c.Store.RetentionDays = 90
@@ -190,7 +233,8 @@ func Load(path string) (*Config, error) {
 func (c *Config) decode(root *node) error {
 	d := &dec{}
 	d.strict(root, "", "profile", "lang", "host", "audit_log", "state_dir",
-		"read_from_start", "debug", "log", "telegram", "store", "heartbeat", "detect", "crowdsec")
+		"read_from_start", "debug", "log", "telegram", "store", "heartbeat",
+		"detect", "ban", "crowdsec")
 
 	d.str(root, "lang", &c.Lang)
 	d.str(root, "host", &c.Host)
@@ -236,10 +280,21 @@ func (c *Config) decode(root *node) error {
 	}
 
 	if n := d.section(root, "detect"); n != nil {
-		d.strict(n, "detect", "enabled", "window", "fail_threshold")
+		d.strict(n, "detect", "enabled", "window", "fail_threshold",
+			"success_after_failures", "max_tracked")
 		d.boolean(n, "enabled", &c.Detect.Enabled)
 		d.duration(n, "window", &c.Detect.Window)
 		d.integer(n, "fail_threshold", &c.Detect.FailThreshold)
+		d.integer(n, "success_after_failures", &c.Detect.SuccessAfterFailures)
+		d.integer(n, "max_tracked", &c.Detect.MaxTracked)
+	}
+
+	if n := d.section(root, "ban"); n != nil {
+		d.strict(n, "ban", "backend", "dry_run", "table", "auto_allowlist")
+		d.str(n, "backend", &c.Ban.Backend)
+		d.boolean(n, "dry_run", &c.Ban.DryRun)
+		d.str(n, "table", &c.Ban.Table)
+		d.str(n, "auto_allowlist", &c.Ban.AutoAllowlist)
 	}
 
 	if n := d.section(root, "crowdsec"); n != nil {
@@ -265,6 +320,18 @@ func (c *Config) applyEnv() {
 	envStr("AUDITDSEC_TG_TOKEN", &c.Telegram.Token)
 	envStr("AUDITDSEC_TG_API_BASE", &c.Telegram.APIBase)
 	envStr("AUDITDSEC_MIN_SEVERITY", &c.Telegram.MinSeverity)
+	envStr("AUDITDSEC_BAN_BACKEND", &c.Ban.Backend)
+	envStr("AUDITDSEC_AUTO_ALLOWLIST", &c.Ban.AutoAllowlist)
+	if v := os.Getenv("AUDITDSEC_BAN_DRY_RUN"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Ban.DryRun = true
+		case "0", "false", "no", "off":
+			c.Ban.DryRun = false
+		default:
+			c.badDryRun = v
+		}
+	}
 
 	if v := os.Getenv("AUDITDSEC_TG_CHAT_ID"); v != "" {
 		var ids []int64
@@ -332,6 +399,9 @@ func (c *Config) validate() error {
 	if c.badDebug != "" {
 		add("AUDITDSEC_DEBUG: %q is not a yes/no value (use 1 or 0)", c.badDebug)
 	}
+	if c.badDryRun != "" {
+		add("AUDITDSEC_BAN_DRY_RUN: %q is not a yes/no value (use 1 or 0)", c.badDryRun)
+	}
 	if len(c.Telegram.ChatIDs) == 0 {
 		add("telegram.chat_ids: at least one chat id is required; the bot answers nobody else")
 	}
@@ -394,6 +464,29 @@ func (c *Config) validate() error {
 	default:
 		add("log.level: unknown level %q (want debug, info, warn or error)", c.Log.Level)
 	}
+	if c.Detect.Enabled {
+		if c.Detect.Window <= 0 {
+			add("detect.window: must be positive")
+		}
+		if c.Detect.FailThreshold <= 0 {
+			add("detect.fail_threshold: must be positive")
+		}
+		if c.Detect.SuccessAfterFailures < 0 {
+			add("detect.success_after_failures: must not be negative")
+		}
+	}
+	switch c.Ban.Backend {
+	case BanBackendNone, BanBackendNftables:
+	default:
+		add("ban.backend: unknown backend %q (want %s or %s)",
+			c.Ban.Backend, BanBackendNone, BanBackendNftables)
+	}
+	switch c.Ban.AutoAllowlist {
+	case AutoAllowFirstLogin, AutoAllowOff, "":
+	default:
+		add("ban.auto_allowlist: unknown mode %q (want %s or %s)",
+			c.Ban.AutoAllowlist, AutoAllowFirstLogin, AutoAllowOff)
+	}
 	if c.CrowdSec.Enabled {
 		switch c.CrowdSec.Mode {
 		case "push", "pull", "both":
@@ -417,6 +510,13 @@ func (c *Config) MinSeverity() model.Severity { return c.minSev }
 // QuietHours returns the quiet window in minutes from midnight, local time.
 func (c *Config) QuietHours() (from, to int, enabled bool) {
 	return c.quietFrom, c.quietTo, c.quietFrom >= 0 && c.quietTo >= 0
+}
+
+// EnforcesBans reports whether a ban decision actually reaches the firewall.
+// When it does not, the agent says so at startup instead of letting the owner
+// believe the host is being defended.
+func (c *Config) EnforcesBans() bool {
+	return c.Ban.Backend != BanBackendNone && c.Ban.Backend != ""
 }
 
 // AllowedChat reports whether a chat is allowed to talk to the bot.
@@ -450,7 +550,10 @@ func (c *Config) Redacted() string {
 	}
 	fmt.Fprintf(&b, "store:            %d days, %d recent\n", c.Store.RetentionDays, c.Store.MaxRecent)
 	fmt.Fprintf(&b, "heartbeat:        enabled=%t stale_after=%s every=%s\n", c.Heartbeat.Enabled, shortDur(c.Heartbeat.StaleAfter), shortDur(c.Heartbeat.CheckEvery))
-	fmt.Fprintf(&b, "detect:           enabled=%t (v0.2)\n", c.Detect.Enabled)
+	fmt.Fprintf(&b, "detect:           enabled=%t window=%s threshold=%d success_after=%d\n",
+		c.Detect.Enabled, shortDur(c.Detect.Window), c.Detect.FailThreshold, c.Detect.SuccessAfterFailures)
+	fmt.Fprintf(&b, "ban:              backend=%s dry_run=%t auto_allowlist=%s\n",
+		c.Ban.Backend, c.Ban.DryRun, orDefault(c.Ban.AutoAllowlist, AutoAllowOff))
 	fmt.Fprintf(&b, "crowdsec:         enabled=%t mode=%s key=%s (v0.3)\n", c.CrowdSec.Enabled, c.CrowdSec.Mode, redact.Token(c.CrowdSec.APIKey))
 	return b.String()
 }

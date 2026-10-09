@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/i18n"
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/store"
@@ -769,5 +771,254 @@ func TestHumanDuration(t *testing.T) {
 		if got := humanDuration(in); got != want {
 			t.Errorf("humanDuration(%v) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// fakeEnforcer stands in for the firewall.
+type fakeEnforcer struct {
+	mu       sync.Mutex
+	banned   []string
+	unbanned []string
+	err      error
+}
+
+func (f *fakeEnforcer) Ban(_ context.Context, d action.Decision) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.banned = append(f.banned, d.IP)
+	return nil
+}
+
+func (f *fakeEnforcer) Unban(_ context.Context, ip string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.unbanned = append(f.unbanned, ip)
+	return nil
+}
+
+func (f *fakeEnforcer) state() ([]string, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.banned...), append([]string(nil), f.unbanned...)
+}
+
+// Pressing "ban" must reach the firewall, not just the notebook.
+func TestBanButtonEnforces(t *testing.T) {
+	enf := &fakeEnforcer{}
+	f := newClient(t, func(o *Options) { o.Enforcer = enf; o.Enforcing = true })
+
+	f.client.handleUpdate(context.Background(), update{Callback: &callbackQuery{
+		ID: "cb", Data: "ban:198.51.100.7", Message: &tgMessage{Chat: tgChat{ID: 100}},
+	}})
+
+	banned, _ := enf.state()
+	if len(banned) != 1 || banned[0] != "198.51.100.7" {
+		t.Fatalf("the firewall was asked for %v", banned)
+	}
+	if bans := f.store.Bans(); len(bans) != 1 || !bans[0].Applied {
+		t.Errorf("the store should mark it applied: %+v", bans)
+	}
+	sent := f.api.sent()
+	if len(sent) == 0 || strings.Contains(sent[len(sent)-1].Text, "ban.backend") {
+		t.Errorf("an enforced ban should not carry the no-backend warning: %q", sent[len(sent)-1].Text)
+	}
+}
+
+// Without a backend the reply has to say so, or the owner believes the host is
+// defended when it is not.
+func TestBanButtonSaysWhenNothingIsEnforced(t *testing.T) {
+	f := newClient(t, nil) // no enforcer
+	f.client.handleUpdate(context.Background(), update{Callback: &callbackQuery{
+		ID: "cb", Data: "ban:198.51.100.7", Message: &tgMessage{Chat: tgChat{ID: 100}},
+	}})
+	sent := f.api.sent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1].Text, "ban.backend") {
+		t.Errorf("the reply should admit nothing was blocked: %q", sent[len(sent)-1].Text)
+	}
+	if bans := f.store.Bans(); len(bans) != 1 || bans[0].Applied {
+		t.Errorf("the decision is recorded but not applied: %+v", bans)
+	}
+}
+
+func TestBanButtonReportsAFirewallFailure(t *testing.T) {
+	enf := &fakeEnforcer{err: errors.New("Operation not permitted")}
+	f := newClient(t, func(o *Options) { o.Enforcer = enf; o.Enforcing = true })
+	f.client.handleUpdate(context.Background(), update{Callback: &callbackQuery{
+		ID: "cb", Data: "ban:198.51.100.7", Message: &tgMessage{Chat: tgChat{ID: 100}},
+	}})
+	sent := f.api.sent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1].Text, "Operation not permitted") {
+		t.Errorf("the failure should be reported verbatim: %q", sent[len(sent)-1].Text)
+	}
+}
+
+func TestUnbanButtonAndCommandUnblock(t *testing.T) {
+	enf := &fakeEnforcer{}
+	f := newClient(t, func(o *Options) { o.Enforcer = enf; o.Enforcing = true })
+	if _, err := f.store.RecordBan("198.51.100.7", "burst", f.now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	f.client.handleUpdate(context.Background(), update{Callback: &callbackQuery{
+		ID: "cb", Data: "unban:198.51.100.7", Message: &tgMessage{Chat: tgChat{ID: 100}},
+	}})
+	_, unbanned := enf.state()
+	if len(unbanned) != 1 || unbanned[0] != "198.51.100.7" {
+		t.Fatalf("the firewall was asked to unblock %v", unbanned)
+	}
+	if len(f.store.Bans()) != 0 {
+		t.Errorf("the ban should be gone from the store: %+v", f.store.Bans())
+	}
+
+	// The same through the command.
+	if _, err := f.store.RecordBan("203.0.113.5", "burst", f.now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	f.client.handleUpdate(context.Background(), update{
+		Message: &tgMessage{Chat: tgChat{ID: 100}, Text: "/unban 203.0.113.5"},
+	})
+	if _, unbanned := enf.state(); len(unbanned) != 2 {
+		t.Errorf("unbanned = %v", unbanned)
+	}
+}
+
+// "That was me" has to restore access, which means lifting the block as well
+// as protecting the address from the next one.
+func TestAllowButtonAlsoUnblocks(t *testing.T) {
+	enf := &fakeEnforcer{}
+	f := newClient(t, func(o *Options) { o.Enforcer = enf; o.Enforcing = true })
+	if _, err := f.store.RecordBan("203.0.113.9", "burst", f.now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	f.client.handleUpdate(context.Background(), update{Callback: &callbackQuery{
+		ID: "cb", Data: "allow:203.0.113.9", Message: &tgMessage{Chat: tgChat{ID: 100}},
+	}})
+
+	if _, unbanned := enf.state(); len(unbanned) != 1 {
+		t.Errorf("the block should have been lifted too: %v", unbanned)
+	}
+	if !f.store.IsAllowed("203.0.113.9") {
+		t.Error("the address should be allowlisted")
+	}
+	if len(f.store.Bans()) != 0 {
+		t.Errorf("the ban should be gone: %+v", f.store.Bans())
+	}
+}
+
+func TestBanCommand(t *testing.T) {
+	f := newClient(t, nil)
+	f.client.handleUpdate(context.Background(), update{
+		Message: &tgMessage{Chat: tgChat{ID: 100}, Text: "/ban 198.51.100.7"},
+	})
+	if bans := f.store.Bans(); len(bans) != 1 {
+		t.Fatalf("/ban did not reach the store: %+v", bans)
+	}
+	f.api.reset()
+	f.client.handleUpdate(context.Background(), update{
+		Message: &tgMessage{Chat: tgChat{ID: 100}, Text: "/ban"},
+	})
+	if sent := f.api.sent(); len(sent) == 0 || !strings.Contains(sent[0].Text, "/ban") {
+		t.Errorf("/ban without an argument should explain itself: %+v", sent)
+	}
+}
+
+func TestNotifyBanMessage(t *testing.T) {
+	f := newClient(t, func(o *Options) { o.Enforcing = true })
+	ban := store.Ban{IP: "198.51.100.7", Reason: "12 failed logins within 10m",
+		Until: f.now.Add(time.Hour), Count: 1}
+	if err := f.client.NotifyBan(context.Background(), ban, nil); err != nil {
+		t.Fatal(err)
+	}
+	sent := f.api.sent()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d messages", len(sent))
+	}
+	for _, want := range []string{"198.51.100.7", "12 failed logins"} {
+		if !strings.Contains(sent[0].Text, want) {
+			t.Errorf("message should mention %q: %q", want, sent[0].Text)
+		}
+	}
+	if sent[0].ReplyMarkup == nil || len(sent[0].ReplyMarkup.Rows[0]) != 2 {
+		t.Fatalf("a ban needs an unblock button: %+v", sent[0].ReplyMarkup)
+	}
+	if got := sent[0].ReplyMarkup.Rows[0][0].Data; got != "unban:198.51.100.7" {
+		t.Errorf("button data = %q", got)
+	}
+}
+
+func TestNotifyBanPermanent(t *testing.T) {
+	f := newClient(t, func(o *Options) { o.Enforcing = true })
+	ban := store.Ban{IP: "198.51.100.7", Reason: "repeat offender", Count: 4}
+	if err := f.client.NotifyBan(context.Background(), ban, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.api.sent()[0].Text; !strings.Contains(got, "навсегда") {
+		t.Errorf("a permanent ban should say so: %q", got)
+	}
+}
+
+func TestNotifyMessage(t *testing.T) {
+	f := newClient(t, nil)
+	if err := f.client.NotifyMessage(context.Background(), "ui.allow.auto",
+		map[string]string{"ip": "203.0.113.9"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.api.sent()[0].Text; !strings.Contains(got, "203.0.113.9") {
+		t.Errorf("message = %q", got)
+	}
+}
+
+func TestBansListMarksWhatIsApplied(t *testing.T) {
+	f := newClient(t, nil)
+	if _, err := f.store.RecordBan("198.51.100.7", "burst", f.now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.MarkBanApplied("198.51.100.7"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.RecordBan("198.51.100.8", "burst", f.now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	text := f.client.bansText()
+	if !strings.Contains(text, "✓ <code>198.51.100.7</code>") {
+		t.Errorf("an applied ban should be marked:\n%s", text)
+	}
+	if !strings.Contains(text, "· <code>198.51.100.8</code>") {
+		t.Errorf("a recorded-only ban should be marked differently:\n%s", text)
+	}
+}
+
+// A poll that returns nothing instantly must not turn the bot loop into a spin.
+// Telegram holds the connection open; a proxy or a stub may not.
+func TestRunBotDoesNotSpinOnInstantEmptyPolls(t *testing.T) {
+	f := newClient(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.client.RunBot(ctx) }()
+
+	time.Sleep(400 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunBot did not stop")
+	}
+
+	polls := 0
+	for _, m := range f.api.methods() {
+		if m == "getUpdates" {
+			polls++
+		}
+	}
+	// With the pause in place this is one or two polls; without it, hundreds.
+	if polls > 5 {
+		t.Errorf("made %d polls in 400ms, the loop is spinning", polls)
 	}
 }

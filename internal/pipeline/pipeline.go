@@ -6,6 +6,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -16,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/RsNest/auditdsec/internal/action"
+	"github.com/RsNest/auditdsec/internal/detect"
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/parse"
 	"github.com/RsNest/auditdsec/internal/redact"
@@ -28,8 +31,20 @@ import (
 // client. Keeping it an interface means tests need no network and a second
 // channel (ntfy, a webhook) can be added without touching this package.
 type Notifier interface {
+	// Notify reports one event.
 	Notify(ctx context.Context, ev model.Event) error
+	// NotifyBan reports a ban decision. applyErr is non-nil when the decision
+	// was recorded but the firewall refused it, which the owner must know
+	// about: a ban that was not applied protects nothing.
+	NotifyBan(ctx context.Context, b store.Ban, applyErr error) error
+	// NotifyMessage sends a plain localized notice, such as the first address
+	// being allowlisted.
+	NotifyMessage(ctx context.Context, key string, args map[string]string) error
 }
+
+// metaFirstLoginAllowed records that the owner's address has been protected,
+// so it happens once per installation rather than on every restart.
+const metaFirstLoginAllowed = "first_login_allowlisted"
 
 // lineBuffer is how many log lines may wait to be processed. When it fills the
 // tailer blocks, which is the right trade: slowing down beats losing events.
@@ -57,6 +72,16 @@ type Options struct {
 	// agent actually raises: why did no alert arrive for something I just did.
 	Debug bool
 
+	// Detector turns events into ban decisions. Nil disables detection.
+	Detector detect.Detector
+	// Banner applies decisions on the host. Nil, or the no-op banner, means
+	// decisions are recorded and reported but nothing is blocked.
+	Banner action.Banner
+	// AutoAllowlistFirstLogin protects the source of the first successful
+	// login after startup, which is almost always the person installing the
+	// agent. It is what stops the detector locking its owner out.
+	AutoAllowlistFirstLogin bool
+
 	Store    *store.Store
 	Notifier Notifier
 	Logger   *slog.Logger
@@ -77,6 +102,7 @@ type Pipeline struct {
 	reported  atomic.Uint64
 	skipped   atomic.Uint64
 
+	banned          atomic.Uint64
 	heartbeatFiring bool
 	heartbeatAt     time.Time
 }
@@ -155,8 +181,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 	p.log.Info("watching the audit log",
 		"path", p.opt.AuditLog, "host", p.opt.Host,
-		"from_start", p.opt.ReadFromStart, "debug", p.opt.Debug)
+		"from_start", p.opt.ReadFromStart, "debug", p.opt.Debug,
+		"detector", detectorName(p.opt.Detector), "banner", bannerName(p.opt.Banner))
 	p.purgeOldEvents()
+	p.reapplyBans(ctx)
 
 	for {
 		select {
@@ -220,7 +248,135 @@ func (p *Pipeline) emit(ctx context.Context, events []*parse.Event) {
 			continue
 		}
 		p.processed.Add(1)
-		p.deliver(ctx, ev)
+		p.handle(ctx, ev)
+	}
+}
+
+// handle delivers an event and then runs it past the detector. Events the
+// detector produces are delivered but never fed back into it, so a derived
+// event cannot trigger another one.
+func (p *Pipeline) handle(ctx context.Context, ev model.Event) {
+	p.deliver(ctx, ev)
+	p.autoAllowlist(ctx, ev)
+
+	if p.opt.Detector == nil {
+		return
+	}
+	res := p.opt.Detector.Feed(ev)
+	for _, derived := range res.Events {
+		p.processed.Add(1)
+		p.deliver(ctx, derived)
+	}
+	for _, d := range res.Decisions {
+		p.applyDecision(ctx, d)
+	}
+}
+
+// applyDecision records a ban, applies it to the firewall when a backend is
+// configured, and tells the owner either way.
+//
+// The store refuses a ban for an allowlisted address, and that refusal is
+// deliberately not an error here: it is the protection working.
+func (p *Pipeline) applyDecision(ctx context.Context, d action.Decision) {
+	// The detector times decisions by the event's own clock, so replaying an
+	// existing audit log produces decisions whose window is already over.
+	// Those are history, not an attack in progress: blocking an address over a
+	// burst from last Tuesday helps nobody, and on a first start with
+	// read_from_start it would flood the chat.
+	if !d.Permanent() && !d.Until.After(p.now()) {
+		p.log.Info("ban decision skipped: the attack it describes is already over",
+			"ip", d.IP, "reason", d.Reason, "until", untilLabel(d.Until),
+			"note", "normal while reading an audit log that was written before the agent started")
+		return
+	}
+
+	ban, err := p.opt.Store.RecordBan(d.IP, d.Reason, d.Until)
+	if err != nil {
+		if errors.Is(err, store.ErrAllowlisted) {
+			p.log.Info("ban refused: the address is allowlisted", "ip", d.IP, "reason", d.Reason)
+			return
+		}
+		p.log.Error("cannot record the ban", "ip", d.IP, "error", err)
+		return
+	}
+	p.banned.Add(1)
+
+	var applyErr error
+	if p.opt.Banner != nil {
+		applyErr = p.opt.Banner.Ban(ctx, d)
+		if applyErr != nil {
+			p.log.Error("the firewall refused the ban", "ip", d.IP, "error", applyErr)
+		} else if err := p.opt.Store.MarkBanApplied(d.IP); err != nil {
+			p.log.Warn("cannot mark the ban as applied", "ip", d.IP, "error", err)
+		}
+	}
+	p.log.Warn("address banned",
+		"ip", d.IP, "reason", d.Reason, "until", untilLabel(d.Until),
+		"repeat", ban.Count, "applied", applyErr == nil && p.opt.Banner != nil)
+
+	if err := p.opt.Notifier.NotifyBan(ctx, ban, applyErr); err != nil {
+		p.log.Error("cannot report the ban", "ip", d.IP, "error", err)
+	}
+}
+
+// autoAllowlist protects the source of the first successful login after the
+// agent starts. Without it, an owner whose address changes — carrier NAT, a
+// phone, a dynamic home line — can be banned by their own agent after a few
+// typos, with no way back in.
+func (p *Pipeline) autoAllowlist(ctx context.Context, ev model.Event) {
+	if !p.opt.AutoAllowlistFirstLogin ||
+		ev.Kind != model.KindSSHLoginOK ||
+		ev.SrcIP == "" {
+		return
+	}
+	if p.opt.Store.GetMeta(metaFirstLoginAllowed) != "" {
+		return
+	}
+	if p.opt.Store.IsAllowed(ev.SrcIP) {
+		// Already protected; record that the one-off has happened anyway.
+		_ = p.opt.Store.SetMeta(metaFirstLoginAllowed, ev.SrcIP)
+		return
+	}
+	if err := p.opt.Store.Allow(ev.SrcIP, "first successful login after start"); err != nil {
+		p.log.Error("cannot allowlist the first login", "ip", ev.SrcIP, "error", err)
+		return
+	}
+	if err := p.opt.Store.SetMeta(metaFirstLoginAllowed, ev.SrcIP); err != nil {
+		p.log.Warn("cannot record the first-login allowlisting", "error", err)
+	}
+	p.log.Info("the first successful login was allowlisted", "ip", ev.SrcIP, "user", ev.User)
+
+	if err := p.opt.Notifier.NotifyMessage(ctx, "ui.allow.auto", map[string]string{"ip": ev.SrcIP}); err != nil {
+		p.log.Warn("cannot report the allowlisting", "error", err)
+	}
+}
+
+// reapplyBans pushes the still-active bans from the store into the firewall.
+// The firewall is rebuilt from scratch at startup, so this is what makes the
+// store the source of truth rather than whatever survived a reboot.
+func (p *Pipeline) reapplyBans(ctx context.Context) {
+	if p.opt.Banner == nil {
+		return
+	}
+	now := p.now()
+	applied, failed := 0, 0
+	for _, b := range p.opt.Store.Bans() {
+		if !b.Active(now) {
+			continue
+		}
+		if p.opt.Store.IsAllowed(b.IP) {
+			continue
+		}
+		err := p.opt.Banner.Ban(ctx, action.Decision{IP: b.IP, Until: b.Until, Reason: b.Reason})
+		if err != nil {
+			failed++
+			p.log.Warn("cannot reapply a ban", "ip", b.IP, "error", err)
+			continue
+		}
+		applied++
+	}
+	if applied > 0 || failed > 0 {
+		p.log.Info("bans reapplied to the firewall", "applied", applied, "failed", failed)
 	}
 }
 
@@ -278,6 +434,27 @@ func (p *Pipeline) checkHeartbeat(ctx context.Context) {
 	p.deliver(ctx, ev)
 }
 
+func detectorName(d detect.Detector) string {
+	if d == nil {
+		return "none"
+	}
+	return d.Name()
+}
+
+func bannerName(b action.Banner) string {
+	if b == nil {
+		return "none"
+	}
+	return b.Name()
+}
+
+func untilLabel(t time.Time) string {
+	if t.IsZero() {
+		return "permanent"
+	}
+	return t.Format(time.RFC3339)
+}
+
 func (p *Pipeline) purgeOldEvents() {
 	removed, err := p.opt.Store.Purge()
 	if err != nil {
@@ -293,6 +470,9 @@ func (p *Pipeline) purgeOldEvents() {
 func (p *Pipeline) Counters() (processed, reported, skipped uint64) {
 	return p.processed.Load(), p.reported.Load(), p.skipped.Load()
 }
+
+// Banned reports how many ban decisions have been taken, for /debug.
+func (p *Pipeline) Banned() uint64 { return p.banned.Load() }
 
 // DiagItem is one line of the /debug report: an i18n key for the label, and the
 // value to show beside it.
@@ -319,6 +499,9 @@ func (p *Pipeline) Diagnostics() []DiagItem {
 		{Key: "ui.diag.skipped", Value: strconv.FormatUint(skipped, 10)},
 		{Key: "ui.diag.audit_log", Value: auditLog},
 		{Key: "ui.diag.offset", Value: strconv.FormatInt(p.tailer.LastOffset(), 10)},
+		{Key: "ui.diag.detector", Value: detectorName(p.opt.Detector)},
+		{Key: "ui.diag.banner", Value: bannerName(p.opt.Banner)},
+		{Key: "ui.diag.bans", Value: strconv.FormatUint(p.Banned(), 10)},
 	}
 }
 

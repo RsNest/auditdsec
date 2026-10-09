@@ -5,6 +5,7 @@ var catalogEN = map[string]string{
 	// Event summaries.
 	"event.ssh_login_ok":           "Login: {user} from {ip}",
 	"event.ssh_login_fail":         "Failed login attempt: {user} from {ip}",
+	"event.login_after_bruteforce": "Successful login by {user} from {ip} after {fails} failed attempts",
 	"event.sudo":                   "{user} ran a command with elevated rights: {cmd}",
 	"event.user_change":            "Account change: {detail}",
 	"event.authorized_keys_change": "SSH key file {path} changed by {user}",
@@ -27,6 +28,11 @@ var catalogEN = map[string]string{
 	"explain.ssh_login_fail": "What it is: a login attempt with wrong credentials.\n" +
 		"Risk: isolated misses are normal. Dozens per minute mean a brute-force attack.\n" +
 		"What to do: ban the address with the button under the message, then disable password logins (PasswordAuthentication no) and keep keys only.",
+	"explain.login_after_bruteforce": "What it is: a burst of failed logins from one address, and then a login that worked.\n" +
+		"Risk: as high as it gets. This is what a guessed password looks like, so the server is probably no longer yours.\n" +
+		"What to do: check live sessions now (who, ss -tnp), rotate passwords and SSH keys, inspect " +
+		"~/.ssh/authorized_keys, cron and systemd units, and disable password logins. " +
+		"If the login was not yours, treat the server as compromised.",
 	"explain.sudo": "What it is: a user ran a command as root through sudo or su.\n" +
 		"Risk: routine administration. Worrying when the user should not be doing it, or when the command downloads and runs code from the internet.\n" +
 		"What to do: check the command and the user. If it was not you, treat that account as compromised.",
@@ -53,10 +59,12 @@ var catalogEN = map[string]string{
 		"What to do: check systemctl status auditd and start the service. If you did not stop it, find out who did.",
 
 	// Bot UI.
-	"ui.btn.ban":  "🚫 Ban {ip}",
-	"ui.btn.me":   "✅ That was me",
-	"ui.btn.mute": "🔕 Mute 24h",
-	"ui.started":  "auditdsec started on <b>{host}</b>. Profile: {profile}.",
+	"ui.btn.ban":        "🚫 Ban {ip}",
+	"ui.btn.me":         "✅ That was me",
+	"ui.btn.mute":       "🔕 Mute 24h",
+	"ui.btn.unban":      "🔓 Unblock",
+	"ui.ban.no_backend": "The address is on the ban list, but nothing is blocked on the host: ban.backend = none. The README section on bans explains how to turn enforcement on.",
+	"ui.started":        "auditdsec started on <b>{host}</b>. Profile: {profile}.",
 	"ui.start": "Linked: this chat will receive events from host <b>{host}</b>.\n\n" +
 		"Commands: /help",
 	"ui.help": "<b>auditdsec commands</b>\n" +
@@ -65,6 +73,7 @@ var catalogEN = map[string]string{
 		"/allow &lt;IP&gt; — add an address to the allowlist\n" +
 		"/unallow &lt;IP&gt; — remove an address from the allowlist\n" +
 		"/allowlist — show the allowlist\n" +
+		"/ban &lt;IP&gt; — block an address\n" +
 		"/bans — ban decisions\n" +
 		"/unban &lt;IP&gt; — lift a ban\n" +
 		"/mute [hours] — mute alerts\n" +
@@ -79,23 +88,28 @@ var catalogEN = map[string]string{
 		"Last event: {last}\n" +
 		"Allowlist: {allow}\n" +
 		"Alerts: {muted}",
-	"ui.last.header":     "Recent events ({count}):",
-	"ui.last.empty":      "No events yet.",
-	"ui.allow.ok":        "Address {ip} added to the allowlist and will not be banned.",
-	"ui.allow.removed":   "Address {ip} removed from the allowlist.",
-	"ui.allow.missing":   "Address {ip} is not in the allowlist.",
-	"ui.allow.header":    "Allowlist ({count}):",
-	"ui.allow.empty":     "The allowlist is empty.",
-	"ui.ban.recorded":    "Ban decision for {ip} recorded. Applying bans on the host arrives in v0.2.",
-	"ui.ban.allowlisted": "Address {ip} is allowlisted, the ban was cancelled.",
-	"ui.ban.header":      "Ban decisions ({count}):",
-	"ui.ban.empty":       "No bans.",
-	"ui.ban.removed":     "Ban on {ip} lifted.",
-	"ui.ban.missing":     "There is no ban for {ip}.",
-	"ui.mute.on":         "Alerts muted until {until}. Critical events still come through.",
-	"ui.mute.off":        "Alerts unmuted.",
-	"ui.grouped":         "Similar events in {window}: {count} more.",
-	"ui.not_available":   "This capability arrives in a later version.",
+	"ui.last.header":            "Recent events ({count}):",
+	"ui.last.empty":             "No events yet.",
+	"ui.allow.ok":               "Address {ip} added to the allowlist and will not be banned.",
+	"ui.allow.removed":          "Address {ip} removed from the allowlist.",
+	"ui.allow.missing":          "Address {ip} is not in the allowlist.",
+	"ui.allow.header":           "Allowlist ({count}):",
+	"ui.allow.empty":            "The allowlist is empty.",
+	"ui.ban.recorded":           "Address {ip} is blocked until {until}.",
+	"ui.ban.recorded_permanent": "Address {ip} is blocked permanently.",
+	"ui.ban.not_applied":        "The ban decision for {ip} was recorded but not applied on the host: {error}",
+	"ui.ban.auto":               "Blocked {ip} automatically: {reason}. Until {until}.",
+	"ui.ban.auto_permanent":     "Blocked {ip} permanently: {reason}.",
+	"ui.allow.auto":             "Address {ip} was added to the allowlist: it is the first successful login since the agent started, so it is now safe from an automatic ban.",
+	"ui.ban.allowlisted":        "Address {ip} is allowlisted, the ban was cancelled.",
+	"ui.ban.header":             "Ban decisions ({count}):",
+	"ui.ban.empty":              "No bans.",
+	"ui.ban.removed":            "Ban on {ip} lifted.",
+	"ui.ban.missing":            "There is no ban for {ip}.",
+	"ui.mute.on":                "Alerts muted until {until}. Critical events still come through.",
+	"ui.mute.off":               "Alerts unmuted.",
+	"ui.grouped":                "Similar events in {window}: {count} more.",
+	"ui.not_available":          "This capability arrives in a later version.",
 	"ui.debug": "<b>Diagnostics</b>\n" +
 		"Debug mode: {debug}\n" +
 		"Log level: {level}\n" +
@@ -113,6 +127,9 @@ var catalogEN = map[string]string{
 	"ui.diag.skipped":     "Lines skipped",
 	"ui.diag.audit_log":   "Audit log",
 	"ui.diag.offset":      "Read up to byte",
+	"ui.diag.detector":    "Detector",
+	"ui.diag.banner":      "Bans applied by",
+	"ui.diag.bans":        "Ban decisions",
 	"ui.never":            "none",
 	"val.unknown":         "unknown",
 	"ui.muted_until":      "muted until {until}",

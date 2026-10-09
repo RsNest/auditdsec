@@ -11,19 +11,23 @@ import (
 	"github.com/RsNest/auditdsec/internal/model"
 )
 
-// Detector consumes events and emits ban decisions.
+// Result is what one event triggered: addresses to block, and events the
+// detector itself produced (a success after a burst of failures is not in the
+// audit log as such — it only exists as a pattern across records).
+type Result struct {
+	Decisions []action.Decision
+	Events    []model.Event
+}
+
+// Empty reports whether nothing was triggered.
+func (r Result) Empty() bool { return len(r.Decisions) == 0 && len(r.Events) == 0 }
+
+// Detector consumes events and emits decisions and derived events.
 type Detector interface {
-	// Feed reports the decisions triggered by one event. The event's own
-	// timestamp is the clock, so replaying a log produces the same result.
-	Feed(ev model.Event) []action.Decision
+	// Feed reports what one event triggered. The event's own timestamp is the
+	// clock, so replaying a log produces exactly the same result as watching
+	// it live.
+	Feed(ev model.Event) Result
 	// Name identifies the detector in logs and in /status.
 	Name() string
 }
-
-// Escalation is the ban ladder a repeat offender climbs: the first offence
-// costs an hour, the next a day, then a month, and only a persistent attacker
-// is banned permanently. Starting at "forever" would lock out owners on
-// dynamic addresses, which is why the ladder exists at all.
-//
-// The values are indexed by how many times the address has been banned before.
-var Escalation = []string{"1h", "24h", "720h", "permanent"}

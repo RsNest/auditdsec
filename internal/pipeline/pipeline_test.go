@@ -2,19 +2,26 @@ package pipeline
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/RsNest/auditdsec/internal/action"
+	"github.com/RsNest/auditdsec/internal/detect"
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/store"
 )
 
 type fakeNotifier struct {
-	mu     sync.Mutex
-	events []model.Event
+	mu       sync.Mutex
+	events   []model.Event
+	bans     []store.Ban
+	banErrs  []error
+	messages []string
 }
 
 func (f *fakeNotifier) Notify(_ context.Context, ev model.Event) error {
@@ -22,6 +29,67 @@ func (f *fakeNotifier) Notify(_ context.Context, ev model.Event) error {
 	defer f.mu.Unlock()
 	f.events = append(f.events, ev)
 	return nil
+}
+
+func (f *fakeNotifier) NotifyBan(_ context.Context, b store.Ban, applyErr error) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bans = append(f.bans, b)
+	f.banErrs = append(f.banErrs, applyErr)
+	return nil
+}
+
+func (f *fakeNotifier) NotifyMessage(_ context.Context, key string, _ map[string]string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.messages = append(f.messages, key)
+	return nil
+}
+
+func (f *fakeNotifier) allBans() []store.Ban {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]store.Ban(nil), f.bans...)
+}
+
+func (f *fakeNotifier) allMessages() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.messages...)
+}
+
+// fakeBanner records what the firewall was asked to do, and can refuse.
+type fakeBanner struct {
+	mu       sync.Mutex
+	banned   []action.Decision
+	unbanned []string
+	err      error
+}
+
+func (f *fakeBanner) Ban(_ context.Context, d action.Decision) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.banned = append(f.banned, d)
+	return nil
+}
+
+func (f *fakeBanner) Unban(_ context.Context, ip string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unbanned = append(f.unbanned, ip)
+	return nil
+}
+
+func (f *fakeBanner) List(context.Context) ([]action.Decision, error) { return nil, nil }
+func (f *fakeBanner) Name() string                                    { return "fake" }
+
+func (f *fakeBanner) allBanned() []action.Decision {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]action.Decision(nil), f.banned...)
 }
 
 func (f *fakeNotifier) all() []model.Event {
@@ -65,13 +133,16 @@ func appendLines(t *testing.T, path string, lines ...string) {
 
 func startPipeline(t *testing.T, o Options) (*Pipeline, *fakeNotifier, *store.Store, context.CancelFunc) {
 	t.Helper()
-	st, err := store.Open(store.Options{Dir: filepath.Join(t.TempDir(), "state")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-
 	notifier := &fakeNotifier{}
+	st := o.Store
+	if st == nil {
+		var err error
+		st, err = store.Open(store.Options{Dir: filepath.Join(t.TempDir(), "state")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+	}
 	o.Store = st
 	o.Notifier = notifier
 	if o.Host == "" {
@@ -266,4 +337,377 @@ func TestNewValidatesOptions(t *testing.T) {
 	if _, err := New(Options{AuditLog: "/x", Store: st}); err == nil {
 		t.Error("a missing Notifier should fail")
 	}
+}
+
+// logTime stamps a synthetic record a few seconds ago, the way a live auditd
+// would. Timestamps matter: the pipeline refuses to act on a burst whose window
+// has already closed, so a test written against a fixed date in the past would
+// be testing the stale-log path by accident.
+func logTime(serial int) int64 {
+	return time.Now().Add(-30 * time.Second).Add(time.Duration(serial) * time.Second).Unix()
+}
+
+// failLine builds a failed-login audit record from the given address.
+func failLine(serial int, ip string) []string {
+	ts := logTime(serial)
+	return []string{
+		fmt.Sprintf(`type=USER_LOGIN msg=audit(%d.000:%d): pid=1 uid=0 auid=4294967295 msg='op=login acct="root" exe="/usr/sbin/sshd" addr=%s terminal=ssh res=failed'`, ts, serial, ip),
+		fmt.Sprintf(`type=EOE msg=audit(%d.000:%d): `, ts, serial),
+	}
+}
+
+// staleFailLine is the same record, but old enough that acting on it would be
+// pointless.
+func staleFailLine(serial int, ip string) []string {
+	ts := time.Now().Add(-72 * time.Hour).Add(time.Duration(serial) * time.Second).Unix()
+	return []string{
+		fmt.Sprintf(`type=USER_LOGIN msg=audit(%d.000:%d): pid=1 uid=0 auid=4294967295 msg='op=login acct="root" exe="/usr/sbin/sshd" addr=%s terminal=ssh res=failed'`, ts, serial, ip),
+		fmt.Sprintf(`type=EOE msg=audit(%d.000:%d): `, ts, serial),
+	}
+}
+
+func okLine(serial int, ip, user string) []string {
+	ts := logTime(serial)
+	return []string{
+		fmt.Sprintf(`type=USER_LOGIN msg=audit(%d.000:%d): pid=1 uid=0 auid=0 msg='op=login acct="%s" exe="/usr/sbin/sshd" addr=%s terminal=ssh res=success'`, ts, serial, user, ip),
+		fmt.Sprintf(`type=EOE msg=audit(%d.000:%d): `, ts, serial),
+	}
+}
+
+func newAuditLog(t *testing.T) (dir, path string) {
+	t.Helper()
+	dir = t.TempDir()
+	path = filepath.Join(dir, "audit.log")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir, path
+}
+
+func (f *fakeNotifier) waitForBan(t *testing.T, ip string) store.Ban {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		for _, b := range f.allBans() {
+			if b.IP == ip {
+				return b
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for a ban of %s, got %+v", ip, f.allBans())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// The whole point of v0.2: a burst of failures gets the address blocked, the
+// owner is told, and the firewall is actually asked to do it.
+func TestPipelineBansAfterABurstOfFailures(t *testing.T) {
+	dir, auditLog := newAuditLog(t)
+	banner := &fakeBanner{}
+	_, notifier, st, _ := startPipeline(t, Options{
+		AuditLog:      auditLog,
+		StateDir:      filepath.Join(dir, "state"),
+		ReadFromStart: true,
+		Banner:        banner,
+		Detector: detect.NewBruteForce(detect.Options{
+			Window: 10 * time.Minute, FailThreshold: 3, Host: "web01",
+		}),
+	})
+
+	for i := 1; i <= 3; i++ {
+		appendLines(t, auditLog, failLine(i, "198.51.100.7")...)
+	}
+
+	ban := notifier.waitForBan(t, "198.51.100.7")
+	if ban.Count != 1 || ban.Permanent() {
+		t.Errorf("first ban = %+v, want count 1 and an expiry", ban)
+	}
+	if got := banner.allBanned(); len(got) != 1 || got[0].IP != "198.51.100.7" {
+		t.Errorf("the firewall was asked for %+v", got)
+	}
+	if got := st.Bans(); len(got) != 1 || !got[0].Applied {
+		t.Errorf("the store should record the ban as applied: %+v", got)
+	}
+}
+
+// A firewall that refuses must not be hidden: the owner has to know the ban
+// was only written down.
+func TestPipelineReportsAFirewallFailure(t *testing.T) {
+	dir, auditLog := newAuditLog(t)
+	banner := &fakeBanner{err: errors.New("Operation not permitted")}
+	_, notifier, st, _ := startPipeline(t, Options{
+		AuditLog:      auditLog,
+		StateDir:      filepath.Join(dir, "state"),
+		ReadFromStart: true,
+		Banner:        banner,
+		Detector: detect.NewBruteForce(detect.Options{
+			Window: time.Minute, FailThreshold: 2,
+		}),
+	})
+
+	for i := 1; i <= 2; i++ {
+		appendLines(t, auditLog, failLine(i, "198.51.100.8")...)
+	}
+	notifier.waitForBan(t, "198.51.100.8")
+
+	notifier.mu.Lock()
+	errs := append([]error(nil), notifier.banErrs...)
+	notifier.mu.Unlock()
+	if len(errs) == 0 || errs[0] == nil {
+		t.Fatalf("the report should carry the firewall error, got %v", errs)
+	}
+	if got := st.Bans(); len(got) != 1 || got[0].Applied {
+		t.Errorf("a refused ban must not be marked applied: %+v", got)
+	}
+}
+
+// The first successful login is the person installing the agent, and their
+// address must be protected or the detector can lock them out.
+func TestPipelineAllowlistsTheFirstLogin(t *testing.T) {
+	dir, auditLog := newAuditLog(t)
+	_, notifier, st, _ := startPipeline(t, Options{
+		AuditLog:                auditLog,
+		StateDir:                filepath.Join(dir, "state"),
+		ReadFromStart:           true,
+		AutoAllowlistFirstLogin: true,
+	})
+
+	appendLines(t, auditLog, okLine(1, "203.0.113.9", "ruslan")...)
+	notifier.waitFor(t, model.KindSSHLoginOK)
+
+	deadline := time.After(5 * time.Second)
+	for !st.IsAllowed("203.0.113.9") {
+		select {
+		case <-deadline:
+			t.Fatal("the first login was not allowlisted")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if msgs := notifier.allMessages(); len(msgs) == 0 || msgs[0] != "ui.allow.auto" {
+		t.Errorf("the owner should be told: %v", msgs)
+	}
+
+	// Only the first one: a later login from somewhere else is not the owner.
+	appendLines(t, auditLog, okLine(2, "198.51.100.200", "root")...)
+	time.Sleep(300 * time.Millisecond)
+	if st.IsAllowed("198.51.100.200") {
+		t.Error("only the first login should be allowlisted")
+	}
+}
+
+// With the allowlist in place, the same burst that would ban a stranger must
+// leave the owner alone.
+func TestPipelineNeverBansAnAllowlistedAddress(t *testing.T) {
+	dir, auditLog := newAuditLog(t)
+	st, err := store.Open(store.Options{Dir: filepath.Join(dir, "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Allow("203.0.113.9", "owner"); err != nil {
+		t.Fatal(err)
+	}
+
+	banner := &fakeBanner{}
+	_, notifier, _, _ := startPipeline(t, Options{
+		AuditLog:      auditLog,
+		StateDir:      filepath.Join(dir, "state"),
+		ReadFromStart: true,
+		Store:         st,
+		Banner:        banner,
+		Detector: detect.NewBruteForce(detect.Options{
+			Window: time.Minute, FailThreshold: 2, Allowed: st.IsAllowed,
+		}),
+	})
+
+	for i := 1; i <= 6; i++ {
+		appendLines(t, auditLog, failLine(i, "203.0.113.9")...)
+	}
+	notifier.waitFor(t, model.KindSSHLoginFail)
+	time.Sleep(300 * time.Millisecond)
+
+	if bans := notifier.allBans(); len(bans) != 0 {
+		t.Errorf("an allowlisted address was banned: %+v", bans)
+	}
+	if got := banner.allBanned(); len(got) != 0 {
+		t.Errorf("the firewall was asked to block the owner: %+v", got)
+	}
+}
+
+// A success right after a burst of failures is the compromise signal, and it
+// has to reach the chat as a critical event.
+func TestPipelineReportsLoginAfterBruteForce(t *testing.T) {
+	dir, auditLog := newAuditLog(t)
+	_, notifier, _, _ := startPipeline(t, Options{
+		AuditLog:      auditLog,
+		StateDir:      filepath.Join(dir, "state"),
+		ReadFromStart: true,
+		Detector: detect.NewBruteForce(detect.Options{
+			Window: 10 * time.Minute, FailThreshold: 100, // no ban in the way
+			SuccessAfterFailures: 3, Host: "web01",
+		}),
+	})
+
+	for i := 1; i <= 3; i++ {
+		appendLines(t, auditLog, failLine(i, "198.51.100.7")...)
+	}
+	appendLines(t, auditLog, okLine(9, "198.51.100.7", "root")...)
+
+	ev := notifier.waitFor(t, model.KindLoginAfterBruteForce)
+	if ev.Severity != model.SevCritical || ev.SrcIP != "198.51.100.7" {
+		t.Errorf("event = %+v", ev)
+	}
+	if ev.Arg("fails") != "3" {
+		t.Errorf("the count of failures should be reported: %q", ev.Arg("fails"))
+	}
+}
+
+// The firewall is rebuilt from scratch at startup, so the store's active bans
+// have to be pushed back into it or a restart would quietly unblock everyone.
+func TestPipelineReappliesBansOnStart(t *testing.T) {
+	dir, auditLog := newAuditLog(t)
+	st, err := store.Open(store.Options{Dir: filepath.Join(dir, "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.RecordBan("198.51.100.7", "earlier burst", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RecordBan("198.51.100.8", "long gone", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RecordBan("203.0.113.9", "then forgiven", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Allow("203.0.113.9", "that was me"); err != nil {
+		t.Fatal(err)
+	}
+
+	banner := &fakeBanner{}
+	startPipeline(t, Options{
+		AuditLog: auditLog,
+		StateDir: filepath.Join(dir, "state"),
+		Store:    st,
+		Banner:   banner,
+	})
+
+	deadline := time.After(5 * time.Second)
+	for len(banner.allBanned()) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("the active ban was not reapplied")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	got := banner.allBanned()
+	if len(got) != 1 || got[0].IP != "198.51.100.7" {
+		t.Errorf("reapplied %+v; expired and allowlisted bans must be skipped", got)
+	}
+}
+
+// Without a backend the decision is still recorded and reported — that is the
+// default setup, and it must not look like a failure.
+func TestPipelineWithoutABackendStillRecords(t *testing.T) {
+	dir, auditLog := newAuditLog(t)
+	_, notifier, st, _ := startPipeline(t, Options{
+		AuditLog:      auditLog,
+		StateDir:      filepath.Join(dir, "state"),
+		ReadFromStart: true,
+		Detector: detect.NewBruteForce(detect.Options{
+			Window: time.Minute, FailThreshold: 2,
+		}),
+	})
+
+	for i := 1; i <= 2; i++ {
+		appendLines(t, auditLog, failLine(i, "198.51.100.9")...)
+	}
+	notifier.waitForBan(t, "198.51.100.9")
+	if got := st.Bans(); len(got) != 1 || got[0].Applied {
+		t.Errorf("with no backend the ban is recorded but not applied: %+v", got)
+	}
+}
+
+// Reading an audit log that was written before the agent started must not ban
+// anybody: those bursts are history. Without this, a first start with
+// read_from_start would flood the chat and block addresses over attacks that
+// ended days ago.
+func TestPipelineSkipsBansFromOldLogLines(t *testing.T) {
+	dir, auditLog := newAuditLog(t)
+	banner := &fakeBanner{}
+	_, notifier, st, _ := startPipeline(t, Options{
+		AuditLog:      auditLog,
+		StateDir:      filepath.Join(dir, "state"),
+		ReadFromStart: true,
+		Banner:        banner,
+		Detector: detect.NewBruteForce(detect.Options{
+			Window: 10 * time.Minute, FailThreshold: 3,
+		}),
+	})
+
+	for i := 1; i <= 3; i++ {
+		appendLines(t, auditLog, staleFailLine(i, "198.51.100.77")...)
+	}
+	// The events themselves are still reported — only the ban is pointless.
+	notifier.waitFor(t, model.KindSSHLoginFail)
+	time.Sleep(300 * time.Millisecond)
+
+	if bans := notifier.allBans(); len(bans) != 0 {
+		t.Errorf("a stale burst should not produce a ban: %+v", bans)
+	}
+	if got := banner.allBanned(); len(got) != 0 {
+		t.Errorf("the firewall should not be touched: %+v", got)
+	}
+	if got := st.Bans(); len(got) != 0 {
+		t.Errorf("nothing should be recorded: %+v", got)
+	}
+}
+
+// A permanent decision has no window, so it is applied whatever the age of the
+// line that produced it.
+func TestPipelineAppliesPermanentBansRegardless(t *testing.T) {
+	dir, auditLog := newAuditLog(t)
+	st, err := store.Open(store.Options{Dir: filepath.Join(dir, "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// Three earlier bans put the address at the end of the ladder.
+	for i := 0; i < 3; i++ {
+		if _, err := st.RecordBan("198.51.100.78", "earlier", time.Now().Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	banner := &fakeBanner{}
+	_, notifier, _, _ := startPipeline(t, Options{
+		AuditLog:      auditLog,
+		StateDir:      filepath.Join(dir, "state"),
+		ReadFromStart: true,
+		Store:         st,
+		Banner:        banner,
+		Detector: detect.NewBruteForce(detect.Options{
+			Window: 10 * time.Minute, FailThreshold: 2,
+			BanCount: func(ip string) int { return banCountOf(st, ip) },
+		}),
+	})
+
+	for i := 1; i <= 2; i++ {
+		appendLines(t, auditLog, failLine(i, "198.51.100.78")...)
+	}
+	ban := notifier.waitForBan(t, "198.51.100.78")
+	if !ban.Permanent() {
+		t.Errorf("a fourth offence should be permanent: %+v", ban)
+	}
+}
+
+func banCountOf(st *store.Store, ip string) int {
+	for _, b := range st.Bans() {
+		if b.IP == ip {
+			return b.Count
+		}
+	}
+	return 0
 }

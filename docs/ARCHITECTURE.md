@@ -48,8 +48,9 @@ source → parse → semantic → ┬→ store
   in-memory ring for `/last`.
 - `notify` (**internal/notify/telegram**) applies the alert policy and talks to the API.
 
-All stages pass `model.Event`. `action.Banner` and `detect.Detector` are interfaces with
-no implementation yet, so v0.2 plugs in without reshaping the pipeline.
+All stages pass `model.Event`. After an event is delivered it goes to `detect`, whose
+`Result` carries two things: ban decisions for `action`, and events the detector derived
+itself. A derived event is delivered but never fed back, so one cannot trigger another.
 
 ## Storage
 
@@ -71,13 +72,60 @@ skip mute and quiet hours, which is the whole point of the agent. Identical even
 alert and "46 more", not 47 messages. The rate limiter is a token bucket, so a storm
 cannot get the bot throttled by Telegram itself.
 
+## Detection
+
+`detect.BruteForce` counts failed logins per source address in a sliding window. The
+event's own timestamp is the clock rather than `time.Now()`, so replaying a log produces
+exactly the same decisions as watching it live — which is what makes the thresholds
+testable at all.
+
+It emits two different things. A ban decision, when the failure count reaches the
+threshold; and a derived `login_after_bruteforce` event, when a login succeeds from an
+address that has just failed many times. The second is the signal that matters most and
+it exists nowhere in the audit log: it is a pattern across records, not a record.
+
+After a decision the counter resets, and another ban for the same address is held off for
+one window, so a burst cannot re-ban on every packet. Tracked addresses are capped and
+evicted least-recently-seen first, so a spray from thousands of sources cannot grow the
+agent's memory.
+
+## Bans
+
+`action.Banner` is the interface; `action.Nftables` the implementation. Everything lives
+in the agent's own `inet auditdsec` table with two timeout-flagged sets and a drop rule at
+priority -10, so the host's own firewall — ufw, firewalld, Docker's chains — is never
+edited, and uninstalling is one `nft delete table` away.
+
+The table is recreated at startup and the store's active bans are pushed back into it.
+That makes the store the source of truth instead of whatever survived a reboot, at the
+cost of a short window during a restart where nothing is blocked.
+
+Three decisions worth keeping:
+
+- **The ladder starts at an hour** (1h → 1d → 30d → permanent, by repeat count).
+  Addresses are shared and recycled, so a permanent ban on a first offence would make
+  the agent more harmful than the attack it answers.
+- **A decision whose window has already closed is skipped**, quietly. Reading an audit log
+  written before the agent started would otherwise flood the chat and block addresses over
+  attacks that ended days ago — exactly what `read_from_start` does on a first run.
+- **The default backend is `none`.** The container the agent normally runs in holds no
+  capabilities and cannot touch netfilter, so decisions are recorded and reported but not
+  applied, and the agent says so at startup. Enforcement is opt-in through
+  `deploy/compose.enforce.yml`, which adds `NET_ADMIN`, the host network namespace and an
+  image that actually contains `nft`.
+
+`DryRun` logs the exact command instead of running it, because the failure mode of this
+whole feature is locking the owner out of their own server.
+
 ## Safety rules
 
-- The allowlist always beats a ban, enforced in `store.RecordBan` so no caller can
-  bypass it. Allowlisting an address lifts an existing ban. This is what keeps an owner
-  on a dynamic address from locking themselves out.
-- Permanent bans are reserved for repeat offenders; the ladder is 1h → 24h → 30d →
-  permanent, and the counter for it is already stored (`Ban.Count`).
+- Three independent barriers stop the agent locking its owner out: the allowlist beats a
+  ban (enforced inside `store.RecordBan`, so neither the detector nor a chat button can
+  bypass it, and allowlisting lifts an existing ban in the firewall too); the source of
+  the first successful login after startup is allowlisted automatically, because that is
+  almost always the person installing the agent; and private, loopback and link-local
+  addresses are never bannable, since that is how a host reaches its own network.
+- Permanent bans are reserved for repeat offenders, counted in `Ban.Count`.
 - Secrets are masked in command lines before they are sent or stored, including by
   replacing the hex form of a sudo command in the retained evidence — hex is trivially
   reversible, so storing it would store the password.
@@ -94,8 +142,8 @@ internal/model/           Event, Kind, Severity, dedup key
 internal/parse/           audit record parser and event assembler
 internal/source/          rotation-aware log tailer
 internal/semantic/        auditd → human event, severity rules, audit key names
-internal/detect/          Detector interface (brute force: v0.2)
-internal/action/          Banner interface + no-op (nftables: v0.2, CrowdSec: v0.3)
+internal/detect/          brute-force detector, escalation ladder
+internal/action/          Banner interface, nftables implementation, no-op
 internal/notify/telegram/ API client, alert policy, bot commands, rendering
 internal/store/           JSONL events, state, retention, allowlist, bans
 internal/config/          YAML subset parser, profile presets, env overrides
@@ -112,8 +160,9 @@ deploy/                   Dockerfile, audit rules, systemd unit, helper script
 recorded but does not page anyone), 14 days of retention, 10 messages a minute, a 10
 minute dedup window, heartbeat at 6 hours.
 
-`pro`: alerts from `info`, 90 days, 30 messages a minute, a 5 minute window, heartbeat at
-2 hours. v0.4 adds what the profile is really for: several hosts in one chat, Prometheus
+`pro`: alerts from `info`, 90 days, 30 messages a minute, a 5 minute dedup window,
+heartbeat at 2 hours, and a tighter brute-force threshold (5 failures in 5 minutes
+against 10 in 10). v0.4 adds what the profile is really for: several hosts in one chat, Prometheus
 metrics, alert routing.
 
 ## Heartbeat
@@ -153,8 +202,10 @@ after the client it reports to.
 
 - **v0.1** (done): parser, 10 event kinds, Telegram alerts with buttons and commands,
   allowlist, storage with retention, heartbeat, i18n, Docker, systemd.
-- **v0.2**: sliding-window brute-force detector, nftables/ipset Banner, ban escalation,
-  automatic allowlisting of the owner's address on the first key login.
+- **v0.2** (done): sliding-window brute-force detector, the `login_after_bruteforce`
+  signal, nftables Banner with escalation and a dry-run mode, automatic allowlisting of
+  the owner's address, debug mode.
 - **v0.3**: CrowdSec both ways (events to LAPI, decisions to Telegram), hardening score,
-  learning mode and "first time from this country" alerts.
+  learning mode and "first time from this country" alerts, an ipset backend for hosts
+  still on iptables.
 - **v0.4**: pro profile in full — multi-host, metrics, routing, `auditdsec query`.

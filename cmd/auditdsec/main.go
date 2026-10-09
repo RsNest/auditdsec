@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"runtime"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/config"
+	"github.com/RsNest/auditdsec/internal/detect"
 	"github.com/RsNest/auditdsec/internal/i18n"
 	"github.com/RsNest/auditdsec/internal/logging"
 	"github.com/RsNest/auditdsec/internal/model"
@@ -50,6 +52,40 @@ const shutdownGrace = 10 * time.Second
 // labelled "a1b2c3d4e5f6" instead of naming the server they came from — which
 // is useless the moment you watch more than one machine.
 const hostnameFile = "/etc/host-hostname"
+
+// buildBanner creates the configured firewall backend. It returns the banner
+// for the pipeline and the same object as the bot's enforcer, or nil for both
+// when no backend is configured.
+func buildBanner(ctx context.Context, cfg *config.Config, log *slog.Logger) (action.Banner, telegram.Enforcer, error) {
+	if !cfg.EnforcesBans() {
+		return nil, nil, nil
+	}
+	switch cfg.Ban.Backend {
+	case config.BanBackendNftables:
+		n := action.NewNftables(action.NftablesOptions{
+			Table:  cfg.Ban.Table,
+			DryRun: cfg.Ban.DryRun,
+			Logger: log,
+		})
+		if err := n.Ensure(ctx); err != nil {
+			return nil, nil, fmt.Errorf("ban.backend=nftables: %w", err)
+		}
+		return n, n, nil
+	default:
+		return nil, nil, fmt.Errorf("ban.backend: %q is not implemented", cfg.Ban.Backend)
+	}
+}
+
+// banCount reports how many times an address has been banned before, which is
+// what the escalation ladder climbs.
+func banCount(st *store.Store, ip string) int {
+	for _, b := range st.Bans() {
+		if b.IP == ip {
+			return b.Count
+		}
+	}
+	return 0
+}
 
 // resolveHost decides the name that appears in every alert: the configured one,
 // then the host's own name if it was mounted in, then whatever the kernel says.
@@ -239,6 +275,14 @@ func cmdRun(args []string) error {
 	}
 	defer st.Close()
 
+	// The banner comes first: the bot and the pipeline both need it, and a
+	// firewall backend that cannot be set up must stop the agent rather than
+	// let it pretend the host is defended.
+	banner, enforcer, err := buildBanner(context.Background(), cfg, log)
+	if err != nil {
+		return err
+	}
+
 	started := time.Now()
 	quietFrom, quietTo, _ := cfg.QuietHours()
 	bot, err := telegram.New(telegram.Options{
@@ -253,6 +297,8 @@ func cmdRun(args []string) error {
 		Started:       started,
 		Debug:         cfg.Debug,
 		LogLevel:      cfg.Log.Level,
+		Enforcing:     cfg.EnforcesBans(),
+		Enforcer:      enforcer,
 		MinSeverity:   cfg.MinSeverity(),
 		DedupWindow:   cfg.Telegram.DedupWindow,
 		RatePerMinute: cfg.Telegram.RatePerMinute,
@@ -263,18 +309,34 @@ func cmdRun(args []string) error {
 		return err
 	}
 
+	var detector detect.Detector
+	if cfg.Detect.Enabled {
+		detector = detect.NewBruteForce(detect.Options{
+			Window:               cfg.Detect.Window,
+			FailThreshold:        cfg.Detect.FailThreshold,
+			SuccessAfterFailures: cfg.Detect.SuccessAfterFailures,
+			MaxTracked:           cfg.Detect.MaxTracked,
+			BanCount:             func(ip string) int { return banCount(st, ip) },
+			Allowed:              st.IsAllowed,
+			Host:                 host,
+		})
+	}
+
 	pl, err := pipeline.New(pipeline.Options{
-		AuditLog:         cfg.AuditLog,
-		StateDir:         cfg.StateDir,
-		Host:             host,
-		ReadFromStart:    cfg.ReadFromStart,
-		HeartbeatEnabled: cfg.Heartbeat.Enabled,
-		HeartbeatEvery:   cfg.Heartbeat.CheckEvery,
-		HeartbeatStale:   cfg.Heartbeat.StaleAfter,
-		Debug:            cfg.Debug,
-		Store:            st,
-		Notifier:         bot,
-		Logger:           log,
+		AuditLog:                cfg.AuditLog,
+		StateDir:                cfg.StateDir,
+		Host:                    host,
+		ReadFromStart:           cfg.ReadFromStart,
+		HeartbeatEnabled:        cfg.Heartbeat.Enabled,
+		HeartbeatEvery:          cfg.Heartbeat.CheckEvery,
+		HeartbeatStale:          cfg.Heartbeat.StaleAfter,
+		Debug:                   cfg.Debug,
+		Detector:                detector,
+		Banner:                  banner,
+		AutoAllowlistFirstLogin: cfg.Ban.AutoAllowlist == config.AutoAllowFirstLogin,
+		Store:                   st,
+		Notifier:                bot,
+		Logger:                  log,
 	})
 	if err != nil {
 		return err
@@ -298,7 +360,16 @@ func cmdRun(args []string) error {
 		"version", version, "host", host, "profile", cfg.Profile, "lang", string(cfg.Language()),
 		"audit_log", cfg.AuditLog, "state_dir", cfg.StateDir,
 		"min_severity", cfg.Telegram.MinSeverity, "debug", cfg.Debug,
-		"banner", action.NoopBanner{}.Name(), "detector", "none (v0.2)")
+		"detect", cfg.Detect.Enabled, "ban_backend", cfg.Ban.Backend,
+		"auto_allowlist", cfg.Ban.AutoAllowlist)
+
+	if cfg.Detect.Enabled && !cfg.EnforcesBans() {
+		// Saying this plainly matters: the owner would otherwise believe the
+		// agent is blocking attackers when it is only writing them down.
+		log.Warn("ban decisions are recorded and reported but NOT applied on the host",
+			"reason", "ban.backend is none",
+			"how_to_enable", "see the README section on bans (needs NET_ADMIN and host networking)")
+	}
 
 	if cfg.Debug {
 		log.Warn("debug mode is on: the log records every audit line, every ignored record and every alert decision",

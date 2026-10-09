@@ -69,11 +69,39 @@ heartbeat:
   stale_after: 6h
   check_every: 1m
 
-# Brute-force detector — arrives in v0.2, parsed now so this file keeps working.
+# Brute-force detector. Counts failed logins per source address over a sliding
+# window and bans the address when the threshold is reached.
 detect:
-  enabled: false
+  enabled: true
   window: 10m
   fail_threshold: 10
+  # How many failures from one address make a later success from it suspicious.
+  # That success is the signal that matters most — it is what a guessed
+  # password looks like — and it is reported as critical. Zero switches it off.
+  success_after_failures: 10
+  # Cap on addresses remembered, so a spray from thousands of sources cannot
+  # grow the agent's memory.
+  max_tracked: 10000
+
+# What happens to a ban decision.
+ban:
+  # none     — record and report the decision, change nothing on the host.
+  #            The default, because the container runs with every capability
+  #            dropped and cannot touch the firewall.
+  # nftables — actually block the address. Needs NET_ADMIN and the host network
+  #            namespace: see deploy/compose.enforce.yml, or run the binary
+  #            install as root. Everything lives in the agent's own
+  #            "inet auditdsec" table, so your firewall is not touched.
+  backend: none
+  # Log the exact nft command instead of running it. Worth a try first: the
+  # failure mode of this feature is locking yourself out.
+  dry_run: false
+  table: auditdsec
+  # first_login — protect the source of the first successful login after the
+  #               agent starts, which is almost always the person installing
+  #               it. This is what stops the detector banning its own owner.
+  # off         — no automatic protection; use /allow instead.
+  auto_allowlist: first_login
 
 # CrowdSec integration — arrives in v0.3.
 crowdsec:

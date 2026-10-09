@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/model"
+	"github.com/RsNest/auditdsec/internal/store"
 )
 
 // Notify delivers one event, applying the alert policy in this order: severity
@@ -176,6 +177,39 @@ func (c *Client) allowRate(now time.Time) bool {
 	}
 	c.tokens--
 	return true
+}
+
+// NotifyBan reports a ban. The message says plainly whether the address is
+// actually blocked or the decision was only recorded, because the difference
+// is the whole point: a ban nobody applied protects nothing.
+func (c *Client) NotifyBan(ctx context.Context, b store.Ban, applyErr error) error {
+	args := map[string]string{
+		"ip":     b.IP,
+		"reason": b.Reason,
+		"until":  c.fmtTime(b.Until),
+	}
+	key := "ui.ban.auto"
+	if b.Permanent() {
+		key = "ui.ban.auto_permanent"
+	}
+	text := "🚫 " + c.tr(key, args)
+	if applyErr != nil {
+		text += "\n\n" + c.tr("ui.ban.not_applied", map[string]string{
+			"ip": b.IP, "error": applyErr.Error(),
+		})
+	} else if !c.opt.Enforcing {
+		text += "\n\n" + c.tr("ui.ban.no_backend", nil)
+	}
+	kb := &inlineKeyboard{Rows: [][]inlineButton{{
+		{Text: c.tr("ui.btn.unban", map[string]string{"ip": b.IP}), Data: "unban:" + b.IP},
+		{Text: c.tr("ui.btn.me", nil), Data: "allow:" + b.IP},
+	}}}
+	return c.Broadcast(ctx, text, kb)
+}
+
+// NotifyMessage sends a plain localized notice.
+func (c *Client) NotifyMessage(ctx context.Context, key string, args map[string]string) error {
+	return c.Broadcast(ctx, c.tr(key, args), nil)
 }
 
 // SendStartupNotice tells the chat the agent is alive, which doubles as the

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/i18n"
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/store"
@@ -27,7 +28,10 @@ const (
 	defaultAPIBase = "https://api.telegram.org"
 	sendTimeout    = 15 * time.Second
 	pollTimeout    = 30 // seconds, Telegram long polling
-	metaOffsetKey  = "tg_update_offset"
+	// pollIdlePause keeps the bot loop from spinning when the endpoint answers
+	// an empty poll immediately instead of holding it open.
+	pollIdlePause = 2 * time.Second
+	metaOffsetKey = "tg_update_offset"
 )
 
 // Options configures the client.
@@ -50,6 +54,13 @@ type Options struct {
 	// level its own log is written at. Both are shown by /debug.
 	Debug    bool
 	LogLevel string
+
+	// Enforcing reports whether a ban decision actually reaches the firewall.
+	// When it does not, every ban message says so.
+	Enforcing bool
+	// Enforcer applies the bans pressed by hand in the chat. Nil means the
+	// button records the decision and nothing more.
+	Enforcer Enforcer
 
 	MinSeverity   model.Severity
 	DedupWindow   time.Duration
@@ -228,6 +239,13 @@ func (c *Client) Broadcast(ctx context.Context, text string, kb *inlineKeyboard)
 		}
 	}
 	return firstErr
+}
+
+// Enforcer is the part of action.Banner the bot needs, so pressing a button
+// can actually block an address instead of only noting that it should be.
+type Enforcer interface {
+	Ban(ctx context.Context, d action.Decision) error
+	Unban(ctx context.Context, ip string) error
 }
 
 // DiagItem is one line of the /debug report: an i18n key for the label and the

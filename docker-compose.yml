@@ -10,6 +10,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
+      target: minimal
       args:
         VERSION: ${AUDITDSEC_VERSION:-0.1.0}
     image: auditdsec:${AUDITDSEC_VERSION:-0.1.0}
