@@ -1,0 +1,16 @@
+# binaries
+/auditdsec
+/bin/
+*.exe
+# state and secrets
+/state/
+*.db
+config.yaml
+.env
+# go
+*.test
+*.out
+vendor/
+# IDE
+.idea/
+.vscode/
