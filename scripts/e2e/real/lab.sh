@@ -130,8 +130,10 @@ build_certbot_image() {
     cp /etc/ssl/certs/ca-certificates.crt "$R/etc/ssl/certs/"
     mkdir -p "$R/usr/local/bin"
     ln -s /opt/certbot/bin/certbot "$R/usr/local/bin/certbot"
-    ln -s /opt/certbot/bin/python3 "$R/usr/local/bin/python3"
-    ln -s /opt/certbot/bin/python3 "$R/usr/bin/python3"
+    # A symlink would hide the venv from Python (it looks for pyvenv.cfg next
+    # to the path it was started by), so python3 is a one-line wrapper.
+    printf '#!/bin/sh\nexec /opt/certbot/bin/python3 "$@"\n' > "$R/usr/local/bin/python3"
+    chmod 755 "$R/usr/local/bin/python3"
     cat > "$ctx/Dockerfile" <<'EOF'
 FROM scratch
 COPY rootfs /
@@ -186,8 +188,12 @@ start_pebble() { # NAME LISTEN MGMT
     local dir="$LAB/pebble-$1"
     pebble_config "$dir" "$2" "$3"
     if [ -f "$dir/pid" ] && kill -0 "$(cat "$dir/pid")" 2>/dev/null; then return 0; fi
-    (cd "$dir" && PEBBLE_VA_NOSLEEP=1 PEBBLE_AUTHZREUSE=0 PEBBLE_WFE_NONCEREJECT=0 \
-        nohup "$LAB/pebble-bin" -config config.json > pebble.log 2>&1 & echo $! > pid)
+    (
+        cd "$dir"
+        PEBBLE_VA_NOSLEEP=1 PEBBLE_AUTHZREUSE=0 PEBBLE_WFE_NONCEREJECT=0 \
+            nohup "$LAB/pebble-bin" -config config.json > pebble.log 2>&1 &
+        echo $! > "$dir/pid"
+    )
     for _ in $(seq 1 20); do
         curl -s -o /dev/null --cacert "$LAB/pebble-src/test/certs/pebble.minica.pem" "https://localhost:$2/dir" && return 0
         sleep 0.5
