@@ -297,6 +297,11 @@ curl -s "https://api.telegram.org/bot<ТОКЕН>/getUpdates" | grep -o '"chat":
 docker compose run --rm --entrypoint /usr/local/bin/auditdsec auditdsec hash-password
 ```
 
+Команда спросит пароль дважды и не покажет его на экране — она ждёт ввода, а не
+зависла. Печатает она только хеш: его и нужно скопировать. Пароль аргументом
+команда не принимает, иначе он остался бы в истории оболочки; чтобы передать его из
+скрипта, есть `hash-password -stdin`.
+
 Положите результат в `.env`:
 
 ```sh

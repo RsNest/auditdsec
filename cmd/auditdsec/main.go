@@ -150,7 +150,7 @@ Usage:
                                      follow the audit log (the default command)
   auditdsec check-config [-config F] load the settings and report problems
   auditdsec explain KIND [-lang ru]  explain one kind of event
-  auditdsec hash-password            hash a panel password (read from stdin)
+  auditdsec hash-password [-stdin]   hash a panel password for the web panel
   auditdsec version                  print the build version
 
 Environment (overrides the file):
@@ -237,34 +237,82 @@ func cmdExplain(args []string) error {
 }
 
 // cmdHashPassword turns a password into the hash the config file holds, so the
-// plain password never has to be stored. It reads stdin so the password does
-// not end up in the shell history.
+// plain password is never stored. It reads from the terminal with echo off, so
+// the password does not stay in the scrollback either, and asks twice because
+// a typo in something you cannot see is otherwise only discovered at the sign-in
+// screen.
 func cmdHashPassword(args []string) error {
 	fs := flag.NewFlagSet("hash-password", flag.ContinueOnError)
+	stdin := fs.Bool("stdin", false, "read the password from standard input instead of the terminal")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	var password string
 	if fs.NArg() > 0 {
-		password = fs.Arg(0)
-	} else {
-		fmt.Fprint(os.Stderr, "password: ")
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil && line == "" {
-			return fmt.Errorf("cannot read the password: %w", err)
-		}
-		password = strings.TrimRight(line, "\r\n")
+		return fmt.Errorf("the password is not taken as an argument, because it would stay in the shell history;\n" +
+			"run `auditdsec hash-password` and type it, or pipe it in with `-stdin`")
 	}
-	if len([]rune(password)) < 12 {
-		return fmt.Errorf("use at least 12 characters")
+
+	password, err := readPassword(*stdin)
+	if err != nil {
+		return err
 	}
+	if len([]rune(password)) < minPasswordLen {
+		return fmt.Errorf("use at least %d characters", minPasswordLen)
+	}
+
 	hash, err := api.HashPassword(password)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("%s\n", hash)
-	fmt.Fprint(os.Stderr, "\nPut it in the config:\n\nweb:\n  enabled: true\n  password_hash: \"<the line above>\"\n")
+	fmt.Fprintf(os.Stderr, "\nThis is the hash, not the password: it is safe to paste into a file.\n"+
+		"  .env:          AUDITDSEC_WEB_PASSWORD_HASH=<the line above>\n"+
+		"  auditdsec.yaml: web.password_hash: \"<the line above>\"\n")
 	return nil
+}
+
+// minPasswordLen matches what the configuration will accept.
+const minPasswordLen = 12
+
+func readPassword(fromStdin bool) (string, error) {
+	in := bufio.NewReader(os.Stdin)
+	readLine := func() (string, error) {
+		line, err := in.ReadString('\n')
+		if err != nil && line == "" {
+			return "", fmt.Errorf("cannot read the password: %w", err)
+		}
+		return strings.TrimRight(line, "\r\n"), nil
+	}
+	if fromStdin {
+		return readLine()
+	}
+
+	var first, second string
+	var readErr error
+	prompt := func() {
+		fmt.Fprint(os.Stderr, "password: ")
+		first, readErr = readLine()
+		fmt.Fprintln(os.Stderr)
+		if readErr != nil {
+			return
+		}
+		fmt.Fprint(os.Stderr, "again: ")
+		second, readErr = readLine()
+		fmt.Fprintln(os.Stderr)
+	}
+
+	if !withoutEcho(os.Stdin.Fd(), prompt) {
+		// Not a terminal: something is piping the password in. Read one line
+		// and do not ask again, which would consume the next line of input.
+		return readLine()
+	}
+	if readErr != nil {
+		return "", readErr
+	}
+	if first != second {
+		return "", fmt.Errorf("the two passwords do not match")
+	}
+	return first, nil
 }
 
 func cmdRun(args []string) error {
