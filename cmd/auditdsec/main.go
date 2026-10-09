@@ -45,6 +45,31 @@ const defaultConfigPath = "/etc/auditdsec/auditdsec.yaml"
 // shutdownGrace is how long the agent waits for its goroutines to finish.
 const shutdownGrace = 10 * time.Second
 
+// hostnameFile is where docker-compose.yml mounts the host's /etc/hostname. In
+// a container os.Hostname() returns the container id, so alerts would be
+// labelled "a1b2c3d4e5f6" instead of naming the server they came from — which
+// is useless the moment you watch more than one machine.
+const hostnameFile = "/etc/host-hostname"
+
+// resolveHost decides the name that appears in every alert: the configured one,
+// then the host's own name if it was mounted in, then whatever the kernel says.
+func resolveHost(configured, mounted string) string {
+	if h := strings.TrimSpace(configured); h != "" {
+		return h
+	}
+	if mounted != "" {
+		if b, err := os.ReadFile(mounted); err == nil {
+			if h := strings.TrimSpace(string(b)); h != "" {
+				return h
+			}
+		}
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "unknown"
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "auditdsec: %v\n", err)
@@ -201,14 +226,8 @@ func cmdRun(args []string) error {
 		defer closer.Close()
 	}
 
-	host := cfg.Host
-	if host == "" {
-		if h, err := os.Hostname(); err == nil {
-			host = h
-		} else {
-			host = "unknown"
-		}
-	}
+	host := resolveHost(cfg.Host, hostnameFile)
+	log.Debug("host name resolved", "host", host, "configured", cfg.Host != "")
 
 	st, err := store.Open(store.Options{
 		Dir:           cfg.StateDir,

@@ -13,6 +13,9 @@ services:
       args:
         VERSION: ${AUDITDSEC_VERSION:-0.1.0}
     image: auditdsec:${AUDITDSEC_VERSION:-0.1.0}
+    # The image is built here and never published, so do not try a registry
+    # first: that only prints a confusing "pull access denied" warning.
+    pull_policy: build
     container_name: auditdsec
     restart: unless-stopped
 
@@ -36,6 +39,9 @@ services:
     volumes:
       - /var/log/audit:/var/log/audit:ro
       - auditdsec-state:/var/lib/auditdsec
+      # Inside a container the host name is the container id, which would label
+      # every alert with a hex blob. This lets the agent read the real one.
+      - /etc/hostname:/etc/host-hostname:ro
       # Uncomment to use a configuration file instead of variables:
       # - ./auditdsec.yaml:/etc/auditdsec/auditdsec.yaml:ro
 
