@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -105,6 +106,26 @@ type CrowdSecConfig struct {
 	APIKey  string
 }
 
+// WebConfig is the panel. It is off unless asked for, and it refuses to start
+// without credentials: a panel that lists bans and audit events must never be
+// reachable with a default password.
+type WebConfig struct {
+	Enabled bool
+	Listen  string
+	Login   string
+	// PasswordHash is "pbkdf2-sha256$iterations$salt$hash"; make one with
+	// `auditdsec hash-password`. Password is the plain alternative for a
+	// container environment; it is hashed in memory at startup.
+	PasswordHash string
+	Password     string
+	SessionTTL   time.Duration
+	// TrustedProxies are the networks a reverse proxy may connect from. Only
+	// a request whose peer is in one of them has its X-Forwarded-For believed;
+	// anyone else could otherwise forge the address the rate limiter counts
+	// and the log records. Empty means the peer address is always used.
+	TrustedProxies []string
+}
+
 // Config is the whole configuration.
 type Config struct {
 	Profile       string
@@ -125,6 +146,7 @@ type Config struct {
 	Detect    DetectConfig
 	Ban       BanConfig
 	CrowdSec  CrowdSecConfig
+	Web       WebConfig
 
 	// Filled by validate.
 	lang      i18n.Lang
@@ -134,6 +156,7 @@ type Config struct {
 	badChatID string // a malformed chat id from the environment, reported by validate
 	badDebug  string // a malformed AUDITDSEC_DEBUG value, reported by validate
 	badDryRun string // a malformed AUDITDSEC_BAN_DRY_RUN value
+	badWeb    string // a malformed AUDITDSEC_WEB* switch
 }
 
 // Defaults returns the preset for a profile. The simple profile is tuned for
@@ -172,6 +195,7 @@ func Defaults(profile string) *Config {
 			AutoAllowlist: AutoAllowFirstLogin,
 		},
 		CrowdSec: CrowdSecConfig{Enabled: false, Mode: "push", LAPIURL: "http://127.0.0.1:8080"},
+		Web:      WebConfig{Listen: "127.0.0.1:9477", Login: "admin", SessionTTL: 12 * time.Hour},
 	}
 	if profile == ProfilePro {
 		c.Telegram.MinSeverity = "info"
@@ -234,7 +258,7 @@ func (c *Config) decode(root *node) error {
 	d := &dec{}
 	d.strict(root, "", "profile", "lang", "host", "audit_log", "state_dir",
 		"read_from_start", "debug", "log", "telegram", "store", "heartbeat",
-		"detect", "ban", "crowdsec")
+		"detect", "ban", "crowdsec", "web")
 
 	d.str(root, "lang", &c.Lang)
 	d.str(root, "host", &c.Host)
@@ -305,6 +329,16 @@ func (c *Config) decode(root *node) error {
 		d.str(n, "api_key", &c.CrowdSec.APIKey)
 	}
 
+	if n := d.section(root, "web"); n != nil {
+		d.strict(n, "web", "enabled", "listen", "login", "password_hash", "session_ttl", "trusted_proxies")
+		d.boolean(n, "enabled", &c.Web.Enabled)
+		d.str(n, "listen", &c.Web.Listen)
+		d.str(n, "login", &c.Web.Login)
+		d.str(n, "password_hash", &c.Web.PasswordHash)
+		d.duration(n, "session_ttl", &c.Web.SessionTTL)
+		d.strList(n, "trusted_proxies", &c.Web.TrustedProxies)
+	}
+
 	return d.err()
 }
 
@@ -360,6 +394,29 @@ func (c *Config) applyEnv() {
 		default:
 			c.badDebug = v
 		}
+	}
+	envStr("AUDITDSEC_WEB_LISTEN", &c.Web.Listen)
+	envStr("AUDITDSEC_WEB_LOGIN", &c.Web.Login)
+	envStr("AUDITDSEC_WEB_PASSWORD_HASH", &c.Web.PasswordHash)
+	envStr("AUDITDSEC_WEB_PASSWORD", &c.Web.Password)
+	if v := os.Getenv("AUDITDSEC_WEB"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Web.Enabled = true
+		case "0", "false", "no", "off":
+			c.Web.Enabled = false
+		default:
+			c.badWeb = v
+		}
+	}
+	if v := os.Getenv("AUDITDSEC_WEB_TRUSTED_PROXIES"); v != "" {
+		var out []string
+		for _, part := range strings.Split(v, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				out = append(out, part)
+			}
+		}
+		c.Web.TrustedProxies = out
 	}
 	if v := os.Getenv("AUDITDSEC_RETENTION_DAYS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -495,10 +552,54 @@ func (c *Config) validate() error {
 		}
 	}
 
+	c.validateWeb(add)
+
 	if len(errs) > 0 {
 		return fmt.Errorf("config is not valid:\n  - %s", strings.Join(errs, "\n  - "))
 	}
 	return nil
+}
+
+// minPasswordLen is the shortest plain password accepted from the environment.
+const minPasswordLen = 12
+
+func (c *Config) validateWeb(add func(string, ...any)) {
+	if c.badWeb != "" {
+		add("AUDITDSEC_WEB*: %q is not a yes/no value (use 1 or 0)", c.badWeb)
+	}
+	if !c.Web.Enabled {
+		return
+	}
+	w := c.Web
+	if strings.TrimSpace(w.Login) == "" {
+		add("web.login: must not be empty")
+	}
+	switch {
+	case w.PasswordHash == "" && w.Password == "":
+		add("web: set web.password_hash (see `auditdsec hash-password`) or AUDITDSEC_WEB_PASSWORD; the panel never starts without a password")
+	case w.PasswordHash != "" && !strings.HasPrefix(w.PasswordHash, "pbkdf2-sha256$"):
+		add("web.password_hash: not a hash made by `auditdsec hash-password`")
+	case w.PasswordHash == "" && len([]rune(w.Password)) < minPasswordLen:
+		add("AUDITDSEC_WEB_PASSWORD: use at least %d characters", minPasswordLen)
+	}
+	host, _, err := net.SplitHostPort(w.Listen)
+	if err != nil {
+		add("web.listen: expected host:port, got %q", w.Listen)
+		return
+	}
+	if ip := net.ParseIP(host); host != "" && host != "localhost" && ip != nil && !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsUnspecified() {
+		add("web.listen: %q is a public address; put the panel behind the bundled reverse proxy and listen on 127.0.0.1 instead", host)
+	}
+	for _, p := range w.TrustedProxies {
+		if _, _, err := net.ParseCIDR(p); err != nil {
+			if net.ParseIP(p) == nil {
+				add("web.trusted_proxies: %q is not an address or a network in CIDR form", p)
+			}
+		}
+	}
+	if w.SessionTTL <= 0 {
+		add("web.session_ttl: must be positive")
+	}
 }
 
 // Language returns the validated UI language.
@@ -554,6 +655,20 @@ func (c *Config) Redacted() string {
 		c.Detect.Enabled, shortDur(c.Detect.Window), c.Detect.FailThreshold, c.Detect.SuccessAfterFailures)
 	fmt.Fprintf(&b, "ban:              backend=%s dry_run=%t auto_allowlist=%s\n",
 		c.Ban.Backend, c.Ban.DryRun, orDefault(c.Ban.AutoAllowlist, AutoAllowOff))
+	if c.Web.Enabled {
+		pw := "hash"
+		if c.Web.PasswordHash == "" {
+			pw = "plain (hashed in memory)"
+		}
+		proxies := "none"
+		if len(c.Web.TrustedProxies) > 0 {
+			proxies = strings.Join(c.Web.TrustedProxies, ",")
+		}
+		fmt.Fprintf(&b, "web:              listen=%s login=%s password=%s session=%s trusted_proxies=%s\n",
+			c.Web.Listen, c.Web.Login, pw, shortDur(c.Web.SessionTTL), proxies)
+	} else {
+		fmt.Fprintf(&b, "web:              off\n")
+	}
 	fmt.Fprintf(&b, "crowdsec:         enabled=%t mode=%s key=%s (v0.3)\n", c.CrowdSec.Enabled, c.CrowdSec.Mode, redact.Token(c.CrowdSec.APIKey))
 	return b.String()
 }

@@ -329,3 +329,90 @@ func TestReadDaySkipsBrokenLines(t *testing.T) {
 		t.Errorf("Total = %d, want 1 (the broken line is skipped)", st.Total)
 	}
 }
+
+// Scan is what the panel's event list is built on: newest first, ids that sort
+// in storage order so a cursor can resume, and a window that is respected.
+func TestScanWalksNewestFirstWithStableIDs(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	st, err := Open(Options{Dir: dir, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// Two days, three events, written oldest first.
+	times := []time.Time{
+		now.AddDate(0, 0, -1).Add(-2 * time.Hour),
+		now.Add(-3 * time.Hour),
+		now.Add(-time.Hour),
+	}
+	for i, at := range times {
+		if err := st.AppendEvent(model.Event{
+			Time: at, Host: "h", Kind: model.KindSudo, Severity: model.SevInfo,
+			User: "u", SummaryKey: "event.sudo", Args: map[string]string{"n": string(rune('a' + i))},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var ids []string
+	var seen []time.Time
+	if err := st.Scan(time.Time{}, time.Time{}, func(id string, ev model.Event) bool {
+		ids = append(ids, id)
+		seen = append(seen, ev.Time)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 3 {
+		t.Fatalf("scanned %d events, want 3", len(seen))
+	}
+	for i := 1; i < len(seen); i++ {
+		if !seen[i].Before(seen[i-1]) {
+			t.Errorf("event %d is not older than the one before it", i)
+		}
+		if ids[i] >= ids[i-1] {
+			t.Errorf("ids do not descend: %q then %q", ids[i-1], ids[i])
+		}
+	}
+
+	// Resuming below a cursor must not repeat it.
+	var after []string
+	if err := st.Scan(time.Time{}, time.Time{}, func(id string, _ model.Event) bool {
+		if id >= ids[0] {
+			return true
+		}
+		after = append(after, id)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 2 || after[0] != ids[1] {
+		t.Errorf("resuming gave %v, want %v", after, ids[1:])
+	}
+
+	// A window excludes what falls outside it.
+	count := 0
+	if err := st.Scan(now.Add(-2*time.Hour), now, func(string, model.Event) bool {
+		count++
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("the window returned %d events, want 1", count)
+	}
+
+	// Stopping early stops the walk.
+	calls := 0
+	if err := st.Scan(time.Time{}, time.Time{}, func(string, model.Event) bool {
+		calls++
+		return false
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("the callback ran %d times after asking to stop", calls)
+	}
+}

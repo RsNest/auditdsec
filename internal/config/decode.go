@@ -153,6 +153,34 @@ func (d *dec) int64List(parent *node, key string, dst *[]int64) {
 	*dst = out
 }
 
+func (d *dec) strList(parent *node, key string, dst *[]string) {
+	c, found := parent.child(key)
+	if !found {
+		return
+	}
+	var items []string
+	switch c.kind {
+	case nodeList:
+		items = c.list
+	case nodeScalar:
+		if strings.TrimSpace(c.str) == "" {
+			*dst = nil
+			return
+		}
+		items = strings.Split(c.str, ",")
+	default:
+		d.fail("%s: expected a list of strings", key)
+		return
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		if it = strings.TrimSpace(it); it != "" {
+			out = append(out, it)
+		}
+	}
+	*dst = out
+}
+
 func sectionPath(path string) string {
 	if path == "" {
 		return "top level"

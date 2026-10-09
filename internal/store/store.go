@@ -479,3 +479,37 @@ func (s *Store) saveStateLocked() error {
 	}
 	return nil
 }
+
+// maxScanDays bounds how far back Scan walks when no start is given.
+const maxScanDays = 120
+
+// Scan walks stored events newest first, between from and to (zero values mean
+// "as far as retention goes" and "now"). Each event comes with an id of the
+// form "YYYY-MM-DD:NNNNNN" that sorts in storage order, so a caller can resume
+// below a given id. fn returns false to stop.
+func (s *Store) Scan(from, to time.Time, fn func(id string, ev model.Event) bool) error {
+	now := s.now().UTC()
+	if to.IsZero() || to.After(now) {
+		to = now
+	}
+	if from.IsZero() {
+		from = to.AddDate(0, 0, -maxScanDays)
+	}
+	for d := to.UTC().Truncate(24 * time.Hour); !d.Before(from.UTC().Truncate(24 * time.Hour)); d = d.AddDate(0, 0, -1) {
+		day := d.Format(dayLayout)
+		evs, err := s.readDay(day)
+		if err != nil {
+			return err
+		}
+		for i := len(evs) - 1; i >= 0; i-- {
+			ev := evs[i]
+			if ev.Time.Before(from) || ev.Time.After(to) {
+				continue
+			}
+			if !fn(fmt.Sprintf("%s:%06d", day, i), ev) {
+				return nil
+			}
+		}
+	}
+	return nil
+}

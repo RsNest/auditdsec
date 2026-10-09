@@ -6,10 +6,12 @@
 //	auditdsec run [-config FILE]     follow the audit log (the default)
 //	auditdsec check-config [-config] load the settings and report problems
 //	auditdsec explain KIND [-lang]   explain one kind of event
+//	auditdsec hash-password          hash a panel password for the config
 //	auditdsec version                print the build version
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -24,6 +26,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/action"
+	"github.com/RsNest/auditdsec/internal/api"
 	"github.com/RsNest/auditdsec/internal/config"
 	"github.com/RsNest/auditdsec/internal/detect"
 	"github.com/RsNest/auditdsec/internal/i18n"
@@ -125,6 +128,8 @@ func run(args []string) error {
 		return cmdCheckConfig(args)
 	case "explain":
 		return cmdExplain(args)
+	case "hash-password":
+		return cmdHashPassword(args)
 	case "version":
 		fmt.Printf("auditdsec %s (commit %s, built %s, %s)\n", version, commit, date, runtime.Version())
 		return nil
@@ -145,6 +150,7 @@ Usage:
                                      follow the audit log (the default command)
   auditdsec check-config [-config F] load the settings and report problems
   auditdsec explain KIND [-lang ru]  explain one kind of event
+  auditdsec hash-password            hash a panel password (read from stdin)
   auditdsec version                  print the build version
 
 Environment (overrides the file):
@@ -160,6 +166,12 @@ Environment (overrides the file):
   AUDITDSEC_LOG_LEVEL     debug, info, warn or error
   AUDITDSEC_MIN_SEVERITY  info, warn or critical
   AUDITDSEC_RETENTION_DAYS how long events are kept
+  AUDITDSEC_WEB           1 turns the web panel on
+  AUDITDSEC_WEB_LISTEN    address the panel listens on
+  AUDITDSEC_WEB_LOGIN     panel login name
+  AUDITDSEC_WEB_PASSWORD_HASH  panel password hash (hash-password)
+  AUDITDSEC_WEB_PASSWORD  panel password in plain text, hashed at startup
+  AUDITDSEC_WEB_TRUSTED_PROXIES  networks a reverse proxy may connect from
 `)
 }
 
@@ -221,6 +233,37 @@ func cmdExplain(args []string) error {
 		return fmt.Errorf("unknown event kind %q (kinds: %s)", fs.Arg(0), strings.Join(kinds, ", "))
 	}
 	fmt.Printf("%s\n\n%s\n", kind, i18n.T(lang, "explain."+string(kind), nil))
+	return nil
+}
+
+// cmdHashPassword turns a password into the hash the config file holds, so the
+// plain password never has to be stored. It reads stdin so the password does
+// not end up in the shell history.
+func cmdHashPassword(args []string) error {
+	fs := flag.NewFlagSet("hash-password", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	var password string
+	if fs.NArg() > 0 {
+		password = fs.Arg(0)
+	} else {
+		fmt.Fprint(os.Stderr, "password: ")
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && line == "" {
+			return fmt.Errorf("cannot read the password: %w", err)
+		}
+		password = strings.TrimRight(line, "\r\n")
+	}
+	if len([]rune(password)) < 12 {
+		return fmt.Errorf("use at least 12 characters")
+	}
+	hash, err := api.HashPassword(password)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s\n", hash)
+	fmt.Fprint(os.Stderr, "\nPut it in the config:\n\nweb:\n  enabled: true\n  password_hash: \"<the line above>\"\n")
 	return nil
 }
 
@@ -385,6 +428,21 @@ func cmdRun(args []string) error {
 		}
 	}
 
+	// The panel, when it is switched on. It refuses to start without a
+	// password, which is why this happens before anything else is launched.
+	var panel *api.Server
+	if cfg.Web.Enabled {
+		panel, err = api.New(api.Options{
+			Config: cfg, Store: st, Enforcer: enforcer, Runtime: pl,
+			Host: host, Version: version, Started: started, Logger: log,
+		})
+		if err != nil {
+			return err
+		}
+		log.Info("web panel enabled", "listen", cfg.Web.Listen, "login", cfg.Web.Login,
+			"session_ttl", cfg.Web.SessionTTL, "trusted_proxies", cfg.Web.TrustedProxies)
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() {
@@ -397,6 +455,15 @@ func cmdRun(args []string) error {
 		defer wg.Done()
 		bot.RunGrouper(ctx)
 	}()
+	if panel != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := panel.ListenAndServe(ctx); err != nil {
+				log.Error("the web panel stopped", "error", err)
+			}
+		}()
+	}
 	runErr := make(chan error, 1)
 	go func() {
 		defer wg.Done()

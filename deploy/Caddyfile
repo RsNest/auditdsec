@@ -1,0 +1,42 @@
+# Caddy in front of the panel. It terminates TLS, gets and renews the
+# certificate from Let's Encrypt on its own, and passes requests to the agent
+# on the host's loopback address.
+#
+# Two variables come from the environment (see .env.example):
+#   PANEL_DOMAIN  the name the certificate is issued for
+#   PANEL_EMAIL   where Let's Encrypt sends expiry warnings
+#   PANEL_UPSTREAM  where the agent listens, 127.0.0.1:9477 by default
+
+{
+	email {$PANEL_EMAIL}
+	# Comment the next line in while testing, so a mistake does not burn
+	# through Let's Encrypt's rate limit for the real certificate.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$PANEL_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		# The panel is only ever served over TLS once this proxy is in front
+		# of it, so tell the browser never to try plain HTTP again.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# The agent sets its own content policy, so nothing here needs to.
+	reverse_proxy {$PANEL_UPSTREAM:127.0.0.1:9477} {
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	log {
+		output file /var/log/caddy/panel.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+		format json
+	}
+}
