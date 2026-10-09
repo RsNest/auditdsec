@@ -420,15 +420,27 @@ func (c *Config) Redacted() string {
 	fmt.Fprintf(&b, "log:              %s (level %s, %d MB x %d)\n", c.Log.File, c.Log.Level, c.Log.MaxSizeMB, c.Log.MaxBackups)
 	fmt.Fprintf(&b, "telegram.token:   %s\n", redact.Token(c.Telegram.Token))
 	fmt.Fprintf(&b, "telegram.chats:   %v\n", c.Telegram.ChatIDs)
-	fmt.Fprintf(&b, "telegram.alerts:  from %s, dedup %s, %d msg/min\n", c.Telegram.MinSeverity, c.Telegram.DedupWindow, c.Telegram.RatePerMinute)
+	fmt.Fprintf(&b, "telegram.alerts:  from %s, dedup %s, %d msg/min\n", c.Telegram.MinSeverity, shortDur(c.Telegram.DedupWindow), c.Telegram.RatePerMinute)
 	if _, _, ok := c.QuietHours(); ok {
 		fmt.Fprintf(&b, "telegram.quiet:   %s-%s\n", c.Telegram.QuietFrom, c.Telegram.QuietTo)
 	}
 	fmt.Fprintf(&b, "store:            %d days, %d recent\n", c.Store.RetentionDays, c.Store.MaxRecent)
-	fmt.Fprintf(&b, "heartbeat:        enabled=%t stale_after=%s every=%s\n", c.Heartbeat.Enabled, c.Heartbeat.StaleAfter, c.Heartbeat.CheckEvery)
+	fmt.Fprintf(&b, "heartbeat:        enabled=%t stale_after=%s every=%s\n", c.Heartbeat.Enabled, shortDur(c.Heartbeat.StaleAfter), shortDur(c.Heartbeat.CheckEvery))
 	fmt.Fprintf(&b, "detect:           enabled=%t (v0.2)\n", c.Detect.Enabled)
 	fmt.Fprintf(&b, "crowdsec:         enabled=%t mode=%s key=%s (v0.3)\n", c.CrowdSec.Enabled, c.CrowdSec.Mode, redact.Token(c.CrowdSec.APIKey))
 	return b.String()
+}
+
+// shortDur prints a duration the way the config file spells it: 10m, not 10m0s.
+func shortDur(d time.Duration) string {
+	s := d.Round(time.Second).String()
+	if strings.HasSuffix(s, "m0s") {
+		s = s[:len(s)-2]
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = s[:len(s)-2]
+	}
+	return s
 }
 
 func orDefault(s, def string) string {

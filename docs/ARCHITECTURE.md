@@ -1,60 +1,136 @@
 # auditdsec — architecture
 
-Lightweight Go agent: reads Linux auditd log, turns raw records into human-readable security events,
-sends them to Telegram, detects brute force and bans attackers (own detector + CrowdSec).
-Target: ordinary VPS owners (profile `simple`) and admins of 5–10 hosts (profile `pro`).
-Same binary, different config presets. Docker is the primary install, a static binary is the fallback.
+Lightweight Go agent: reads the Linux auditd log, turns raw records into human-readable
+security events, sends them to Telegram, and (from v0.2) detects brute force and bans
+attackers. Target users: ordinary VPS owners (profile `simple`) and admins of 5–10 hosts
+(profile `pro`). One binary, different presets. Docker is the primary install, a static
+binary the fallback.
 
 ## Constraints
-- Go 1.24, single static binary (CGO_ENABLED=0), ~15–30 MB RAM.
-- Prefer stdlib. Allowed deps: `gopkg.in/yaml.v3`, `modernc.org/sqlite`, `github.com/fsnotify/fsnotify`, `gopkg.in/natefinch/lumberjack.v2`. Telegram via plain net/http (no heavy SDK).
-- auditd stays on the host. Container mounts `/var/log/audit:ro`. Container never needs NET_ADMIN in the default setup.
-- Own logs: JSON, rotated with lumberjack. Docker: `read_only`, `mem_limit: 64m`, `cap_drop: ALL`, json-file log driver with max-size/max-file.
-- UI language: Russian primary, English secondary (i18n from day one, `internal/i18n`).
+
+- Go 1.24, one static binary (`CGO_ENABLED=0`), ~7 MB, tens of MB of RAM.
+- **No external dependencies — standard library only.** This started as a build
+  constraint (the egress policy of the build environment reaches `github.com` only, so
+  `proxy.golang.org`, `gopkg.in`, `modernc.org` and `golang.org/x` are unreachable) and
+  turned out to fit the product: nothing to audit but our own code, no supply chain, a
+  tiny image. The three things a library would have provided are implemented here:
+  - polling instead of `fsnotify` — one `stat` per second, and it behaves the same on
+    bind mounts and network filesystems, where inotify is unreliable;
+  - `internal/logging` instead of `lumberjack` — size-based rotation with N backups;
+  - day-partitioned JSONL instead of SQLite — see **Storage**.
+  When the module proxy is available, `internal/store` is the seam to put SQLite behind,
+  and `internal/config/yaml.go` can be replaced by `yaml.v3` without invalidating a
+  single existing config file, because the parser accepts a strict subset of YAML.
+- auditd stays on the host; the container mounts `/var/log/audit` read-only and needs no
+  capabilities. Bans are applied by a CrowdSec bouncer or, optionally, by a profile with
+  `NET_ADMIN` — never by the default container.
+- UI language: Russian primary, English complete alongside it, enforced by a test.
 
 ## Pipeline
-`source (tail audit.log) -> parse (assemble multi-line events) -> semantic (human Event + severity)
- -> detect (sliding windows, baseline) -> action (ban) / notify (telegram) / store (sqlite)`
 
-All stages communicate through the normalized `model.Event`. Sources, detectors, actions and notifiers
-are Go interfaces so profiles simply enable different sets.
+```
+source → parse → semantic → ┬→ store
+                            └→ notify
+```
+
+- `source` (**internal/source**) follows `audit.log`: polls, notices rotation (inode
+  change) and truncation (size below the offset, or a changed file head), persists the
+  offset of the last complete line so a restart neither loses nor repeats events, and
+  waits patiently while the file does not exist.
+- `parse` (**internal/parse**) splits a line into fields (quoted values, the nested
+  `msg='...'` of USER_* records, hex-encoded commands) and groups records by audit
+  serial. An event closes on its `EOE` record, when a different serial appears, or after
+  an idle timeout.
+- `semantic` (**internal/semantic**) maps records to a `model.Event`: kind, severity,
+  user, source address, and the arguments the i18n template needs. This is the only
+  package that knows auditd's vocabulary, and the only one that decides severity.
+- `store` (**internal/store**) appends to a JSONL file per UTC day and keeps a small
+  in-memory ring for `/last`.
+- `notify` (**internal/notify/telegram**) applies the alert policy and talks to the API.
+
+All stages pass `model.Event`. `action.Banner` and `detect.Detector` are interfaces with
+no implementation yet, so v0.2 plugs in without reshaping the pipeline.
+
+## Storage
+
+Events: `state_dir/events/YYYY-MM-DD.jsonl`. Retention is deleting old files; the data
+stays readable with `grep` and `jq`, which matters for a tool whose job is explaining
+what happened. State that must be read back — allowlist, bans, mute deadline, the
+Telegram update offset — lives in `state_dir/state.json`, written atomically
+(temp file plus rename). A half-written last line after a crash is skipped on read.
+
+Not SQLite, for now: the workload is append-only with a daily scan, which a file does
+well, and it keeps the dependency count at zero. The `store` API is narrow on purpose so
+the backend can change.
+
+## Alert policy
+
+In order: severity threshold → mute → quiet hours → dedup → rate limit. Critical events
+skip mute and quiet hours, which is the whole point of the agent. Identical events inside
+`dedup_window` become one message plus a trailing count, so 47 failed logins are one
+alert and "46 more", not 47 messages. The rate limiter is a token bucket, so a storm
+cannot get the bot throttled by Telegram itself.
+
+## Safety rules
+
+- The allowlist always beats a ban, enforced in `store.RecordBan` so no caller can
+  bypass it. Allowlisting an address lifts an existing ban. This is what keeps an owner
+  on a dynamic address from locking themselves out.
+- Permanent bans are reserved for repeat offenders; the ladder is 1h → 24h → 30d →
+  permanent, and the counter for it is already stored (`Ban.Count`).
+- Secrets are masked in command lines before they are sent or stored, including by
+  replacing the hex form of a sudo command in the retained evidence — hex is trivially
+  reversible, so storing it would store the password.
+- The bot token never reaches a log or an error string.
+- The bot answers only allowlisted chat ids and refuses to start without that list.
+- Values taken from the log are HTML-escaped before they reach a message, so a file path
+  cannot forge markup.
 
 ## Layout
+
 ```
-cmd/auditdsec/main.go        entrypoint, subcommands: run, version, explain, check-config
-internal/model/              Event, Severity, Kind
-internal/source/             file tailer (inotify via fsnotify, rotation-aware, offset persisted)
-internal/parse/              audit record parser + event assembler (msg=audit(ts:serial))
-internal/semantic/           rules: raw audit events -> model.Event (ssh login, sudo, user add, authorized_keys change, persistence, log tamper)
-internal/detect/             brute-force sliding window per IP, "success after N failures"
-internal/action/             Banner interface: nft/ipset implementation (optional), CrowdSec LAPI client (later)
-internal/notify/telegram/    sender, dedup/grouping, inline buttons, commands, chat_id allowlist
-internal/store/              sqlite, retention, allowlist table, ban table
-internal/i18n/               ru/en message catalogs
-internal/config/             yaml config + profile presets (simple|pro)
-internal/redact/             mask secrets in command lines
-deploy/                      Dockerfile, docker-compose.yml, auditdsec.rules (audit rules by level), systemd unit
-docs/
+cmd/auditdsec/            entrypoint: run, check-config, explain, version
+internal/model/           Event, Kind, Severity, dedup key
+internal/parse/           audit record parser and event assembler
+internal/source/          rotation-aware log tailer
+internal/semantic/        auditd → human event, severity rules, audit key names
+internal/detect/          Detector interface (brute force: v0.2)
+internal/action/          Banner interface + no-op (nftables: v0.2, CrowdSec: v0.3)
+internal/notify/telegram/ API client, alert policy, bot commands, rendering
+internal/store/           JSONL events, state, retention, allowlist, bans
+internal/config/          YAML subset parser, profile presets, env overrides
+internal/i18n/            ru and en catalogs
+internal/logging/         JSON log with size-based rotation
+internal/redact/          secret masking
+internal/pipeline/        wiring, heartbeat, retention purge
+deploy/                   Dockerfile, audit rules, systemd unit, helper script
 ```
 
 ## Profiles
-- simple: audit rules level `standard`, only important alerts + daily digest, own brute-force detector with ban
-  escalation (1h -> 1d -> 30d -> permanent after 3 repeats), auto-allowlist of owner IP on first successful key login,
-  learning mode 3 days, quiet hours, CrowdSec optional.
-- pro: yaml config, level `paranoid`, CrowdSec both modes (push events/alerts to LAPI, pull decisions to Telegram),
-  routing rules (telegram/ntfy/webhook), multi-host (host name + tags in every message), Prometheus /metrics,
-  healthcheck pings, configurable thresholds.
 
-## Core (always on)
-Audit parser, heartbeat + alert if auditd/agent stops, secret redaction, chat_id allowlist, log rotation.
+`simple`: audit rules at the standard level, alerts from `warn` (so routine sudo is
+recorded but does not page anyone), 14 days of retention, 10 messages a minute, a 10
+minute dedup window, heartbeat at 6 hours.
 
-## Safety rules for bans
-Never ban an allowlisted IP, private/loopback ranges, or the IP of a currently active owner session.
-Permanent only after repeated offences. All bans reversible from Telegram (/unban) and CLI.
+`pro`: alerts from `info`, 90 days, 30 messages a minute, a 5 minute window, heartbeat at
+2 hours. v0.4 adds what the profile is really for: several hosts in one chat, Prometheus
+metrics, alert routing.
+
+## Heartbeat
+
+The failure that matters most is silence: an attacker who stops auditd leaves no events,
+and the agent would otherwise look calm. Every `heartbeat.check_every` the pipeline stats
+the audit log and reports a critical `auditd_stopped` event when the file is unreadable or
+has not been written for longer than `heartbeat.stale_after`, with a cooldown so it says
+it once rather than every minute. A hard signal — auditd's own `DAEMON_END` record — is
+handled by `semantic` like any other event.
 
 ## Roadmap
-- v0.1 (MVP): parser, semantic A1–A4 (ssh login, sudo, user/account changes, authorized_keys), Telegram alerts with
-  buttons ("ban IP", "it's me", "mute 24h"), allowlist, sqlite, i18n, Docker, README.
-- v0.2: brute-force detector + ban escalation (nft/ipset), audit rules profiles, auto-allowlist.
-- v0.3: CrowdSec C1/C2, hardening score (/score), learning mode.
-- v0.4: pro profile: multi-host, metrics, routing, CLI explain/query.
+
+- **v0.1** (done): parser, 10 event kinds, Telegram alerts with buttons and commands,
+  allowlist, storage with retention, heartbeat, i18n, Docker, systemd.
+- **v0.2**: sliding-window brute-force detector, nftables/ipset Banner, ban escalation,
+  automatic allowlisting of the owner's address on the first key login.
+- **v0.3**: CrowdSec both ways (events to LAPI, decisions to Telegram), hardening score,
+  learning mode and "first time from this country" alerts.
+- **v0.4**: pro profile in full — multi-host, metrics, routing, `auditdsec query`.

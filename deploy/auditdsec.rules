@@ -1,0 +1,89 @@
+## auditdsec — audit rules, "standard" profile.
+##
+## Install:
+##   sudo cp deploy/auditdsec.rules /etc/audit/rules.d/50-auditdsec.rules
+##   sudo deploy/gen-sshkeys-rules.sh | sudo tee -a /etc/audit/rules.d/50-auditdsec.rules
+##   sudo augenrules --load        # or: sudo service auditd restart
+##   sudo auditctl -l | head
+##
+## The -k key names must match internal/semantic/semantic.go. Changing one here
+## without changing it there makes the agent ignore the events.
+##
+## SSH logins, sudo and account changes need NO rules at all: auditd records
+## them through PAM (USER_LOGIN, USER_AUTH, USER_CMD, ADD_USER, USER_MGMT).
+## Everything below is about files and syscalls.
+
+## Buffer and failure mode. 8192 suits a small VPS; raise it on a busy host if
+## /var/log/audit/audit.log shows "backlog limit exceeded".
+-b 8192
+--backlog_wait_time 60000
+## 1 = print a warning when a rule cannot be added. Do not use 2 on a VPS:
+## it panics the kernel on audit failure.
+-f 1
+
+## Identity: who can log in at all.
+-w /etc/passwd -p wa -k ads_identity
+-w /etc/shadow -p wa -k ads_identity
+-w /etc/group -p wa -k ads_identity
+-w /etc/gshadow -p wa -k ads_identity
+
+## Privilege: who can become root.
+-w /etc/sudoers -p wa -k ads_sudoers
+-w /etc/sudoers.d -p wa -k ads_sudoers
+
+## SSH configuration and keys. /root/.ssh covers the root account; run
+## gen-sshkeys-rules.sh to add a line for every other home directory, because
+## audit watches cannot use wildcards.
+-w /etc/ssh/sshd_config -p wa -k ads_sshd
+-w /etc/ssh/sshd_config.d -p wa -k ads_sshd
+-w /root/.ssh -p wa -k ads_sshkeys
+
+## Persistence: how something survives a reboot.
+-w /etc/crontab -p wa -k ads_persist
+-w /etc/cron.d -p wa -k ads_persist
+-w /etc/cron.hourly -p wa -k ads_persist
+-w /etc/cron.daily -p wa -k ads_persist
+-w /etc/cron.weekly -p wa -k ads_persist
+-w /etc/cron.monthly -p wa -k ads_persist
+-w /var/spool/cron -p wa -k ads_persist
+-w /etc/systemd/system -p wa -k ads_persist
+-w /usr/lib/systemd/system -p wa -k ads_persist
+-w /etc/rc.local -p wa -k ads_persist
+-w /etc/profile -p wa -k ads_persist
+-w /etc/profile.d -p wa -k ads_persist
+-w /etc/bash.bashrc -p wa -k ads_persist
+
+## Covering tracks: the audit configuration itself and the system logs.
+##
+## NOTE: never add `-w /var/log/audit`. auditd writes that directory, so
+## watching it for writes makes auditd record its own writes, which records
+## those records, and the log grows without bound.
+-w /etc/audit -p wa -k ads_logs
+-w /etc/audisp -p wa -k ads_logs
+-w /etc/libaudit.conf -p wa -k ads_logs
+-w /sbin/auditctl -p x -k ads_logs
+-w /sbin/auditd -p x -k ads_logs
+-w /usr/sbin/auditctl -p x -k ads_logs
+-w /usr/sbin/auditd -p x -k ads_logs
+-w /var/log/auth.log -p wa -k ads_logs
+-w /var/log/secure -p wa -k ads_logs
+-w /var/log/wtmp -p wa -k ads_logs
+-w /var/log/lastlog -p wa -k ads_logs
+
+## Kernel modules: a rootkit's usual door.
+-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -F auid!=-1 -k ads_modules
+-a always,exit -F arch=b32 -S init_module,finit_module,delete_module -F auid!=-1 -k ads_modules
+-w /sbin/insmod -p x -k ads_modules
+-w /sbin/modprobe -p x -k ads_modules
+-w /sbin/rmmod -p x -k ads_modules
+
+## Execution from writable temporary directories: loaders and miners live here,
+## ordinary services do not. Comment these three out if they prove noisy on a
+## host that builds software in /tmp.
+-a always,exit -F arch=b64 -S execve -F dir=/tmp -F perm=x -k ads_exec_tmp
+-a always,exit -F arch=b64 -S execve -F dir=/dev/shm -F perm=x -k ads_exec_tmp
+-a always,exit -F arch=b64 -S execve -F dir=/var/tmp -F perm=x -k ads_exec_tmp
+
+## Make the rules immutable (a change then needs a reboot). Recommended on a
+## server you rarely touch; it must stay last. Uncomment to enable.
+# -e 2

@@ -1,0 +1,50 @@
+# auditdsec: reads the host's audit log read-only and reports to Telegram.
+#
+# Quick start:
+#   cp .env.example .env     # put the token and the chat id there
+#   docker compose up -d
+#
+# The container needs no privileges: it only reads /var/log/audit.
+services:
+  auditdsec:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      args:
+        VERSION: ${AUDITDSEC_VERSION:-0.1.0}
+    image: auditdsec:${AUDITDSEC_VERSION:-0.1.0}
+    container_name: auditdsec
+    restart: unless-stopped
+
+    # Hardening: nothing is writable except the state volume, no capabilities,
+    # no privilege escalation, and a hard memory ceiling.
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m
+    pids_limit: 64
+
+    environment:
+      AUDITDSEC_TG_TOKEN: ${AUDITDSEC_TG_TOKEN:?set AUDITDSEC_TG_TOKEN in .env}
+      AUDITDSEC_TG_CHAT_ID: ${AUDITDSEC_TG_CHAT_ID:?set AUDITDSEC_TG_CHAT_ID in .env}
+      AUDITDSEC_PROFILE: ${AUDITDSEC_PROFILE:-simple}
+      AUDITDSEC_LANG: ${AUDITDSEC_LANG:-ru}
+      AUDITDSEC_HOST: ${AUDITDSEC_HOST:-}
+      AUDITDSEC_LOG_LEVEL: ${AUDITDSEC_LOG_LEVEL:-info}
+      TZ: ${TZ:-UTC}
+
+    volumes:
+      - /var/log/audit:/var/log/audit:ro
+      - auditdsec-state:/var/lib/auditdsec
+      # Uncomment to use a configuration file instead of variables:
+      # - ./auditdsec.yaml:/etc/auditdsec/auditdsec.yaml:ro
+
+    # The agent rotates its own log file; this caps Docker's copy of stdout.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  auditdsec-state:

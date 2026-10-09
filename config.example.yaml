@@ -1,0 +1,76 @@
+# auditdsec configuration.
+#
+# Every setting here has a sensible default, so a minimal file is just the two
+# Telegram lines — and even those are better supplied as environment variables
+# (AUDITDSEC_TG_TOKEN, AUDITDSEC_TG_CHAT_ID) so no secret lands in git.
+#
+# Environment variables override this file. The parser accepts the YAML subset
+# used below: nested keys by indentation, scalars, lists and # comments.
+
+# simple — one VPS: only important alerts (warn and above), 14 days of history.
+# pro    — several servers: every event, 90 days, more messages per minute.
+profile: simple
+
+# ru or en. Russian is the default.
+lang: ru
+
+# Name shown in the alerts. Empty uses the system host name.
+host: ""
+
+audit_log: /var/log/audit/audit.log
+state_dir: /var/lib/auditdsec
+
+# Read the existing log on the very first start. Off by default, so installing
+# the agent does not replay months of history into the chat.
+read_from_start: false
+
+log:
+  file: /var/log/auditdsec/auditdsec.log
+  level: info          # debug, info, warn, error
+  max_size_mb: 10
+  max_backups: 3
+  stdout: true
+
+telegram:
+  # Better set through AUDITDSEC_TG_TOKEN.
+  token: ""
+  # Chats allowed to use the bot. The bot answers nobody else, and refuses to
+  # start when this list is empty.
+  chat_ids: []
+  api_base: https://api.telegram.org
+  # Alert from this severity up: info, warn or critical. Events below it are
+  # still recorded and visible through /last.
+  min_severity: warn
+  # Identical events inside this window become one message plus a count.
+  dedup_window: 10m
+  rate_per_minute: 10
+  # Hold back non-critical alerts at night. Critical events always come
+  # through. Set both or neither.
+  quiet_from: ""       # "23:00"
+  quiet_to: ""         # "08:00"
+  # Say hello on start; this is also how you learn the token works.
+  startup_notice: true
+
+store:
+  retention_days: 14
+  max_recent: 200
+
+# Notices when the audit log stops being written. Silence from a compromised
+# host looks exactly like silence from a quiet one, which is why this exists.
+heartbeat:
+  enabled: true
+  stale_after: 6h
+  check_every: 1m
+
+# Brute-force detector — arrives in v0.2, parsed now so this file keeps working.
+detect:
+  enabled: false
+  window: 10m
+  fail_threshold: 10
+
+# CrowdSec integration — arrives in v0.3.
+crowdsec:
+  enabled: false
+  mode: push           # push, pull or both
+  lapi_url: http://127.0.0.1:8080
+  api_key: ""
