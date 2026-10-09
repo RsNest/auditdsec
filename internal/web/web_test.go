@@ -50,6 +50,8 @@ func TestSinglePageFallback(t *testing.T) {
 		{"/app.css", "text/css"},
 		{"/core.js", "text/javascript"},
 		{"/i18n.js", "text/javascript"},
+		{"/feed.js", "text/javascript"},
+		{"/fonts/syne-latin.woff2", "font/woff2"},
 	}
 	for _, c := range cases {
 		res := serve(t, http.MethodGet, c.target, nil)
@@ -134,21 +136,29 @@ func TestIndexHasNoInlineCode(t *testing.T) {
 }
 
 func TestAssetBudget(t *testing.T) {
-	const budget = 150 * 1024
-	total := 0
+	const codeBudget, fontBudget = 150 * 1024, 100 * 1024
+	code, fonts := 0, 0
 	for name, a := range assets {
-		total += len(a.body)
 		if len(a.body) == 0 {
 			t.Errorf("%s is empty", name)
 		}
+		if strings.HasSuffix(name, ".woff2") {
+			fonts += len(a.body)
+		} else {
+			code += len(a.body)
+		}
 	}
-	if total > budget {
-		t.Fatalf("embedded assets are %d bytes, over the %d budget", total, budget)
+	if code > codeBudget {
+		t.Errorf("code assets are %d bytes, over the %d budget", code, codeBudget)
+	}
+	if fonts > fontBudget {
+		t.Errorf("fonts are %d bytes, over the %d budget", fonts, fontBudget)
 	}
 }
 
 func TestEverySourceFileIsEmbedded(t *testing.T) {
-	want := []string{"app.css", "core.js", "i18n.js", "index.html", "views.js"}
+	want := []string{"app.css", "core.js", "feed.js", "fonts/manrope-cyrillic.woff2", "fonts/sora-latin.woff2",
+		"fonts/syne-latin.woff2", "fonts/unbounded-cyrillic.woff2", "i18n.js", "index.html", "views.js"}
 	var got []string
 	for name := range assets {
 		got = append(got, name)
@@ -204,6 +214,32 @@ func TestCataloguesMatch(t *testing.T) {
 		sort.Strings(b)
 		if strings.Join(a, "") != strings.Join(b, "") {
 			t.Errorf("key %q has placeholders %v in russian and %v in english", key, a, b)
+		}
+	}
+}
+
+// Every literal t("key") in the scripts must exist in the catalogue, or the
+// screen shows a raw key.
+func TestUsedKeysExist(t *testing.T) {
+	src, err := fs.ReadFile(FS(), "i18n.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(src)
+	var cat map[string]map[string]string
+	if err := json.Unmarshal([]byte(text[strings.Index(text, "{"):strings.LastIndex(text, "}")+1]), &cat); err != nil {
+		t.Fatal(err)
+	}
+	use := regexp.MustCompile(`\bt\("([\w.]+)"\s*[,)]`)
+	for _, f := range []string{"core.js", "feed.js", "views.js"} {
+		body, err := fs.ReadFile(FS(), f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range use.FindAllStringSubmatch(string(body), -1) {
+			if _, ok := cat["ru"][m[1]]; !ok {
+				t.Errorf("%s uses t(%q), which has no catalogue entry", f, m[1])
+			}
 		}
 	}
 }

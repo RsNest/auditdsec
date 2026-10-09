@@ -23,7 +23,7 @@ import (
 	"time"
 )
 
-//go:embed assets/index.html assets/app.css assets/core.js assets/views.js assets/i18n.js
+//go:embed assets/index.html assets/app.css assets/core.js assets/feed.js assets/views.js assets/i18n.js assets/fonts/*.woff2
 var embedded embed.FS
 
 // contentSecurityPolicy allows exactly what the panel uses: its own scripts,
@@ -91,6 +91,8 @@ func mediaType(name string) string {
 		return "application/json; charset=utf-8"
 	case ".svg":
 		return "image/svg+xml"
+	case ".woff2":
+		return "font/woff2"
 	default:
 		return "application/octet-stream"
 	}

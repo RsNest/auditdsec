@@ -1,6 +1,7 @@
 /* Demo data for the auditdsec panel. Loaded only when the page is opened with
    ?mock=1 or straight from disk, and deliberately left out of the embedded
-   asset set, so a running agent never serves it. */
+   asset set, so a running agent never serves it.
+   Demo sign-in: login "admin", password "demo". */
 window.AUDITDSEC_MOCK = (function () {
   "use strict";
 
@@ -251,6 +252,8 @@ window.AUDITDSEC_MOCK = (function () {
       });
       hourly.push(slot);
     }
+    var byKind = {};
+    day.forEach(function (e) { byKind[e.kind] = (byKind[e.kind] || 0) + 1; });
     return {
       host: HOST,
       profile: "simple",
@@ -275,6 +278,7 @@ window.AUDITDSEC_MOCK = (function () {
       allowlist_count: d.allowlist.length,
       last_event_time: d.events.length ? d.events[0].time : null,
       rules_loaded: true,
+      by_kind: byKind,
       hourly: hourly
     };
   }
@@ -347,11 +351,12 @@ window.AUDITDSEC_MOCK = (function () {
     };
   }
 
-  function reject(code, message) {
+  function fail_(code, message) {
     var e = new Error(message);
     e.code = code;
-    return Promise.reject(e);
+    return e;
   }
+  function reject(code, message) { return Promise.reject(fail_(code, message)); }
 
   function parse(path) {
     var at = path.indexOf("?");
@@ -368,6 +373,15 @@ window.AUDITDSEC_MOCK = (function () {
     var path = req.path;
     var d = data();
     var result;
+
+    if (method === "POST" && path === "/login") {
+      if (body && body.login === "admin" && body.password === "demo") {
+        return new Promise(function (resolve) { setTimeout(function () { resolve({ token: "demo-token" }); }, 260); });
+      }
+      return new Promise(function (resolve, reject) {
+        setTimeout(function () { reject(fail_("bad_credentials", "wrong login or password")); }, 260);
+      });
+    }
 
     if (method === "GET") {
       if (path === "/status") { result = status(); }

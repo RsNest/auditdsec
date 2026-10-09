@@ -1,905 +1,888 @@
-/* auditdsec panel views. Each view renders into <main> and may return
-   { poll, reload } so the 10-second refresh and post-action reloads find it. */
+/* auditdsec panel: the sign-in form, the page itself and the scroll engine.
+   Everything the portal hero does is a function of scroll position, so it
+   plays backwards when the reader scrolls back up; entry reveals elsewhere
+   fire once and stay. */
 (function () {
   "use strict";
 
   var A = window.ADS;
-  var el = A.el, add = A.add, clear = A.clear, icon = A.icon, t = A.t;
-  var card = A.card, empty = A.empty, skeleton = A.skeleton, field = A.field;
-  var NS = A.SVG_NS;
+  var el = A.el, add = A.add, clear = A.clear, t = A.t, $ = A.$, sv = A.sv;
+  var S = A.state;
 
-  function sv(tag, attrs, text) {
-    var n = document.createElementNS(NS, tag);
-    if (attrs) { for (var k in attrs) { n.setAttribute(k, attrs[k]); } }
-    if (text !== undefined && text !== null) { n.textContent = text; }
-    return n;
-  }
+  var R = {};
+  var model = { status: null, events: [], bans: [], allow: [], cfg: null, diag: null };
+  var deck = null, journal = null, engine = null, poll = null, observer = null, uid = 0;
 
-  function reloadCurrent() {
-    A.loadStatus();
-    var v = A.state.view;
-    if (v && typeof v.reload === "function") { v.reload(); }
-  }
-
-  function mapError(e) {
+  function errText(e) {
     if (!e) { return t("err.generic"); }
     if (e.code === "allowlisted") { return t("err.allowlisted"); }
     if (e.code === "offline") { return t("err.offline"); }
     return e.message || t("err.generic");
   }
+  function logo(cls) { return el("span", { class: cls || "wm" }, ["auditdsec", el("i", { text: "." })]); }
+  function fieldOf(label, control) {
+    var id = "f" + (++uid);
+    control.id = id;
+    return el("div", { class: "fld" }, [el("label", { class: "lbl", for: id, text: label }), control]);
+  }
+  function go(id) {
+    var node = document.getElementById(id);
+    if (node) { node.scrollIntoView({ behavior: S.reduced ? "auto" : "smooth", block: "start" }); }
+  }
+  function tone(lv) { return lv === "down" ? "crit" : lv; }
 
-  /* ---------------- actions shared by several views ---------------- */
+  /* ---------------- actions the deck, journal and tables share ---------------- */
 
-  function banAddress(ip, duration, reason) {
-    if (!A.bannable(ip)) { A.toast(t("err.private_ip"), "err"); return; }
-    A.confirmAction(
-      t("bans.form.confirm", { ip: ip, duration: t("bans.dur." + duration) }),
-      t("bans.form.submit"), "danger"
-    ).then(function (ok) {
-      if (!ok) { return; }
-      A.api.ban({ ip: ip, duration: duration, reason: reason || "panel" }).then(function () {
-        A.toast(t("bans.form.done", { ip: ip }), "ok");
-        reloadCurrent();
-      }, function (e) { A.toast(mapError(e), "err"); });
+  var actions = {
+    ban: function (ip, duration, reason) {
+      if (!A.bannable(ip)) { A.toast(t("err.private_ip"), "err"); return; }
+      A.confirmAction(t("bans.form.confirm", { ip: ip, duration: t("bans.dur." + duration) }), t("bans.form.submit"), "danger")
+        .then(function (ok) {
+          if (!ok) { return; }
+          A.api.ban({ ip: ip, duration: duration, reason: reason || "panel" }).then(function () {
+            A.toast(t("bans.form.done", { ip: ip }), "ok");
+            refresh();
+          }, function (e) { A.toast(errText(e), "err"); });
+        });
+    },
+    trust: function (ip) {
+      A.api.allow(ip).then(function () { A.toast(t("allow.form.done", { ip: ip }), "ok"); refresh(); },
+        function (e) { A.toast(errText(e), "err"); });
+    },
+    mute: function (hours) {
+      A.api.mute(hours).then(function (res) {
+        A.toast(t("policy.mute.done", { until: A.dateTime(res && res.muted_until) }), "ok");
+        refresh();
+      }, function (e) { A.toast(errText(e), "err"); });
+    }
+  };
+
+  /* ---------------- sign-in: the form and nothing else ---------------- */
+
+  function showGate() {
+    stopAll();
+    $("#shell").hidden = true;
+    $("#demo").hidden = true;
+    var host = clear($("#gate"));
+    host.hidden = false;
+
+    var user = el("input", { class: "in", type: "text", name: "username", autocomplete: "username", autocapitalize: "none", spellcheck: "false", required: true });
+    var pass = el("input", { class: "in", type: "password", name: "password", autocomplete: "current-password", required: true });
+    var err = el("p", { class: "err", role: "alert", hidden: true });
+    var submit = el("button", { class: "pill pill-solid", type: "submit", text: t("login.submit") });
+
+    var form = el("form", {
+      class: "gate-form",
+      onsubmit: function (ev) {
+        ev.preventDefault();
+        var login = user.value.trim();
+        if (!login || !pass.value) { return; }
+        submit.disabled = true;
+        submit.textContent = t("login.busy");
+        err.hidden = true;
+        A.api.login(login, pass.value).then(function (res) {
+          if (!res || !res.token) { throw new Error("no token"); }
+          S.token = res.token;
+          A.put("sessionStorage", "ads.token", res.token);
+          pass.value = "";
+          showShell();
+        }, function (e) {
+          err.textContent = e.code === "throttled" ? t("login.throttled") : e.code === "offline" ? t("err.offline") : t("login.error");
+          err.hidden = false;
+          submit.disabled = false;
+          submit.textContent = t("login.submit");
+          pass.select();
+        });
+      }
+    }, [logo("wm"), fieldOf(t("login.user"), user), fieldOf(t("login.pass"), pass), err, submit]);
+
+    add(host, form);
+    user.focus();
+  }
+
+  function signOut() {
+    S.token = null;
+    A.put("sessionStorage", "ads.token", null);
+    showGate();
+    window.scrollTo(0, 0);
+  }
+
+  /* ---------------- the bar ---------------- */
+
+  var SECTIONS = [["overview", "nav.overview"], ["events", "nav.events"], ["addresses", "nav.addresses"], ["alerts", "nav.alerts"], ["system", "nav.system"]];
+
+  function setLang() {
+    S.lang = S.lang === "ru" ? "en" : "ru";
+    A.put("localStorage", "ads.lang", S.lang);
+    document.documentElement.lang = S.lang;
+    A.resetExplain();
+    $("#skip").textContent = t("a11y.skip");
+    rebuild();
+  }
+  function setTheme() {
+    S.theme = S.theme === "dark" ? "light" : "dark";
+    A.put("localStorage", "ads.theme", S.theme);
+    document.documentElement.setAttribute("data-theme", S.theme);
+    buildBar();
+  }
+
+  function buildBar() {
+    var bar = clear($("#bar"));
+    var sheet = $("#sheet");
+    if (sheet) { sheet.parentNode.removeChild(sheet); }
+    var menu = el("button", {
+      class: "lnk menu-btn", type: "button", "aria-expanded": "false", text: t("nav.menu"),
+      onclick: function () { toggleSheet(menu); }
     });
+    add(bar, [
+      el("a", { class: "wm", href: "#top", onclick: function (e) { e.preventDefault(); window.scrollTo({ top: 0, behavior: S.reduced ? "auto" : "smooth" }); } },
+        ["auditdsec", el("i", { text: "." })]),
+      el("nav", { class: "links", "aria-label": t("a11y.nav") }, SECTIONS.map(function (s) {
+        return el("a", { class: "lnk", href: "#" + s[0], dataset: { sec: s[0] }, text: t(s[1]) });
+      })),
+      el("div", { class: "bar-right" }, [
+        el("button", { class: "lnk hide-s", type: "button", "aria-label": t("nav.lang"), title: t("nav.lang"), text: S.lang === "ru" ? "EN" : "RU", onclick: setLang }),
+        el("button", { class: "lnk hide-s", type: "button", text: S.theme === "dark" ? t("nav.theme.light") : t("nav.theme.dark"), onclick: setTheme }),
+        menu,
+        el("button", { class: "pill pill-sm", type: "button", text: t("nav.signout"), onclick: signOut })
+      ])
+    ]);
   }
 
-  function allowAddress(ip) {
-    A.api.allow(ip).then(function () {
-      A.toast(t("allow.form.done", { ip: ip }), "ok");
-      reloadCurrent();
-    }, function (e) { A.toast(mapError(e), "err"); });
+  function toggleSheet(btn) {
+    var open = $("#sheet");
+    if (open) { open.parentNode.removeChild(open); btn.setAttribute("aria-expanded", "false"); return; }
+    var close = function () { var s = $("#sheet"); if (s) { s.parentNode.removeChild(s); } btn.setAttribute("aria-expanded", "false"); };
+    var items = SECTIONS.map(function (s) {
+      return el("a", { class: "lnk", href: "#" + s[0], text: t(s[1]), onclick: close });
+    });
+    items.push(el("button", { class: "lnk", type: "button", text: S.lang === "ru" ? "English" : "Русский", onclick: function () { close(); setLang(); } }));
+    items.push(el("button", { class: "lnk", type: "button", text: S.theme === "dark" ? t("nav.theme.light") : t("nav.theme.dark"), onclick: function () { close(); setTheme(); } }));
+    $("#shell").appendChild(el("div", { class: "sheet", id: "sheet" }, items));
+    btn.setAttribute("aria-expanded", "true");
   }
 
-  function muteAlerts(hours) {
-    A.api.mute(hours).then(function (res) {
-      A.toast(t("policy.mute.done", { until: A.dateTime(res && res.muted_until) }), "ok");
-      reloadCurrent();
-    }, function (e) { A.toast(mapError(e), "err"); });
+  /* ---------------- the page ---------------- */
+
+  function section(id, cls, kids) { return el("section", { id: id, class: cls }, kids); }
+  function head(label, title, extra) {
+    return el("div", { class: "sec-head" }, [
+      el("span", { class: "lbl rv", text: label }),
+      el("h2", { class: "sec-h rv", text: title }),
+      extra || null
+    ]);
   }
 
-  /* ---------------- event row ---------------- */
+  function buildMain() {
+    var main = clear($("#main"));
+    R = {};
 
-  function eventRow(ev) {
-    var wrap = el("div");
-    var detail = null;
-
-    var btn = el("button", { class: "row", type: "button", "aria-expanded": "false" }, [
-      el("div", { class: "row-main" }, [
-        el("div", { class: "row-icon", dataset: { sev: ev.severity } }, icon(A.KIND_ICON[ev.kind] || "info")),
-        el("div", { class: "row-body" }, [
-          el("div", { class: "row-meta" }, [
-            el("span", { class: "time", text: A.clock(ev.time) }),
-            A.severity(ev.severity),
-            el("span", { class: "tag", text: t("kind." + ev.kind) })
-          ]),
-          el("div", { class: "row-text", text: ev.summary || t("kind." + ev.kind) })
+    /* portal hero */
+    R.hero = el("section", { id: "top", class: "hero" + (S.reduced ? " still" : "") },
+      el("div", { class: "stage" }, [
+        R.hImg = el("div", { class: "h-img", "aria-hidden": "true" }),
+        R.hWash = el("div", { class: "h-wash", "aria-hidden": "true" }),
+        el("div", { class: "h-veil", "aria-hidden": "true" }),
+        R.dotA = el("div", { class: "h-dot a", "aria-hidden": "true" }),
+        R.dotB = el("div", { class: "h-dot b", "aria-hidden": "true" }),
+        R.panL = el("div", { class: "panel panel-l", "aria-hidden": "true" }),
+        R.panR = el("div", { class: "panel panel-r", "aria-hidden": "true" }),
+        R.title = el("h1", { class: "h-title", "aria-label": "auditdsec" }, [
+          R.t1 = el("span", { text: "audit", "aria-hidden": "true" }),
+          R.t2 = el("span", { "aria-hidden": "true" }, ["dsec", el("i", { text: "." })])
         ]),
-        el("div", { class: "row-side" }, [
-          ev.src_ip ? el("span", { class: "mono", text: ev.src_ip }) : null,
-          ev.user ? el("small", { text: ev.user }) : null
-        ]),
-        icon("chevron", "row-chev")
+        R.hTL = el("div", { class: "h-meta h-tl" }),
+        R.hTR = el("div", { class: "h-meta h-tr" }),
+        R.hBR = el("div", { class: "h-meta h-br", text: t("hero.scroll") + " ↓" }),
+        R.hStatus = el("div", { class: "h-status" }, [
+          el("span", { class: "h-meta", text: t("hero.status") }),
+          R.hStatusB = el("b"),
+          R.hSub = el("p", { class: "h-sub" })
+        ])
+      ]));
+
+    /* statement fold */
+    R.fold = section("overview", "fold", [
+      R.dial = el("div", { class: "dial", "aria-hidden": "true" }),
+      el("span", { class: "lbl rv", text: t("stmt.label") }),
+      R.stmt = el("h2", { class: "stmt rv" }),
+      R.numeral = el("div", { class: "numeral rv", "aria-hidden": "true" }),
+      R.facts = el("div", { class: "facts rv" }),
+      R.notes = el("div", { class: "rv" }),
+      R.chart = el("div", { class: "chart-wrap rv" })
+    ]);
+    drawDial(R.dial);
+
+    /* the deck */
+    var deckHost = el("div", { class: "deck-wrap rv" });
+    R.events = section("events", "split", [
+      el("div", { class: "head" }, [
+        el("span", { class: "lbl rv", text: t("deck.label") }),
+        el("h2", { class: "rv", text: t("deck.title") }),
+        el("p", { class: "rv", text: t("deck.lede") }),
+        el("div", { class: "btns rv" }, [
+          el("button", { class: "pill pill-solid", type: "button", text: t("deck.btn.journal"), onclick: function () { go("journal"); } }),
+          el("button", { class: "pill", type: "button", text: t("deck.btn.critical"), onclick: function () { journal.setSeverity("critical"); go("journal"); } })
+        ])
+      ]),
+      deckHost
+    ]);
+    deck = new A.feed.Deck(deckHost, actions);
+
+    /* the journal */
+    var jHost = el("div", { class: "rv" });
+    R.journal = section("journal", "sec", [head(t("journal.label"), t("journal.title")), jHost]);
+    journal = new A.feed.Journal(jHost, actions);
+
+    /* the roster */
+    R.roster = el("div", { class: "roster rv" });
+    R.rosterSec = section("kinds", "sec", [head(t("roster.label"), t("roster.title"), el("p", { class: "callout rv", text: t("roster.hint") })), R.roster]);
+
+    /* addresses */
+    R.bansTbl = el("div");
+    R.allowTbl = el("div");
+    R.addr = section("addresses", "sec", [
+      head(t("addr.label"), t("addr.title"), el("p", { class: "callout rv", text: t("allow.note") })),
+      el("div", { class: "tbl-wrap rv" }, [el("h3", { class: "sub-h", text: t("bans.title") }), R.bansTbl, banForm()]),
+      el("div", { class: "tbl-wrap rv" }, [el("h3", { class: "sub-h", text: t("addr.allow.title") }), R.allowTbl, allowForm()])
+    ]);
+
+    /* alerts */
+    R.alerts = el("div", { class: "tbl-wrap rv" });
+    R.alertSec = section("alerts", "sec", [head(t("alerts.label"), t("alerts.title")), R.alerts]);
+
+    /* system */
+    R.sysKv = el("div", { class: "kvs" });
+    R.sysNote = el("p", { class: "callout", text: "" });
+    R.checks = el("div", { class: "checks" });
+    R.confPre = el("pre");
+    R.system = section("system", "sec", [
+      head(t("sys.label"), t("sys.title")),
+      el("div", { class: "tbl-wrap rv" }, [R.sysKv, el("div", { class: "callout" }, [el("b", { text: t("diag.debug.title") + ". " }), t("diag.debug.body")])]),
+      el("div", { class: "tbl-wrap rv" }, [el("h3", { class: "sub-h", text: t("setup.label") }), R.checks]),
+      el("details", { class: "conf rv" }, [
+        el("summary", null, [el("span", { class: "lbl", text: t("diag.config") })]),
+        el("p", { class: "callout", text: t("diag.config.note") }),
+        R.confPre
       ])
     ]);
 
-    btn.addEventListener("click", function () {
-      var open = btn.getAttribute("aria-expanded") === "true";
-      btn.setAttribute("aria-expanded", open ? "false" : "true");
-      if (open) {
-        if (detail) { wrap.removeChild(detail); detail = null; }
-        return;
-      }
-      detail = buildDetail(ev);
-      wrap.appendChild(detail);
-    });
+    /* close */
+    R.fine = el("p");
+    R.close = el("footer", { id: "close", class: "close" }, [
+      el("h2", { class: "rv", text: t("close.title") }),
+      el("div", { class: "close-row rv" }, [
+        R.fine,
+        el("div", { class: "btns" }, [
+          el("button", { class: "pill", type: "button", text: t("close.top"), onclick: function () { window.scrollTo({ top: 0, behavior: S.reduced ? "auto" : "smooth" }); } }),
+          el("button", { class: "pill pill-solid", type: "button", text: t("nav.signout"), onclick: signOut })
+        ])
+      ]),
+      el("div", { class: "foot" }, [el("span", { text: "MIT" }), el("span", { text: "github.com/RsNest/auditdsec" })]),
+      R.bigWm = el("div", { class: "big-wm", "aria-hidden": "true" }, ["auditdsec", el("i", { text: "." })])
+    ]);
 
-    add(wrap, btn);
-    return wrap;
+    add(main, [R.hero, R.fold, R.events, R.journal, R.rosterSec, R.addr, R.alertSec, R.system, R.close]);
+    setupReveals();
   }
 
-  function buildDetail(ev) {
-    var explain = el("div", { class: "explain" }, el("p", { class: "muted", text: t("ev.detail.pending") }));
-    A.explain(ev.kind).then(function (data) {
-      clear(explain);
-      if (!data || (!data.what && !data.risk && !data.todo)) {
-        add(explain, el("p", { class: "muted", text: t("ev.detail.missing") }));
-        return;
-      }
-      [["ev.detail.what", data.what], ["ev.detail.risk", data.risk], ["ev.detail.todo", data.todo]]
-        .forEach(function (pair) {
-          add(explain, el("div", null, [
-            el("h4", { class: "label", text: t(pair[0]) }),
-            el("p", { text: pair[1] || "—" })
-          ]));
+  /* ---------------- forms ---------------- */
+
+  function banForm() {
+    var ip = el("input", { class: "in", type: "text", placeholder: t("bans.form.ip.ph"), autocomplete: "off", spellcheck: "false" });
+    var reason = el("input", { class: "in", type: "text", placeholder: t("bans.form.reason.ph"), autocomplete: "off" });
+    var dur = el("select", { class: "sel" }, ["24h", "1h", "30d", "permanent"].map(function (d) { return el("option", { value: d, text: t("bans.dur." + d) }); }));
+    var err = el("p", { class: "err", role: "alert", hidden: true });
+    function invalid(msg) { err.textContent = msg; err.hidden = false; ip.setAttribute("aria-invalid", "true"); ip.focus(); }
+    return el("form", {
+      onsubmit: function (ev) {
+        ev.preventDefault();
+        var value = ip.value.trim();
+        if (!A.isIP(value)) { return invalid(t("err.bad_ip")); }
+        if (!A.bannable(value)) { return invalid(t("err.private_ip")); }
+        err.hidden = true; ip.removeAttribute("aria-invalid");
+        A.confirmAction(t("bans.form.confirm", { ip: value, duration: t("bans.dur." + dur.value) }), t("bans.form.submit"), "danger").then(function (ok) {
+          if (!ok) { return; }
+          A.api.ban({ ip: value, duration: dur.value, reason: reason.value.trim() || "manual" }).then(function () {
+            A.toast(t("bans.form.done", { ip: value }), "ok");
+            ip.value = ""; reason.value = "";
+            refresh();
+          }, function (e) { invalid(errText(e)); });
         });
-    });
-
-    var actions = [];
-    if (ev.src_ip) {
-      if (A.bannable(ev.src_ip)) {
-        actions.push(el("button", {
-          class: "btn btn-danger btn-sm", type: "button",
-          text: t("ev.act.ban", { ip: ev.src_ip }),
-          onclick: function () { banAddress(ev.src_ip, "24h", "panel: " + ev.kind); }
-        }));
       }
-      actions.push(el("button", {
-        class: "btn btn-sm", type: "button", text: t("ev.act.trust"),
-        onclick: function () { allowAddress(ev.src_ip); }
-      }));
-    }
-    actions.push(el("button", {
-      class: "btn btn-sm", type: "button", text: t("ev.act.mute"),
-      onclick: function () { muteAlerts(24); }
-    }));
-
-    var facts = [];
-    if (ev.user) { facts.push(["ev.user", ev.user]); }
-    if (ev.src_ip) { facts.push(["ev.ip", ev.src_ip]); }
-    if (ev.args) {
-      Object.keys(ev.args).forEach(function (k) {
-        if (k === "user" || k === "ip") { return; }
-        facts.push([null, null, k, ev.args[k]]);
-      });
-    }
-
-    return el("div", { class: "detail" }, [
-      explain,
-      el("div", { class: "kv" }, [
-        el("div", null, [
-          el("span", { class: "label", text: t("ev.time") }),
-          el("b", { text: A.dateTime(ev.time) })
-        ])
-      ].concat(facts.map(function (f) {
-        return el("div", null, [
-          el("span", { class: "label", text: f[0] ? t(f[0]) : f[2] }),
-          el("b", { class: "mono", text: f[0] ? f[1] : String(f[3]) })
-        ]);
-      }))),
-      ev.raw ? el("div", { class: "raw" }, [
-        el("div", { class: "raw-head" }, [
-          el("span", { class: "label", text: t("ev.detail.raw") }),
-          A.copyButton(ev.raw)
-        ]),
-        el("code", { text: ev.raw })
-      ]) : null,
-      el("div", { class: "actions" }, actions)
+    }, [
+      el("h3", { class: "lbl", text: t("bans.form.title") }),
+      el("div", { class: "form-row" }, [
+        fieldOf(t("bans.form.ip"), ip), fieldOf(t("bans.form.reason"), reason), fieldOf(t("bans.form.duration"), dur),
+        el("button", { class: "pill pill-danger", type: "submit", text: t("bans.form.submit") })
+      ]),
+      err
     ]);
   }
 
-  /* ---------------- hourly chart ---------------- */
+  function allowForm() {
+    var ip = el("input", { class: "in", type: "text", placeholder: t("bans.form.ip.ph"), autocomplete: "off", spellcheck: "false" });
+    var err = el("p", { class: "err", role: "alert", hidden: true });
+    return el("form", {
+      onsubmit: function (ev) {
+        ev.preventDefault();
+        var value = ip.value.trim();
+        if (!A.isIP(value)) { err.textContent = t("err.bad_ip"); err.hidden = false; ip.setAttribute("aria-invalid", "true"); return; }
+        err.hidden = true; ip.removeAttribute("aria-invalid");
+        A.api.allow(value).then(function () {
+          A.toast(t("allow.form.done", { ip: value }), "ok");
+          ip.value = "";
+          refresh();
+        }, function (e) { err.textContent = errText(e); err.hidden = false; });
+      }
+    }, [
+      el("div", { class: "form-row" }, [
+        fieldOf(t("allow.col.ip"), ip),
+        el("button", { class: "pill", type: "submit", text: t("allow.form.submit") })
+      ]),
+      err
+    ]);
+  }
+
+  /* ---------------- painting ---------------- */
+
+  var INK = "#EDE7DC", AMBER = "#E8913C", TEAL = "#5FB0B8", RED = "#E5604D";
+
+  function drawField(host, hourly) {
+    clear(host);
+    var svg = sv("svg", { viewBox: "0 0 1000 1000", preserveAspectRatio: "xMidYMid slice" });
+    var seed = 11;
+    function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+
+    var logs = sv("g", { transform: "rotate(-7 500 500)" });
+    for (var i = 0; i < 96; i++) {
+      var accent = i % 17 === 0 ? AMBER : i % 23 === 0 ? TEAL : INK;
+      logs.appendChild(sv("rect", {
+        x: Math.round(rnd() * 880 - 60), y: i * 11 + Math.round(rnd() * 5), width: Math.round(40 + rnd() * 280), height: 1.2,
+        fill: accent, opacity: (accent === INK ? 0.05 + rnd() * 0.1 : 0.55).toFixed(2)
+      }));
+    }
+    svg.appendChild(logs);
+
+    [150, 250, 350, 450].forEach(function (r) {
+      svg.appendChild(sv("circle", { cx: 500, cy: 500, r: r, fill: "none", stroke: INK, "stroke-opacity": 0.12, "stroke-width": 1 }));
+    });
+
+    var data = (hourly || []).slice(-24);
+    var max = 1;
+    data.forEach(function (h) { max = Math.max(max, (h.info || 0) + (h.warn || 0) + (h.critical || 0)); });
+    data.forEach(function (h, idx) {
+      var total = (h.info || 0) + (h.warn || 0) + (h.critical || 0);
+      var a = (-90 + idx * 15) * Math.PI / 180;
+      var inner = 130, len = total ? 24 + 290 * (total / max) : 7;
+      var color = h.critical ? RED : h.warn ? AMBER : INK;
+      svg.appendChild(sv("line", {
+        x1: (500 + Math.cos(a) * inner).toFixed(1), y1: (500 + Math.sin(a) * inner).toFixed(1),
+        x2: (500 + Math.cos(a) * (inner + len)).toFixed(1), y2: (500 + Math.sin(a) * (inner + len)).toFixed(1),
+        stroke: color, "stroke-width": total ? 5 : 2, "stroke-linecap": "round", "stroke-opacity": total ? 0.95 : 0.3
+      }));
+      if (idx % 6 === 0) {
+        svg.appendChild(sv("text", {
+          x: (500 + Math.cos(a) * 482).toFixed(1), y: (500 + Math.sin(a) * 482 + 4).toFixed(1), "text-anchor": "middle",
+          fill: INK, "fill-opacity": 0.4, "font-size": 13, "font-family": "ui-monospace,monospace"
+        }, A.hourLabel(h.hour)));
+      }
+    });
+    svg.appendChild(sv("circle", { cx: 500, cy: 500, r: 4, fill: TEAL }));
+    host.appendChild(svg);
+  }
+
+  function drawDial(host) {
+    var svg = sv("svg", { viewBox: "0 0 100 100" });
+    for (var i = 0; i < 60; i++) {
+      var a = i * 6 * Math.PI / 180, long = i % 5 === 0;
+      svg.appendChild(sv("line", {
+        x1: (50 + Math.cos(a) * (long ? 41 : 44)).toFixed(2), y1: (50 + Math.sin(a) * (long ? 41 : 44)).toFixed(2),
+        x2: (50 + Math.cos(a) * 48).toFixed(2), y2: (50 + Math.sin(a) * 48).toFixed(2),
+        stroke: "currentColor", "stroke-width": long ? 0.5 : 0.25, "stroke-opacity": long ? 0.9 : 0.5
+      }));
+    }
+    svg.appendChild(sv("circle", { cx: 50, cy: 50, r: 30, fill: "none", stroke: "currentColor", "stroke-opacity": 0.35, "stroke-width": 0.25 }));
+    svg.appendChild(sv("circle", { cx: 50, cy: 50, r: 16, fill: "none", stroke: "currentColor", "stroke-opacity": 0.25, "stroke-width": 0.25 }));
+    svg.appendChild(sv("line", { x1: 50, y1: 50, x2: 50, y2: 6, stroke: AMBER, "stroke-width": 0.5 }));
+    svg.appendChild(sv("circle", { cx: 50, cy: 6, r: 1.1, fill: AMBER }));
+    host.style.color = "var(--ink)";
+    host.appendChild(svg);
+  }
+
+  function paintHero() {
+    var s = model.status;
+    if (!s || !R.hero) { return; }
+    var lv = A.level(s);
+    clear(R.hTL);
+    add(R.hTL, [el("i", { class: "dot", dataset: { lv: tone(lv) } }), el("span", { text: t("hero.host") + " · " + (s.host || t("common.unknown")) })]);
+    R.hTR.textContent = t("hero.profile", { profile: s.profile || "—", version: s.version || "—" });
+    R.hStatus.dataset.lv = tone(lv);
+    R.hStatusB.textContent = t("status." + lv);
+    R.hSub.textContent = t("hero.updated", { time: A.clock(new Date().toISOString()) });
+    drawField(R.hImg, s.hourly);
+    update();
+  }
+
+  function note(dotAttrs, strong, body) {
+    return el("div", { class: "note" }, [
+      el("i", { class: "dot", dataset: dotAttrs }),
+      el("p", null, [strong ? el("b", { text: strong + " " }) : null, body])
+    ]);
+  }
 
   function hourlyChart(hourly) {
     var data = (hourly || []).slice(-24);
-    if (!data.length) { return empty(t("chart.empty")); }
-
-    var W = 720, H = 150, BASE = 120, TOP = 12;
-    var svg = sv("svg", { viewBox: "0 0 " + W + " " + H, class: "chart", role: "img" });
-    svg.setAttribute("aria-label", t("chart.title"));
-
+    var W = 960, H = 150, BASE = 124, TOP = 14;
+    var svg = sv("svg", { viewBox: "0 0 " + W + " " + H, class: "chart", role: "img", "aria-label": t("chart.title") });
     var max = 1;
-    data.forEach(function (h) {
-      max = Math.max(max, (h.info || 0) + (h.warn || 0) + (h.critical || 0));
-    });
-    svg.appendChild(sv("line", { x1: 0, y1: BASE + .5, x2: W, y2: BASE + .5, class: "grid-line" }));
-    svg.appendChild(sv("line", { x1: 0, y1: TOP + .5, x2: W, y2: TOP + .5, class: "grid-line" }));
-    svg.appendChild(sv("text", { x: 2, y: TOP - 3 }, String(max)));
-
-    var slot = W / data.length;
-    var bw = Math.min(22, slot * .62);
-
+    data.forEach(function (h) { max = Math.max(max, (h.info || 0) + (h.warn || 0) + (h.critical || 0)); });
+    svg.appendChild(sv("line", { x1: 0, y1: BASE + 0.5, x2: W, y2: BASE + 0.5 }));
+    svg.appendChild(sv("line", { x1: 0, y1: TOP + 0.5, x2: W, y2: TOP + 0.5 }));
+    svg.appendChild(sv("text", { x: 0, y: TOP - 4 }, String(max)));
+    var slot = W / Math.max(1, data.length), bw = Math.min(7, slot * 0.4);
     data.forEach(function (h, i) {
-      var info = h.info || 0, warn = h.warn || 0, crit = h.critical || 0;
-      var total = info + warn + crit;
+      var info = h.info || 0, warn = h.warn || 0, crit = h.critical || 0, total = info + warn + crit;
       var x = i * slot + (slot - bw) / 2;
       var g = sv("g");
-      g.appendChild(sv("title", null, t("chart.tip", {
-        hour: A.hourLabel(h.hour), info: info, warn: warn, critical: crit
-      })));
-      if (total === 0) {
-        g.appendChild(sv("rect", { x: x, y: BASE - 2, width: bw, height: 2, rx: 1, class: "bar-zero" }));
-      } else {
+      g.appendChild(sv("title", null, t("chart.tip", { hour: A.hourLabel(h.hour), info: info, warn: warn, critical: crit })));
+      if (!total) { g.appendChild(sv("rect", { x: x, y: BASE - 2, width: bw, height: 2, class: "b-zero" })); }
+      else {
         var y = BASE;
-        [["bar-info", info], ["bar-warn", warn], ["bar-crit", crit]].forEach(function (part) {
+        [["b-info", info], ["b-warn", warn], ["b-crit", crit]].forEach(function (part) {
           if (!part[1]) { return; }
-          var hgt = Math.max(2, (part[1] / max) * (BASE - TOP));
-          y -= hgt;
-          g.appendChild(sv("rect", { x: x, y: y, width: bw, height: hgt, rx: 2, class: part[0] }));
+          var hg = Math.max(2, (part[1] / max) * (BASE - TOP));
+          y -= hg;
+          g.appendChild(sv("rect", { x: x, y: y, width: bw, height: hg, class: part[0] }));
         });
       }
-      if (i % 4 === 0) {
-        g.appendChild(sv("text", { x: i * slot + slot / 2, y: BASE + 16, "text-anchor": "middle" },
-          A.hourLabel(h.hour)));
-      }
+      if (i % 4 === 0) { g.appendChild(sv("text", { x: i * slot + slot / 2, y: BASE + 17, "text-anchor": "middle" }, A.hourLabel(h.hour))); }
       svg.appendChild(g);
     });
+    return svg;
+  }
 
-    return el("div", null, [
-      svg,
-      el("div", { class: "legend" }, A.SEVS.map(function (s) {
-        var swatch = el("i");
-        swatch.style.background = "var(--" + (s === "critical" ? "crit" : s) + ")";
-        return el("span", null, [swatch, el("span", { text: t("sev." + s) })]);
+  function paintFold() {
+    var s = model.status;
+    if (!s || !R.fold) { return; }
+    var lv = A.level(s), c = s.counters || {}, ban = s.ban || {};
+    var count = lv === "crit" ? c.critical_24h : c.warn_24h;
+    clear(R.stmt);
+    R.stmt.dataset.lv = tone(lv);
+    add(R.stmt, [
+      t("stmt." + lv + ".lead", { host: s.host || "", events: A.num(c.events_24h) }),
+      el("mark", { text: t("stmt." + lv + ".mark", { count: A.num(count) }) })
+    ]);
+    R.numeral.textContent = A.num(c.events_24h).replace(/\s/g, "");
+
+    clear(R.facts);
+    [
+      ["fact.events", A.num(c.events_24h), null],
+      ["fact.critical", A.num(c.critical_24h), c.critical_24h > 0 ? "crit" : null],
+      ["fact.warn", A.num(c.warn_24h), c.warn_24h > 0 ? "warn" : null],
+      ["fact.bans", A.num(s.bans_active), null],
+      ["fact.allow", A.num(s.allowlist_count), null],
+      ["fact.uptime", A.duration(s.uptime_seconds), null],
+      ["fact.alerts", A.num(c.alerts_sent), null]
+    ].forEach(function (f) {
+      add(R.facts, el("div", { dataset: { tone: f[2] } }, [el("span", { class: "lbl", text: t(f[0]) }), el("b", { text: f[1] })]));
+    });
+
+    clear(R.notes);
+    if (lv === "down") {
+      add(R.notes, note({ lv: "crit" }, t("note.audit") + ".", t("health.stale", { time: A.dateTime(s.auditd && s.auditd.last_write) })));
+    }
+    if (!ban.enforcing) {
+      add(R.notes, note({ sev: "warn" }, t("enforce.title") + ".", t("enforce.body") + " " + t("enforce.howto")));
+    } else if (ban.dry_run) {
+      add(R.notes, note({ sev: "warn" }, t("note.bans") + ".", t("enforce.dry_run")));
+    }
+
+    clear(R.chart);
+    add(R.chart, [
+      el("span", { class: "lbl", text: t("chart.title") + " — " + t("chart.cap") }),
+      hourlyChart(s.hourly),
+      el("div", { class: "legend" }, A.SEVS.map(function (sev) {
+        return el("span", { dataset: { sev: sev } }, [el("i", { class: "dot" }), el("span", { text: t("sev." + sev) })]);
       }))
     ]);
   }
 
-  /* ---------------- overview ---------------- */
-
-  function statusBanner(status) {
-    var lv = A.level(status);
-    var down = status && status.auditd && status.auditd.healthy === false;
-    var counters = (status && status.counters) || {};
-    var titleKey, subKey, vars = {}, ico;
-    if (down) {
-      titleKey = "status.down.title"; subKey = "status.down.sub"; ico = "power";
-    } else if (lv === "crit") {
-      titleKey = "status.crit.title"; subKey = "status.crit.sub"; ico = "alertOctagon";
-      vars.count = A.num(counters.critical_24h);
-    } else if (lv === "warn") {
-      titleKey = "status.warn.title"; subKey = "status.warn.sub"; ico = "alertTriangle";
-      vars.count = A.num(counters.warn_24h);
-    } else {
-      titleKey = "status.ok.title"; subKey = "status.ok.sub"; ico = "checkCircle";
-    }
-    return el("div", { class: "banner tone-" + (lv === "unknown" ? "ok" : lv) }, [
-      icon(ico),
-      el("div", null, [
-        el("h1", { text: t(titleKey) }),
-        el("p", { text: t(subKey, vars) }),
-        status ? el("p", {
-          text: t("status.meta", {
-            host: status.host || t("common.unknown"),
-            time: status.auditd && status.auditd.last_write ? A.relative(status.auditd.last_write) : t("common.never")
-          })
-        }) : null
-      ])
-    ]);
+  function countsByKind() {
+    var s = model.status || {};
+    if (s.by_kind) { return s.by_kind; }
+    var out = {};
+    model.events.forEach(function (e) { out[e.kind] = (out[e.kind] || 0) + 1; });
+    return out;
   }
 
-  A.routes[""] = function (main) {
-    var box = el("div", { class: "view" });
-    add(main, box);
-
-    function paint(status, events) {
-      clear(box);
-      if (!status) { add(box, skeleton()); return; }
-      var c = status.counters || {};
-      var ban = status.ban || {};
-      var down = status.auditd && status.auditd.healthy === false;
-
-      add(box, statusBanner(status));
-
-      if (down) {
-        add(box, el("div", { class: "notice tone-crit" }, [
-          icon("power"),
-          el("div", null, [
-            el("h3", { text: t("health.title") }),
-            el("p", { text: t("health.stale") }),
-            el("p", { class: "muted" }, [
-              el("span", { text: t("health.last_write") + ": " }),
-              el("span", { text: A.dateTime(status.auditd && status.auditd.last_write) }),
-              el("span", { text: " · " }),
-              el("code", { text: "systemctl status auditd" })
-            ])
-          ])
-        ]));
-      }
-      if (!ban.enforcing) {
-        add(box, el("div", { class: "notice tone-warn" }, [
-          icon("shieldOff"),
-          el("div", null, [
-            el("h3", { text: t("enforce.title") }),
-            el("p", { text: t("enforce.body") }),
-            el("p", { class: "muted", text: t("enforce.howto") })
-          ])
-        ]));
-      } else if (ban.dry_run) {
-        add(box, el("div", { class: "notice tone-warn" }, [
-          icon("info"),
-          el("div", null, [el("h3", { text: t("enforce.title") }), el("p", { text: t("enforce.dry_run") })])
-        ]));
-      }
-
-      add(box, el("div", { class: "stats" }, [
-        A.statCard(t("card.events24"), A.num(c.events_24h), { icon: "activity" }),
-        A.statCard(t("card.critical24"), A.num(c.critical_24h), {
-          icon: "alertOctagon", tone: c.critical_24h > 0 ? "crit" : null
-        }),
-        A.statCard(t("card.warn24"), A.num(c.warn_24h), {
-          icon: "alertTriangle", tone: c.warn_24h > 0 ? "warn" : null
-        }),
-        A.statCard(t("card.bans"), A.num(status.bans_active), { icon: "shieldOff" }),
-        A.statCard(t("card.allowlist"), A.num(status.allowlist_count), { icon: "shield" }),
-        A.statCard(t("card.uptime"), A.duration(status.uptime_seconds), {
-          icon: "clock", note: status.version ? "v" + status.version : null
-        })
+  function paintRoster() {
+    if (!R.roster) { return; }
+    var counts = countsByKind();
+    var kinds = A.KINDS.slice().sort(function (a, b) {
+      return (counts[b] || 0) - (counts[a] || 0) || A.KINDS.indexOf(a) - A.KINDS.indexOf(b);
+    });
+    clear(R.roster);
+    kinds.forEach(function (k) {
+      var n = counts[k] || 0;
+      add(R.roster, el("button", {
+        class: "r-row", type: "button", dataset: { sev: A.KIND_SEV[k], zero: n ? "false" : "true" },
+        onclick: function () { journal.setKind(k); go("journal"); }
+      }, [
+        el("span", { class: "k", text: t("sev." + A.KIND_SEV[k]) }),
+        el("span", { class: "n", text: t("kind." + k) }),
+        el("span", { class: "c", text: A.num(n) })
       ]));
-
-      add(box, card(t("chart.title"), hourlyChart(status.hourly), { icon: "activity" }));
-
-      var rows;
-      if (!events) { rows = skeleton(); }
-      else if (!events.length) { rows = empty(t("ev.empty")); }
-      else {
-        rows = el("div", { class: "rows" });
-        events.slice(0, 8).forEach(function (ev) { add(rows, eventRow(ev)); });
-      }
-      add(box, card(t("recent.title"), rows, {
-        icon: "list", flush: true,
-        aside: el("a", { href: "#/events", text: t("recent.all") })
-      }));
-    }
-
-    function load() {
-      var status = A.state.status;
-      A.api.events("limit=8").then(function (page) {
-        var items = (page && page.items) || [];
-        A.announceCritical(items);
-        paint(status, items);
-      }, function () { paint(status, []); });
-    }
-
-    paint(A.state.status, null);
-    load();
-    return { poll: load, reload: load };
-  };
-
-  /* ---------------- events ---------------- */
-
-  A.routes.events = function (main) {
-    var filters = { severity: "", kind: "", ip: "", user: "", q: "", period: "24h" };
-    var items = [], next = null, loading = false;
-
-    var head = el("div", { class: "view-head" }, [
-      el("h1", { text: t("ev.title") }),
-      el("button", {
-        class: "btn btn-sm", type: "button", onclick: function () { reset(false); }
-      }, [icon("refresh"), el("span", { text: t("common.refresh") })])
-    ]);
-
-    var search = el("input", {
-      class: "input", type: "search", id: "ev-search",
-      placeholder: t("ev.search.ph"), value: filters.q
     });
-    search.addEventListener("input", debounce(function () { filters.q = search.value.trim(); reset(false); }, 350));
-
-    var ipInput = el("input", { class: "input", type: "text", placeholder: "203.0.113.7" });
-    ipInput.addEventListener("input", debounce(function () { filters.ip = ipInput.value.trim(); reset(false); }, 350));
-    var userInput = el("input", { class: "input", type: "text", placeholder: "root" });
-    userInput.addEventListener("input", debounce(function () { filters.user = userInput.value.trim(); reset(false); }, 350));
-
-    var sevChips = el("div", { class: "chips" }, [""].concat(A.SEVS).map(function (s) {
-      return el("button", {
-        class: "chip", type: "button",
-        "aria-pressed": filters.severity === s ? "true" : "false",
-        onclick: function (ev) {
-          filters.severity = s;
-          var all = sevChips.querySelectorAll(".chip");
-          for (var i = 0; i < all.length; i++) { all[i].setAttribute("aria-pressed", "false"); }
-          ev.currentTarget.setAttribute("aria-pressed", "true");
-          reset(false);
-        }
-      }, s ? [icon(A.SEV_ICON[s]), el("span", { text: t("sev." + s) })] : el("span", { text: t("sev.any") }));
-    }));
-
-    var kindSelect = A.select(
-      [{ value: "", label: t("kind.any") }].concat(A.KINDS.map(function (k) {
-        return { value: k, label: t("kind." + k) };
-      })),
-      filters.kind,
-      function (ev) { filters.kind = ev.target.value; reset(false); }
-    );
-
-    var periodSelect = A.select(
-      [
-        { value: "1h", label: t("ev.period.1h") },
-        { value: "24h", label: t("ev.period.24h") },
-        { value: "7d", label: t("ev.period.7d") },
-        { value: "all", label: t("ev.period.all") }
-      ],
-      filters.period,
-      function (ev) { filters.period = ev.target.value; reset(false); }
-    );
-
-    var filterCard = card(t("ev.filters"), el("div", { class: "filters" }, [
-      el("div", { class: "field wide" }, [
-        el("span", { class: "label", text: t("ev.sev") }),
-        sevChips
-      ]),
-      field(t("ev.kind"), kindSelect),
-      field(t("ev.period"), periodSelect),
-      field(t("ev.ip"), ipInput),
-      field(t("ev.user"), userInput),
-      el("div", { class: "field wide" }, [
-        el("label", { class: "label", for: "ev-search", text: t("ev.search") }),
-        search
-      ]),
-      el("div", { class: "field" }, el("button", {
-        class: "btn", type: "button", text: t("ev.reset"),
-        onclick: function () {
-          filters = { severity: "", kind: "", ip: "", user: "", q: "", period: "24h" };
-          search.value = ""; ipInput.value = ""; userInput.value = "";
-          kindSelect.value = ""; periodSelect.value = "24h";
-          var all = sevChips.querySelectorAll(".chip");
-          for (var i = 0; i < all.length; i++) { all[i].setAttribute("aria-pressed", i === 0 ? "true" : "false"); }
-          reset(false);
-        }
-      }))
-    ]), { icon: "search" });
-
-    var rows = el("div", { class: "rows" });
-    var count = el("span", { class: "muted" });
-    var more = el("button", {
-      class: "btn", type: "button", text: t("ev.loadmore"), hidden: true,
-      onclick: function () { load(true); }
-    });
-    var listCard = card(t("ev.title"), rows, { icon: "list", flush: true, aside: count });
-    var footer = el("div", { class: "actions" }, more);
-
-    add(main, el("div", { class: "view" }, [head, filterCard, listCard, footer]));
-
-    function query(cursor) {
-      var parts = ["limit=50"];
-      if (filters.severity) { parts.push("severity=" + encodeURIComponent(filters.severity)); }
-      if (filters.kind) { parts.push("kind=" + encodeURIComponent(filters.kind)); }
-      if (filters.ip) { parts.push("ip=" + encodeURIComponent(filters.ip)); }
-      if (filters.user) { parts.push("user=" + encodeURIComponent(filters.user)); }
-      if (filters.q) { parts.push("q=" + encodeURIComponent(filters.q)); }
-      if (filters.period !== "all") {
-        var ms = filters.period === "1h" ? 3600e3 : filters.period === "7d" ? 7 * 86400e3 : 86400e3;
-        parts.push("since=" + encodeURIComponent(new Date(Date.now() - ms).toISOString()));
-      }
-      if (cursor) { parts.push("before=" + encodeURIComponent(cursor)); }
-      return parts.join("&");
-    }
-
-    function paint() {
-      clear(rows);
-      if (!items.length) {
-        add(rows, loading ? skeleton() : empty(t("ev.empty")));
-      } else {
-        items.forEach(function (ev) { add(rows, eventRow(ev)); });
-      }
-      count.textContent = t("ev.count", { count: A.num(items.length) });
-      more.hidden = !next;
-    }
-
-    function load(append) {
-      loading = true;
-      if (!append) { paint(); }
-      A.api.events(query(append ? next : null)).then(function (page) {
-        loading = false;
-        var batch = (page && page.items) || [];
-        items = append ? items.concat(batch) : batch;
-        next = (page && page.next) || null;
-        A.announceCritical(items);
-        paint();
-      }, function (e) {
-        loading = false;
-        paint();
-        if (e.code !== "offline") { A.toast(mapError(e), "err"); }
-      });
-    }
-
-    function reset() { items = []; next = null; load(false); }
-
-    reset();
-    return { poll: function () { if (!next) { load(false); } }, reload: reset };
-  };
-
-  function debounce(fn, ms) {
-    var timer = null;
-    return function () {
-      if (timer) { clearTimeout(timer); }
-      timer = setTimeout(fn, ms);
-    };
   }
 
-  /* ---------------- bans and allowlist ---------------- */
+  function cell(label, kids) { return el("td", { dataset: { label: label } }, kids); }
 
-  A.routes.bans = function (main) {
-    var tab = "bans";
-    var body = el("div");
-    var tabs = el("div", { class: "tabs", role: "tablist" }, [
-      tabButton("bans", "bans.tab"),
-      tabButton("allow", "allow.tab")
-    ]);
-
-    function tabButton(name, key) {
-      return el("button", {
-        type: "button", role: "tab", text: t(key), dataset: { tab: name },
-        "aria-selected": tab === name ? "true" : "false",
-        onclick: function () {
-          tab = name;
-          var all = tabs.querySelectorAll("button");
-          for (var i = 0; i < all.length; i++) {
-            all[i].setAttribute("aria-selected", all[i].dataset.tab === name ? "true" : "false");
-          }
-          load();
-        }
-      });
-    }
-
-    add(main, el("div", { class: "view" }, [
-      el("div", { class: "view-head" }, [
-        el("h1", { text: t("nav.bans") }),
-        el("button", { class: "btn btn-sm", type: "button", onclick: function () { load(); } },
-          [icon("refresh"), el("span", { text: t("common.refresh") })])
-      ]),
-      el("div", { class: "notice tone-info" }, [
-        icon("shield"),
-        el("div", null, [el("p", { text: t("allow.note") })])
-      ]),
-      tabs,
-      body
-    ]));
-
-    function load() {
-      clear(body);
-      add(body, skeleton());
-      if (tab === "bans") {
-        A.api.bans().then(function (list) { clear(body); add(body, bansPane(list || [])); },
-          function (e) { clear(body); add(body, empty(mapError(e))); });
-      } else {
-        A.api.allowlist().then(function (list) { clear(body); add(body, allowPane(list || [])); },
-          function (e) { clear(body); add(body, empty(mapError(e))); });
-      }
-    }
-
-    function bansPane(list) {
-      var table;
-      if (!list.length) { table = empty(t("bans.empty")); }
-      else {
-        table = el("div", { class: "scroll-x" }, el("table", null, [
-          el("thead", null, el("tr", null, [
-            el("th", { text: t("bans.col.ip") }),
-            el("th", { text: t("bans.col.reason") }),
-            el("th", { text: t("bans.col.until") }),
-            el("th", { text: t("bans.col.repeat") }),
-            el("th", { text: t("bans.col.state") }),
-            el("th", { class: "right" })
-          ])),
-          el("tbody", null, list.map(function (b) {
-            return el("tr", null, [
-              el("td", null, el("span", { class: "mono", text: b.ip })),
-              el("td", null, [
-                el("div", { text: b.reason || "—" }),
-                el("small", { class: "muted", text: t("bans.source." + (b.source || "auto")) + " · " + A.relative(b.created) })
-              ]),
-              el("td", { class: "nowrap", text: A.until(b.until, b.permanent) }),
-              el("td", { text: A.num(b.repeat_count || 1) }),
-              el("td", null, el("span", {
-                class: "pill", dataset: { tone: b.applied ? "ok" : "warn" }
-              }, [
-                icon(b.applied ? "check" : "info"),
-                el("span", { text: b.applied ? t("bans.state.applied") : t("bans.state.recorded") })
-              ])),
-              el("td", { class: "right" }, el("button", {
-                class: "btn btn-sm", type: "button", text: t("bans.unban"),
-                onclick: function () {
-                  A.confirmAction(t("bans.unban.confirm", { ip: b.ip }), t("bans.unban"), "danger")
-                    .then(function (ok) {
-                      if (!ok) { return; }
-                      A.api.unban(b.ip).then(function () {
-                        A.toast(t("bans.unban.done", { ip: b.ip }), "ok");
-                        A.loadStatus(); load();
-                      }, function (e) { A.toast(mapError(e), "err"); });
-                    });
-                }
-              }))
-            ]);
-          }))
-        ]));
-      }
-      return el("div", { class: "view" }, [
-        card(t("bans.title"), table, { icon: "shieldOff", flush: true }),
-        banForm()
-      ]);
-    }
-
-    function banForm() {
-      var ip = el("input", { class: "input", type: "text", placeholder: t("bans.form.ip.ph"), required: true });
-      var reason = el("input", { class: "input", type: "text", placeholder: t("bans.form.reason.ph") });
-      var dur = A.select([
-        { value: "1h", label: t("bans.dur.1h") },
-        { value: "24h", label: t("bans.dur.24h") },
-        { value: "30d", label: t("bans.dur.30d") },
-        { value: "permanent", label: t("bans.dur.permanent") }
-      ], "24h");
-      var err = el("p", { class: "err", hidden: true });
-
-      var form = el("form", {
-        onsubmit: function (ev) {
-          ev.preventDefault();
-          var value = ip.value.trim();
-          if (!A.isIP(value)) { return invalid(t("err.bad_ip")); }
-          if (!A.bannable(value)) { return invalid(t("err.private_ip")); }
-          err.hidden = true;
-          ip.removeAttribute("aria-invalid");
-          A.confirmAction(
-            t("bans.form.confirm", { ip: value, duration: t("bans.dur." + dur.value) }),
-            t("bans.form.submit"), "danger"
-          ).then(function (ok) {
-            if (!ok) { return; }
-            A.api.ban({ ip: value, duration: dur.value, reason: reason.value.trim() || "manual" })
-              .then(function () {
-                A.toast(t("bans.form.done", { ip: value }), "ok");
-                ip.value = ""; reason.value = "";
-                A.loadStatus(); load();
-              }, function (e) { invalid(mapError(e)); });
-          });
-        }
-      }, [
-        el("div", { class: "filters" }, [
-          field(t("bans.form.ip"), ip),
-          field(t("bans.form.reason"), reason),
-          field(t("bans.form.duration"), dur)
-        ]),
-        err,
-        el("div", { class: "actions" }, el("button", {
-          class: "btn btn-danger", type: "submit", text: t("bans.form.submit")
-        }))
-      ]);
-
-      function invalid(message) {
-        err.textContent = message;
-        err.hidden = false;
-        ip.setAttribute("aria-invalid", "true");
-        ip.focus();
-      }
-
-      return card(t("bans.form.title"), form, { icon: "plus" });
-    }
-
-    function allowPane(list) {
-      var table;
-      if (!list.length) { table = empty(t("allow.empty")); }
-      else {
-        table = el("div", { class: "scroll-x" }, el("table", null, [
-          el("thead", null, el("tr", null, [
-            el("th", { text: t("allow.col.ip") }),
-            el("th", { text: t("allow.col.source") }),
-            el("th", { text: t("allow.col.added") }),
-            el("th", { class: "right" })
-          ])),
-          el("tbody", null, list.map(function (a) {
-            return el("tr", null, [
-              el("td", null, el("span", { class: "mono", text: a.ip })),
-              el("td", { text: t("allow.source." + (a.source || "manual")) }),
-              el("td", { class: "nowrap", text: A.dateTime(a.added) }),
-              el("td", { class: "right" }, el("button", {
-                class: "btn btn-sm", type: "button", text: t("allow.remove"),
-                onclick: function () {
-                  A.confirmAction(t("allow.remove.confirm", { ip: a.ip }), t("allow.remove"), "danger")
-                    .then(function (ok) {
-                      if (!ok) { return; }
-                      A.api.unallow(a.ip).then(function () {
-                        A.toast(t("allow.remove.done", { ip: a.ip }), "ok");
-                        A.loadStatus(); load();
-                      }, function (e) { A.toast(mapError(e), "err"); });
-                    });
-                }
-              }))
-            ]);
-          }))
-        ]));
-      }
-
-      var ip = el("input", { class: "input", type: "text", placeholder: t("bans.form.ip.ph"), required: true });
-      var err = el("p", { class: "err", hidden: true });
-      var form = el("form", {
-        onsubmit: function (ev) {
-          ev.preventDefault();
-          var value = ip.value.trim();
-          if (!A.isIP(value)) {
-            err.textContent = t("err.bad_ip"); err.hidden = false;
-            ip.setAttribute("aria-invalid", "true");
-            return;
-          }
-          err.hidden = true;
-          ip.removeAttribute("aria-invalid");
-          A.api.allow(value).then(function () {
-            A.toast(t("allow.form.done", { ip: value }), "ok");
-            ip.value = ""; A.loadStatus(); load();
-          }, function (e) { err.textContent = mapError(e); err.hidden = false; });
-        }
-      }, [
-        el("div", { class: "filters" }, [field(t("allow.col.ip"), ip)]),
-        err,
-        el("div", { class: "actions" }, el("button", {
-          class: "btn btn-primary", type: "submit", text: t("allow.form.submit")
-        }))
-      ]);
-
-      return el("div", { class: "view" }, [
-        card(t("allow.title"), table, { icon: "shield", flush: true }),
-        card(t("allow.form.submit"), form, { icon: "plus" })
-      ]);
-    }
-
-    load();
-    return { reload: load };
-  };
-
-  /* ---------------- alert policy ---------------- */
-
-  A.routes.policy = function (main) {
-    var box = el("div", { class: "view" });
-    add(main, box);
-
-    function quietLabel(tg) {
-      if (!tg || tg.quiet_hours === undefined || tg.quiet_hours === null || tg.quiet_hours === "") {
-        return t("policy.quiet.off");
-      }
-      return String(tg.quiet_hours);
-    }
-
-    function paint(cfg) {
-      clear(box);
-      var status = A.state.status || {};
-      var tg = (cfg && cfg.telegram) || {};
-
-      add(box, el("div", { class: "view-head" }, el("h1", { text: t("policy.title") })));
-
-      add(box, card(t("policy.current"), [
-        el("div", { class: "kv" }, [
-          kv(t("policy.min_sev"), tg.min_severity ? t("sev." + tg.min_severity) : t("common.unknown")),
-          kv(t("policy.quiet"), quietLabel(tg)),
-          kv(t("policy.dedup"), tg.dedup_window || t("common.unknown")),
-          kv(t("policy.rate"), tg.rate_per_minute ? t("policy.rate.value", { n: tg.rate_per_minute }) : t("common.unknown")),
-          kv(t("policy.mute"), status.muted_until
-            ? t("policy.mute.on", { until: A.dateTime(status.muted_until) })
-            : t("policy.mute.off"))
-        ]),
-        el("p", { class: "muted", text: t("policy.readonly") })
-      ], { icon: "bell" }));
-
-      add(box, el("div", { class: "notice tone-info" }, [
-        icon("info"),
-        el("div", null, el("p", { text: t("policy.critical_note") }))
-      ]));
-
-      var controls = [];
-      if (status.muted_until) {
-        controls.push(el("button", {
-          class: "btn btn-primary", type: "button", text: t("policy.unmute"),
-          onclick: function () {
-            A.api.unmute().then(function () {
-              A.toast(t("policy.unmute.done"), "ok");
-              A.loadStatus().then(function () { paint(cfg); });
-            }, function (e) { A.toast(mapError(e), "err"); });
-          }
-        }));
-      } else {
-        [1, 8, 24].forEach(function (h) {
-          controls.push(el("button", {
-            class: "btn", type: "button", text: t("policy.mute.btn", { hours: h }),
+  function paintBans() {
+    if (!R.bansTbl) { return; }
+    clear(R.bansTbl);
+    if (!model.bans.length) { add(R.bansTbl, el("div", { class: "tbl-empty", text: t("bans.empty") })); return; }
+    add(R.bansTbl, el("table", { class: "tbl" }, [
+      el("thead", null, el("tr", null, [
+        el("th", { text: t("bans.col.ip") }), el("th", { text: t("bans.col.reason") }), el("th", { text: t("bans.col.until") }),
+        el("th", { text: t("bans.col.repeat") }), el("th", { text: t("bans.col.state") }), el("th", { class: "r" })
+      ])),
+      el("tbody", null, model.bans.map(function (b) {
+        return el("tr", null, [
+          el("td", { text: b.ip }),
+          cell(t("bans.col.reason"), [b.reason || "—", el("small", { text: t("bans.source." + (b.source || "auto")) + " · " + A.relative(b.created) })]),
+          cell(t("bans.col.until"), A.until(b.until, b.permanent)),
+          cell(t("bans.col.repeat"), A.num(b.repeat_count || 1)),
+          cell(t("bans.col.state"), el("span", { class: "state", dataset: b.applied ? { lv: "ok" } : { sev: "warn" } },
+            [el("i", { class: "dot" }), el("span", { text: b.applied ? t("bans.state.applied") : t("bans.state.recorded") })])),
+          el("td", { class: "r" }, el("button", {
+            class: "pill pill-quiet pill-sm", type: "button", text: t("bans.unban"),
             onclick: function () {
-              A.api.mute(h).then(function (res) {
-                A.toast(t("policy.mute.done", { until: A.dateTime(res && res.muted_until) }), "ok");
-                A.loadStatus().then(function () { paint(cfg); });
-              }, function (e) { A.toast(mapError(e), "err"); });
+              A.confirmAction(t("bans.unban.confirm", { ip: b.ip }), t("bans.unban"), "danger").then(function (ok) {
+                if (!ok) { return; }
+                A.api.unban(b.ip).then(function () { A.toast(t("bans.unban.done", { ip: b.ip }), "ok"); refresh(); },
+                  function (e) { A.toast(errText(e), "err"); });
+              });
             }
-          }));
-        });
-      }
-      add(box, card(t("policy.mute"), el("div", { class: "actions" }, controls), { icon: "bellOff" }));
+          }))
+        ]);
+      }))
+    ]));
+  }
+
+  function paintAllow() {
+    if (!R.allowTbl) { return; }
+    clear(R.allowTbl);
+    if (!model.allow.length) { add(R.allowTbl, el("div", { class: "tbl-empty", text: t("allow.empty") })); return; }
+    add(R.allowTbl, el("table", { class: "tbl" }, [
+      el("thead", null, el("tr", null, [el("th", { text: t("allow.col.ip") }), el("th", { text: t("allow.col.source") }), el("th", { text: t("allow.col.added") }), el("th", { class: "r" })])),
+      el("tbody", null, model.allow.map(function (a) {
+        return el("tr", null, [
+          el("td", { text: a.ip }),
+          cell(t("allow.col.source"), t("allow.source." + (a.source || "manual"))),
+          cell(t("allow.col.added"), A.dateTime(a.added)),
+          el("td", { class: "r" }, el("button", {
+            class: "pill pill-quiet pill-sm", type: "button", text: t("allow.remove"),
+            onclick: function () {
+              A.confirmAction(t("allow.remove.confirm", { ip: a.ip }), t("allow.remove"), "danger").then(function (ok) {
+                if (!ok) { return; }
+                A.api.unallow(a.ip).then(function () { A.toast(t("allow.remove.done", { ip: a.ip }), "ok"); refresh(); },
+                  function (e) { A.toast(errText(e), "err"); });
+              });
+            }
+          }))
+        ]);
+      }))
+    ]));
+  }
+
+  function kvRow(label, value) { return el("div", null, [el("span", { class: "lbl", text: label }), el("b", { text: value })]); }
+
+  function paintAlerts() {
+    if (!R.alerts) { return; }
+    var s = model.status || {}, tg = (model.cfg && model.cfg.telegram) || {};
+    clear(R.alerts);
+    var buttons = [];
+    if (s.muted_until) {
+      buttons.push(el("button", {
+        class: "pill pill-solid", type: "button", text: t("policy.unmute"),
+        onclick: function () {
+          A.api.unmute().then(function () { A.toast(t("policy.unmute.done"), "ok"); refresh(); }, function (e) { A.toast(errText(e), "err"); });
+        }
+      }));
+    } else {
+      [1, 8, 24].forEach(function (h) {
+        buttons.push(el("button", { class: "pill", type: "button", text: t("policy.mute.btn", { hours: h }), onclick: function () { actions.mute(h); } }));
+      });
     }
-
-    add(box, skeleton());
-    A.api.config().then(function (cfg) { paint(cfg); }, function () { paint(null); });
-    return { reload: function () { A.api.config().then(paint, function () { paint(null); }); } };
-  };
-
-  function kv(label, value) {
-    return el("div", null, [
-      el("span", { class: "label", text: label }),
-      el("b", { text: value })
+    add(R.alerts, [
+      el("div", { class: "kvs" }, [
+        kvRow(t("policy.min_sev"), tg.min_severity ? t("sev." + tg.min_severity) : t("common.unknown")),
+        kvRow(t("policy.quiet"), tg.quiet_hours ? String(tg.quiet_hours) : t("policy.quiet.off")),
+        kvRow(t("policy.dedup"), tg.dedup_window || t("common.unknown")),
+        kvRow(t("policy.rate"), tg.rate_per_minute ? t("policy.rate.value", { n: tg.rate_per_minute }) : t("common.unknown")),
+        kvRow(t("policy.mute"), s.muted_until ? t("policy.mute.on", { until: A.dateTime(s.muted_until) }) : t("policy.mute.off"))
+      ]),
+      el("p", { class: "callout", text: t("policy.readonly") + " " + t("policy.critical_note") }),
+      el("div", { class: "btns" }, buttons)
     ]);
   }
 
-  /* ---------------- diagnostics ---------------- */
+  function checkRow(ok, key) {
+    return el("div", { class: "check" }, [
+      el("i", { class: "dot", dataset: ok ? { lv: "ok" } : { sev: "warn" } }),
+      el("div", null, [el("b", { text: t("setup." + key) }), el("p", { text: ok ? t("setup.ok") : t("setup." + key + ".fix") })])
+    ]);
+  }
 
-  A.routes.diag = function (main) {
-    var box = el("div", { class: "view" });
-    add(main, box);
+  function paintSystem() {
+    if (!R.sysKv) { return; }
+    var s = model.status || {}, d = model.diag || {}, c = d.counters || s.counters || {};
+    clear(R.sysKv);
+    [
+      [t("diag.debug"), (d.debug !== undefined ? d.debug : s.debug) ? t("common.on") : t("common.off")],
+      [t("diag.level"), d.log_level || s.log_level || t("common.unknown")],
+      [t("diag.detector"), d.detector || t("common.none")],
+      [t("diag.banner"), d.banner || (s.ban && s.ban.backend) || t("common.none")],
+      [t("diag.audit_log"), d.audit_log || t("common.unknown")],
+      [t("diag.offset"), d.offset !== undefined ? A.num(d.offset) : t("common.unknown")],
+      [t("diag.events"), A.num(c.events_total !== undefined ? c.events_total : c.events_24h)],
+      [t("diag.alerts"), A.num(c.alerts_sent)],
+      [t("diag.skipped"), A.num(c.lines_skipped)],
+      [t("diag.ratelimited"), A.num(c.rate_limited)]
+    ].forEach(function (r) { add(R.sysKv, kvRow(r[0], r[1])); });
 
-    function paint(diag, cfg) {
-      clear(box);
-      var status = A.state.status || {};
-      var c = (diag && diag.counters) || status.counters || {};
+    var tg = (model.cfg && model.cfg.telegram) || {};
+    clear(R.checks);
+    add(R.checks, [
+      checkRow(!(s.auditd && s.auditd.healthy === false), "auditd"),
+      checkRow(!!(tg.token && tg.chat_ids && tg.chat_ids.length), "telegram"),
+      checkRow(s.rules_loaded !== undefined ? !!s.rules_loaded : !!(s.counters && s.counters.events_24h > 0), "rules"),
+      checkRow(!!(s.ban && s.ban.enforcing), "bans")
+    ]);
+    R.confPre.textContent = model.cfg ? JSON.stringify(model.cfg, null, 2) : t("common.unknown");
+  }
 
-      add(box, el("div", { class: "view-head" }, [
-        el("h1", { text: t("diag.title") }),
-        el("button", { class: "btn btn-sm", type: "button", onclick: load },
-          [icon("refresh"), el("span", { text: t("common.refresh") })])
-      ]));
+  function paintClose() {
+    var s = model.status || {};
+    if (R.fine) { R.fine.textContent = t("close.fine", { version: s.version || "—", host: s.host || "—" }); }
+  }
 
-      add(box, card(t("diag.state"), el("div", { class: "kv" }, [
-        kv(t("diag.debug"), (diag && diag.debug) || status.debug ? t("common.on") : t("common.off")),
-        kv(t("diag.level"), (diag && diag.log_level) || status.log_level || t("common.unknown")),
-        kv(t("diag.detector"), (diag && diag.detector) || t("common.none")),
-        kv(t("diag.banner"), (diag && diag.banner) || (status.ban && status.ban.backend) || t("common.none")),
-        kv(t("diag.audit_log"), (diag && diag.audit_log) || t("common.unknown")),
-        kv(t("diag.offset"), diag && diag.offset !== undefined ? A.num(diag.offset) : t("common.unknown"))
-      ]), { icon: "activity" }));
+  function paintDeck(force) {
+    if (!deck) { return; }
+    var ranked = model.events.slice().sort(function (a, b) {
+      return (A.SEV_RANK[b.severity] - A.SEV_RANK[a.severity]) || (a.time < b.time ? 1 : -1);
+    });
+    var pickd = [], seen = {};
+    ranked.forEach(function (e) {
+      var key = e.kind + "|" + (e.src_ip || e.user || "");
+      if (pickd.length < 7 && !seen[key]) { seen[key] = true; pickd.push(e); }
+    });
+    ranked.forEach(function (e) { if (pickd.length < 7 && pickd.indexOf(e) < 0) { pickd.push(e); } });
+    var sig = pickd.map(function (e) { return e.id; }).join(",");
+    if (force || sig !== deck.signature()) { deck.set(pickd); }
+  }
 
-      add(box, card(t("diag.counters"), el("div", { class: "stats" }, [
-        A.statCard(t("diag.events"), A.num(c.events_total !== undefined ? c.events_total : c.events_24h), { icon: "activity" }),
-        A.statCard(t("diag.alerts"), A.num(c.alerts_sent), { icon: "bell" }),
-        A.statCard(t("diag.skipped"), A.num(c.lines_skipped), { icon: "list" }),
-        A.statCard(t("diag.ratelimited"), A.num(c.rate_limited), { icon: "bellOff" })
-      ]), { icon: "dashboard" }));
+  function paintAll() {
+    model.status = S.status;
+    paintHero(); paintFold(); paintRoster(); paintBans(); paintAllow(); paintAlerts(); paintSystem(); paintClose();
+    paintDeck(false);
+  }
 
-      add(box, el("div", { class: "notice tone-info" }, [
-        icon("info"),
-        el("div", null, [
-          el("h3", { text: t("diag.debug.title") }),
-          el("p", { text: t("diag.debug.body") })
-        ])
-      ]));
+  /* ---------------- data ---------------- */
 
-      add(box, card(t("diag.config"), [
-        el("p", { class: "muted", text: t("diag.config.note") }),
-        el("pre", { class: "conf", text: cfg ? JSON.stringify(cfg, null, 2) : t("common.unknown") })
-      ], { icon: "sliders" }));
-    }
-
-    function load() {
-      clear(box);
-      add(box, skeleton());
-      Promise.all([
-        A.api.diagnostics().then(null, function () { return null; }),
-        A.api.config().then(null, function () { return null; })
-      ]).then(function (res) { paint(res[0], res[1]); });
-    }
-
-    load();
-    return { reload: load };
-  };
-
-  /* ---------------- setup check ---------------- */
-
-  A.routes.setup = function (main) {
-    var box = el("div", { class: "view" });
-    add(main, box);
-
-    function check(ok, titleKey, fixKey) {
-      return el("div", { class: "check", dataset: { ok: ok ? "true" : "false" } }, [
-        icon(ok ? "checkCircle" : "alertTriangle"),
-        el("div", null, [
-          el("h3", { text: t(titleKey) }),
-          el("p", { text: ok ? t("setup.ok") : t(fixKey) })
-        ])
+  function loadAll() {
+    return A.loadStatus().then(function () {
+      var since = new Date(Date.now() - 86400e3).toISOString();
+      return Promise.all([
+        A.api.events("limit=200&since=" + encodeURIComponent(since)).then(function (p) { model.events = (p && p.items) || []; A.announceCritical(model.events); }, function () { }),
+        A.api.bans().then(function (v) { model.bans = v || []; }, function () { }),
+        A.api.allowlist().then(function (v) { model.allow = v || []; }, function () { }),
+        A.api.config().then(function (v) { model.cfg = v; }, function () { }),
+        A.api.diagnostics().then(function (v) { model.diag = v; }, function () { })
       ]);
+    }).then(paintAll);
+  }
+
+  function refresh() {
+    return loadAll().then(function () { if (journal) { journal.refresh(); } });
+  }
+
+  function startPoll() {
+    stopPoll();
+    poll = setInterval(function () { if (document.visibilityState === "visible") { refresh(); } }, 10000);
+  }
+  function stopPoll() { if (poll) { clearInterval(poll); poll = null; } }
+
+  /* ---------------- scroll engine ---------------- */
+
+  function update() {
+    if (!R.hero) { return; }
+    var y = window.scrollY, vh = window.innerHeight, vw = window.innerWidth;
+
+    if (!S.reduced) {
+      var range = R.hero.offsetHeight - vh;
+      var p = A.clamp(range > 0 ? y / range : 1, 0, 1);
+      var q = A.easeOut(A.clamp(p / 0.7, 0, 1));
+      R.panL.style.transform = "translate3d(" + (-q * 104) + "%,0,0)";
+      R.panR.style.transform = "translate3d(" + q * 104 + "%,0,0)";
+      R.hImg.style.transform = "scale(" + (1.14 - 0.14 * q) + ")";
+      R.hWash.style.opacity = String(0.34 * q);
+      var dx = q * vw * 0.36, dy = q * vh * 0.32;
+      R.dotA.style.transform = "translate3d(" + -dx + "px," + -dy + "px,0)";
+      R.dotB.style.transform = "translate3d(" + dx + "px," + dy + "px,0)";
+      /* The title opens: it grows and tightens at the same time, and its
+         halves part by about half their own width. */
+      var g = A.easeOut(p);
+      R.title.style.transform = "scale(" + (1 + 0.28 * g) + ")";
+      R.title.style.letterSpacing = (-0.02 - 0.05 * g) + "em";
+      R.t1.style.transform = "translate3d(" + -0.5 * R.t1.offsetWidth * g + "px,0,0)";
+      R.t2.style.transform = "translate3d(" + 0.5 * R.t2.offsetWidth * g + "px,0,0)";
+      var so = A.clamp((p - 0.45) / 0.3, 0, 1);
+      R.hStatus.style.opacity = String(so);
+      R.hStatus.style.transform = "translateY(" + (1 - so) * 16 + "px)";
+      R.hBR.style.opacity = String(1 - A.clamp(p * 4, 0, 1));
     }
 
-    function paint(cfg) {
-      clear(box);
-      var status = A.state.status || {};
-      var tg = (cfg && cfg.telegram) || {};
-      var auditd = !(status.auditd && status.auditd.healthy === false);
-      var telegram = !!(tg.token && tg.chat_ids && tg.chat_ids.length);
-      var rules = status.rules_loaded !== undefined
-        ? !!status.rules_loaded
-        : !!(status.counters && status.counters.events_24h > 0);
-      var bans = !!(status.ban && status.ban.enforcing);
-
-      add(box, el("div", { class: "view-head" }, el("h1", { text: t("setup.title") })));
-      add(box, card(null, el("div", { class: "check-list" }, [
-        check(auditd, "setup.auditd", "setup.auditd.fix"),
-        check(telegram, "setup.telegram", "setup.telegram.fix"),
-        check(rules, "setup.rules", "setup.rules.fix"),
-        check(bans, "setup.bans", "setup.bans.fix")
-      ]), { icon: "clipboard" }));
+    if (R.dial && R.fold) {
+      var r = R.fold.getBoundingClientRect();
+      var prog = (vh - r.top) / (vh + r.height);
+      R.dial.style.transform = "translate3d(0," + (prog - 0.5) * -120 + "px,0) rotate(" + prog * 140 + "deg)";
     }
 
-    add(box, skeleton());
-    A.api.config().then(paint, function () { paint(null); });
-    return { reload: function () { A.api.config().then(paint, function () { paint(null); }); } };
-  };
+    var current = "";
+    [["overview", "overview"], ["events", "events"], ["journal", "events"], ["kinds", "events"], ["addresses", "addresses"], ["alerts", "alerts"], ["system", "system"]].forEach(function (pair) {
+      var node = document.getElementById(pair[0]);
+      if (node && node.getBoundingClientRect().top <= vh * 0.4) { current = pair[1]; }
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".bar .lnk[data-sec]"), function (a) {
+      if (a.dataset.sec === current) { a.setAttribute("aria-current", "true"); } else { a.removeAttribute("aria-current"); }
+    });
+  }
 
-  A.start();
+  /* The closing wordmark spans the page exactly, whatever the font ends up
+     measuring: it is sized from its own width, then translated down so the
+     page edge crops it. */
+  function fitWordmark() {
+    var w = R.bigWm;
+    if (!w || !R.close) { return; }
+    var target = R.close.clientWidth;
+    w.style.fontSize = "100px";
+    var natural = w.scrollWidth;
+    if (natural > 0 && target > 0) { w.style.fontSize = (100 * target / natural * 0.985).toFixed(1) + "px"; }
+  }
+
+  function startEngine() {
+    stopEngine();
+    var ticking = false;
+    function onScroll() {
+      if (ticking) { return; }
+      ticking = true;
+      requestAnimationFrame(function () { ticking = false; fitWordmark(); update(); });
+    }
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    engine = function () {
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+    };
+    fitWordmark();
+    if (document.fonts && document.fonts.ready) { document.fonts.ready.then(function () { fitWordmark(); update(); }); }
+    update();
+  }
+  function stopEngine() { if (engine) { engine(); engine = null; } }
+
+  function setupReveals() {
+    if (observer) { observer.disconnect(); observer = null; }
+    var root = document.documentElement;
+    if (S.reduced || !("IntersectionObserver" in window)) { root.classList.remove("reveal-on"); return; }
+    root.classList.add("reveal-on");
+    observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (en.isIntersecting) { en.target.classList.add("shown"); observer.unobserve(en.target); }
+      });
+    }, { rootMargin: "0px 0px -8% 0px" });
+    Array.prototype.forEach.call(document.querySelectorAll(".rv"), function (n) { observer.observe(n); });
+  }
+
+  /* ---------------- lifecycle ---------------- */
+
+  function stopAll() {
+    stopPoll(); stopEngine();
+    if (observer) { observer.disconnect(); observer = null; }
+    document.documentElement.classList.remove("reveal-on");
+    var sheet = $("#sheet");
+    if (sheet) { sheet.parentNode.removeChild(sheet); }
+    clear($("#main"));
+    R = {}; deck = null; journal = null;
+    model = { status: null, events: [], bans: [], allow: [], cfg: null, diag: null };
+    S.status = null;
+  }
+
+  function rebuild() {
+    stopEngine();
+    buildBar(); buildMain(); setupDemo();
+    paintAll();
+    journal.reload();
+    startEngine();
+  }
+
+  function setupDemo() {
+    var host = $("#demo");
+    if (!S.mock || !window.AUDITDSEC_MOCK) { host.hidden = true; return; }
+    clear(host);
+    var sel = el("select", { class: "sel", "aria-label": t("mock.scenario"), onchange: function (e) {
+      window.AUDITDSEC_MOCK.setScenario(e.target.value);
+      S.announced = null;
+      loadAll().then(function () { paintDeck(true); journal.reload(); });
+    } }, [["quiet", "mock.sc.quiet"], ["warn", "mock.sc.warn"], ["alert", "mock.sc.alert"], ["degraded", "mock.sc.degraded"]].map(function (o) {
+      return el("option", { value: o[0], text: t(o[1]), selected: o[0] === window.AUDITDSEC_MOCK.scenario });
+    }));
+    add(host, [el("span", { class: "lbl", text: t("mock.label") }), sel]);
+    host.hidden = false;
+  }
+
+  function showShell() {
+    stopAll();
+    $("#gate").hidden = true;
+    clear($("#gate"));
+    $("#shell").hidden = false;
+    A.hooks.unauthorized = showGate;
+    window.scrollTo(0, 0);
+    buildBar(); buildMain(); setupDemo();
+    startEngine();
+    loadAll().then(function () { journal.reload(); startPoll(); });
+  }
+
+  function boot() {
+    document.documentElement.lang = S.lang;
+    document.documentElement.setAttribute("data-theme", S.theme);
+    $("#skip").textContent = t("a11y.skip");
+    A.hooks.unauthorized = showGate;
+    if (S.token) {
+      A.api.status().then(function (st) { S.status = st; showShell(); }, function () { showGate(); });
+    } else { showGate(); }
+  }
+
+  function start() {
+    if (S.mock && !window.AUDITDSEC_MOCK) {
+      var s = document.createElement("script");
+      s.src = "dev/mock.js";
+      s.onload = function () {
+        var want = A.params.get("scenario");
+        if (want && window.AUDITDSEC_MOCK) { window.AUDITDSEC_MOCK.setScenario(want); }
+        boot();
+      };
+      s.onerror = function () { S.mock = false; boot(); };
+      document.head.appendChild(s);
+      return;
+    }
+    if (S.mock && window.AUDITDSEC_MOCK) {
+      var preset = A.params.get("scenario");
+      if (preset) { window.AUDITDSEC_MOCK.setScenario(preset); }
+    }
+    boot();
+  }
+
+  start();
 })();
