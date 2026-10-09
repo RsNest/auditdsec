@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="robots" content="noindex, nofollow">
+<title>auditdsec</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2024%2024%22%20fill=%22none%22%20stroke=%22%232dd4bf%22%20stroke-width=%222%22%20stroke-linecap=%22round%22%20stroke-linejoin=%22round%22%3E%3Cpath%20d=%22M12%2021.5s7.5-3.4%207.5-9.6V5.4L12%202.6%204.5%205.4v6.5c0%206.2%207.5%209.6%207.5%209.6Z%22/%3E%3Cpath%20d=%22m8.8%2012%202.4%202.4%204-4.6%22/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<a class="skip" href="#main" data-i18n="a11y.skip">К содержанию</a>
+
+<div id="strip" class="strip" hidden></div>
+<header id="bar" class="bar"></header>
+
+<div id="shell">
+  <div id="offline" class="offline-wrap" hidden></div>
+  <div class="app">
+    <nav id="nav" class="nav" aria-label="auditdsec" data-i18n-attr="aria-label:a11y.nav"></nav>
+    <main id="main" tabindex="-1"></main>
+  </div>
+</div>
+
+<div id="gate" class="gate" hidden></div>
+
+<div id="live" class="sr" role="status" aria-live="polite" aria-atomic="true"></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<dialog id="dialog" aria-modal="true"></dialog>
+
+<script src="i18n.js"></script>
+<script src="core.js"></script>
+<script src="views.js"></script>
+</body>
+</html>

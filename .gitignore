@@ -4,6 +4,7 @@
 *.exe
 # state and secrets
 /state/
+agent.pid
 *.db
 config.yaml
 .env
@@ -14,3 +15,6 @@ vendor/
 # IDE
 .idea/
 .vscode/
+
+# panel preview build
+/preview.html

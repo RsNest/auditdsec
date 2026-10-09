@@ -5,6 +5,7 @@
 #   make check      formatting, vet, tests (what CI should run)
 #   make docker     build the container image
 #   make install    install the binary, config and systemd unit on this host
+#   make preview    fold the panel assets into one file for design review
 
 BINARY  := auditdsec
 VERSION ?= 0.1.0
@@ -17,7 +18,7 @@ CONFDIR    ?= /etc/auditdsec
 STATEDIR   ?= /var/lib/auditdsec
 LOGDIR     ?= /var/log/auditdsec
 
-.PHONY: all build test vet fmt fmt-check check docker clean install uninstall rules
+.PHONY: all build test vet fmt fmt-check check docker clean install uninstall rules preview
 
 all: build
 
@@ -44,8 +45,13 @@ docker:
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) \
 		-t $(BINARY):$(VERSION) -t $(BINARY):latest .
 
+# One self-contained page with demo data, for looking at the panel without
+# running the agent. Not shipped and not embedded.
+preview:
+	python3 scripts/preview.py preview.html
+
 clean:
-	rm -rf bin
+	rm -rf bin preview.html
 
 # Install the binary form (the fallback when Docker is not used). The audit
 # rules are installed separately with `make rules`, because loading them
