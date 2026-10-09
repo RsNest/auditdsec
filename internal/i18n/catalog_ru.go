@@ -71,6 +71,7 @@ var catalogRU = map[string]string{
 		"/mute [часы] — заглушить оповещения\n" +
 		"/unmute — включить оповещения\n" +
 		"/explain &lt;тип&gt; — объяснить тип события\n" +
+		"/debug — диагностика агента\n" +
 		"/help — эта справка",
 	"ui.status": "<b>{host}</b>\n" +
 		"Профиль: {profile}\n" +
@@ -96,6 +97,23 @@ var catalogRU = map[string]string{
 	"ui.mute.off":        "Оповещения включены.",
 	"ui.grouped":         "Похожих событий за {window}: ещё {count}.",
 	"ui.not_available":   "Эта возможность появится в следующих версиях.",
+	"ui.debug": "<b>Диагностика</b>\n" +
+		"Режим отладки: {debug}\n" +
+		"Уровень журнала: {level}\n" +
+		"Агент работает: {uptime}\n" +
+		"Открытых окон группировки: {groups}\n" +
+		"Отброшено лимитом сообщений: {dropped}\n" +
+		"Оповещения: {muted}",
+	"ui.debug.on":  "включён",
+	"ui.debug.off": "выключен",
+	"ui.debug.hint": "Как включить отладку: задайте <code>AUDITDSEC_DEBUG=1</code> и перезапустите агента " +
+		"(<code>docker compose restart auditdsec</code> или <code>systemctl restart auditdsec</code>). " +
+		"Подробности появятся в журнале агента. Чтобы выключить, уберите переменную и перезапустите.",
+	"ui.diag.events":     "Событий обработано",
+	"ui.diag.alerts":     "Отправлено алертов",
+	"ui.diag.skipped":    "Строк пропущено",
+	"ui.diag.audit_log":  "Журнал аудита",
+	"ui.diag.offset":     "Прочитано до байта",
 	"ui.never":           "нет",
 	"val.unknown":        "неизвестно",
 	"ui.muted_until":     "заглушены до {until}",

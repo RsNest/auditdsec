@@ -265,6 +265,72 @@ func TestMap(t *testing.T) {
 	}
 }
 
+// Debug mode has to explain why an event was dropped, so every dropped event
+// must come back with a reason a person can act on.
+func TestMapVerboseExplainsEveryDrop(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{
+			name:  "session bookkeeping",
+			lines: []string{`type=CRED_ACQ msg=audit(1760000000.000:1): pid=1 uid=0 msg='op=PAM:setcred acct="root" res=success'`},
+			want:  "no rule for record types [CRED_ACQ]",
+		},
+		{
+			name:  "successful auth",
+			lines: []string{`type=USER_AUTH msg=audit(1760000000.000:2): pid=1 msg='acct="root" addr=203.0.113.9 res=success'`},
+			want:  "USER_LOGIN",
+		},
+		{
+			name:  "somebody else's audit rule",
+			lines: []string{`type=SYSCALL msg=audit(1760000000.000:3): syscall=257 success=yes auid=0 key="their_own_rule"`},
+			want:  `no rule for audit key "their_own_rule"`,
+		},
+		{
+			name: "failed access",
+			lines: []string{
+				`type=SYSCALL msg=audit(1760000000.000:4): syscall=257 success=no exit=-13 auid=1000 key="ads_identity"`,
+				`type=PATH msg=audit(1760000000.000:4): item=0 name="/etc/shadow"`,
+			},
+			want: "exit=-13",
+		},
+	}
+	m := New("web01")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, reason, ok := m.MapVerbose(build(t, tc.lines...))
+			if ok {
+				t.Fatal("the event should have been dropped")
+			}
+			if !strings.Contains(reason, tc.want) {
+				t.Errorf("reason = %q, want it to mention %q", reason, tc.want)
+			}
+		})
+	}
+}
+
+// An unknown audit key is almost always a rules file that disagrees with the
+// build, so the reason must list what the build does know.
+func TestMapVerboseListsKnownKeys(t *testing.T) {
+	_, reason, _ := New("h").MapVerbose(build(t,
+		`type=SYSCALL msg=audit(1760000000.000:1): syscall=257 success=yes auid=0 key="typo_in_rules"`))
+	for _, k := range []string{KeyIdentity, KeySSHKeys, KeyLogs} {
+		if !strings.Contains(reason, k) {
+			t.Errorf("reason should list %q: %q", k, reason)
+		}
+	}
+}
+
+func TestMapVerboseGivesNoReasonOnSuccess(t *testing.T) {
+	_, reason, ok := New("h").MapVerbose(build(t,
+		`type=USER_LOGIN msg=audit(1760000000.000:1): auid=0 msg='acct="root" addr=203.0.113.9 res=success'`))
+	if !ok || reason != "" {
+		t.Errorf("ok = %v, reason = %q", ok, reason)
+	}
+}
+
 // The stored evidence must not contain the hex form of a command that carried a
 // secret, because hex is trivially reversible.
 func TestMapRedactsRawSudoCommand(t *testing.T) {

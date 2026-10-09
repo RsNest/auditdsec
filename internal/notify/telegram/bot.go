@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"html"
 	"net"
 	"strconv"
 	"strings"
@@ -197,6 +198,8 @@ func (c *Client) handleCommand(ctx context.Context, m *tgMessage) {
 		c.reply(ctx, chat, c.tr("ui.mute.off", nil))
 	case "/explain":
 		c.cmdExplain(ctx, chat, args)
+	case "/debug":
+		c.reply(ctx, chat, c.debugText())
 	case "/score":
 		c.reply(ctx, chat, c.tr("ui.not_available", nil))
 	default:
@@ -336,6 +339,46 @@ func (c *Client) cmdExplain(ctx context.Context, chat int64, args []string) {
 		return
 	}
 	c.reply(ctx, chat, c.tr("explain."+string(kind), nil))
+}
+
+// debugText reports the agent's internal state and, more importantly, says how
+// debug mode is switched on. A diagnostic the user cannot enable is useless.
+func (c *Client) debugText() string {
+	state := c.tr("ui.debug.off", nil)
+	if c.opt.Debug {
+		state = c.tr("ui.debug.on", nil)
+	}
+	level := c.opt.LogLevel
+	if level == "" {
+		level = "info"
+	}
+	muted := c.tr("ui.not_muted", nil)
+	if until := c.opt.Store.MutedUntil(); !until.IsZero() {
+		muted = c.tr("ui.muted_until", map[string]string{"until": c.fmtTime(until)})
+	}
+
+	var b strings.Builder
+	b.WriteString(c.tr("ui.debug", map[string]string{
+		"debug":   state,
+		"level":   level,
+		"uptime":  humanDuration(c.now().Sub(c.opt.Started)),
+		"groups":  strconv.Itoa(c.OpenGroups()),
+		"dropped": strconv.Itoa(c.Dropped()),
+		"muted":   muted,
+	}))
+
+	c.mu.Lock()
+	diag := c.diag
+	c.mu.Unlock()
+	if diag != nil {
+		for _, item := range diag() {
+			fmt.Fprintf(&b, "\n%s: %s", c.tr(item.Key, nil), html.EscapeString(item.Value))
+		}
+	}
+
+	b.WriteString("\n\n")
+	b.WriteString(c.tr("ui.debug.hint", nil))
+	return b.String()
 }
 
 func (c *Client) statusText() string {

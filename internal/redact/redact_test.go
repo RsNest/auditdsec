@@ -1,6 +1,9 @@
 package redact
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestString(t *testing.T) {
 	tests := []struct {
@@ -43,6 +46,37 @@ func TestStringLeavesHarmlessFlagsAlone(t *testing.T) {
 		if got := String(s); got != s {
 			t.Errorf("String(%q) = %q, want unchanged", s, got)
 		}
+	}
+}
+
+// Debug logging prints raw audit lines, so the hex form of a command must be
+// decoded and masked rather than copied verbatim.
+func TestAuditLine(t *testing.T) {
+	in := `type=USER_CMD msg=audit(1760000000.000:6): pid=2000 uid=1000 msg='cwd="/home/ruslan" cmd=6D7973716C202D7068756E74657232 terminal=pts/0 res=success'`
+	got := AuditLine(in)
+	if strings.Contains(got, "6D7973716C202D7068756E74657232") {
+		t.Errorf("the hex command survived: %q", got)
+	}
+	if !strings.Contains(got, `cmd="mysql -p***"`) {
+		t.Errorf("the command should be decoded and masked, got %q", got)
+	}
+	if !strings.Contains(got, "pid=2000") {
+		t.Errorf("the rest of the line must stay intact: %q", got)
+	}
+}
+
+func TestAuditLineLeavesOrdinaryLinesAlone(t *testing.T) {
+	in := `type=SYSCALL msg=audit(1760000000.000:9): arch=c000003e syscall=257 success=yes comm="vim" key="ads_identity"`
+	if got := AuditLine(in); got != in {
+		t.Errorf("AuditLine changed a line with no secrets:\n got %q\nwant %q", got, in)
+	}
+}
+
+func TestAuditLineMasksPlaintextSecrets(t *testing.T) {
+	in := `type=EXECVE msg=audit(1760000000.000:9): a0="psql" a1="password=hunter2"`
+	got := AuditLine(in)
+	if strings.Contains(got, "hunter2") {
+		t.Errorf("a plaintext secret survived: %q", got)
 	}
 }
 

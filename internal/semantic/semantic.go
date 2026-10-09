@@ -4,7 +4,9 @@
 package semantic
 
 import (
+	"fmt"
 	"net"
+	"sort"
 	"strings"
 
 	"github.com/RsNest/auditdsec/internal/model"
@@ -73,6 +75,14 @@ func New(host string) *Mapper { return &Mapper{host: host} }
 // for the many records that are pure noise (session bookkeeping, credential
 // juggling), which the agent deliberately never reports.
 func (m *Mapper) Map(ev *parse.Event) (model.Event, bool) {
+	out, _, ok := m.MapVerbose(ev)
+	return out, ok
+}
+
+// MapVerbose is Map plus the reason an event was dropped, which is what debug
+// mode reports. "My alert never arrived" is the question this answers, so the
+// reason is written for a person reading a log, not for a parser.
+func (m *Mapper) MapVerbose(ev *parse.Event) (model.Event, string, bool) {
 	out := model.Event{
 		Time: ev.Time,
 		Host: m.host,
@@ -112,7 +122,7 @@ func (m *Mapper) Map(ev *parse.Event) (model.Event, bool) {
 		// A successful USER_AUTH is already covered by USER_LOGIN; reporting
 		// both would double-count every login.
 		if succeeded(ev) {
-			return model.Event{}, false
+			return model.Event{}, "successful USER_AUTH is reported through USER_LOGIN instead", false
 		}
 		out.Kind = model.KindSSHLoginFail
 		out.Severity = model.SevWarn
@@ -143,12 +153,14 @@ func (m *Mapper) Map(ev *parse.Event) (model.Event, bool) {
 	case len(ev.AuditKeys()) > 0:
 		r, key, ok := matchKey(ev.AuditKeys())
 		if !ok {
-			return model.Event{}, false
+			return model.Event{}, fmt.Sprintf("no rule for audit key %q (keys the agent knows: %s)",
+				strings.Join(ev.AuditKeys(), ","), strings.Join(knownKeys(), ", ")), false
 		}
 		// A watched file is only interesting when it was actually touched:
 		// a failed open is noise from an unprivileged process.
 		if ev.Has("SYSCALL") && ev.FieldOf("SYSCALL", "success") == "no" {
-			return model.Event{}, false
+			return model.Event{}, fmt.Sprintf("the watched file was not touched: syscall failed (exit=%s)",
+				ev.FieldOf("SYSCALL", "exit")), false
 		}
 		out.Kind = r.kind
 		out.Severity = r.sev
@@ -159,14 +171,26 @@ func (m *Mapper) Map(ev *parse.Event) (model.Event, bool) {
 		out.Args["key"] = key
 
 	default:
-		return model.Event{}, false
+		return model.Event{}, fmt.Sprintf("no rule for record types [%s] and no audit key",
+			strings.Join(ev.Types(), ",")), false
 	}
 
 	out.SummaryKey = "event." + string(out.Kind)
 	out.Args["user"] = out.User
 	out.Args["kind"] = string(out.Kind)
 	out.Args = redact.Args(out.Args)
-	return out, true
+	return out, "", true
+}
+
+// knownKeys lists the audit rule keys the agent acts on, for the debug message
+// that fires when a rule file and this build disagree.
+func knownKeys() []string {
+	out := make([]string, 0, len(keyRules))
+	for k := range keyRules {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // HeartbeatLost builds the synthetic event reported when the audit log stops

@@ -463,6 +463,76 @@ func TestCommands(t *testing.T) {
 	}
 }
 
+// /debug must say whether debug mode is on AND how to turn it on: a diagnostic
+// the user cannot enable is useless.
+func TestDebugCommand(t *testing.T) {
+	f := newClient(t, func(o *Options) {
+		o.Debug = false
+		o.LogLevel = "info"
+	})
+	f.client.SetDiag(func() []DiagItem {
+		return []DiagItem{
+			{Key: "ui.diag.events", Value: "17"},
+			{Key: "ui.diag.audit_log", Value: "ok, 1024 bytes, written 2s ago"},
+		}
+	})
+
+	text := f.client.debugText()
+	for _, want := range []string{"выключен", "info", "AUDITDSEC_DEBUG", "17", "1024 bytes"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("/debug output should mention %q:\n%s", want, text)
+		}
+	}
+	if !strings.Contains(text, "Событий обработано") {
+		t.Errorf("diagnostic labels should be translated:\n%s", text)
+	}
+
+	on := newClient(t, func(o *Options) {
+		o.Debug = true
+		o.LogLevel = "debug"
+	})
+	if got := on.client.debugText(); !strings.Contains(got, "включён") {
+		t.Errorf("debug mode is on, output = %s", got)
+	}
+}
+
+func TestDebugCommandWithoutDiagnostics(t *testing.T) {
+	f := newClient(t, nil)
+	if got := f.client.debugText(); !strings.Contains(got, "AUDITDSEC_DEBUG") {
+		t.Errorf("the hint must survive a missing diagnostics hook:\n%s", got)
+	}
+}
+
+func TestDebugCommandIsReachable(t *testing.T) {
+	f := newClient(t, nil)
+	f.client.handleUpdate(context.Background(), update{
+		Message: &tgMessage{Chat: tgChat{ID: 100}, Text: "/debug"},
+	})
+	sent := f.api.sent()
+	if len(sent) == 0 || !strings.Contains(sent[0].Text, "AUDITDSEC_DEBUG") {
+		t.Errorf("/debug = %+v", sent)
+	}
+}
+
+// Grouped repeats are reported with their running count, which is what the
+// debug trail needs.
+func TestSuppressAsRepeatReportsCount(t *testing.T) {
+	f := newClient(t, nil)
+	ev := loginFail("198.51.100.7")
+	if n, repeat := f.client.suppressAsRepeat(ev, f.now); repeat || n != 0 {
+		t.Fatalf("first occurrence: n=%d repeat=%v", n, repeat)
+	}
+	for want := 1; want <= 3; want++ {
+		n, repeat := f.client.suppressAsRepeat(ev, f.now)
+		if !repeat || n != want {
+			t.Errorf("repeat %d: n=%d repeat=%v", want, n, repeat)
+		}
+	}
+	if f.client.OpenGroups() != 1 {
+		t.Errorf("OpenGroups = %d, want 1", f.client.OpenGroups())
+	}
+}
+
 func TestLastShowsNewestFirst(t *testing.T) {
 	f := newClient(t, nil)
 	for i, kind := range []model.Kind{model.KindSudo, model.KindSSHLoginFail} {

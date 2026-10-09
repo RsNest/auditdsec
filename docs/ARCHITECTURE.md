@@ -125,6 +125,30 @@ has not been written for longer than `heartbeat.stale_after`, with a cooldown so
 it once rather than every minute. A hard signal — auditd's own `DAEMON_END` record — is
 handled by `semantic` like any other event.
 
+## Debug mode
+
+One switch, three equivalent ways to set it: `AUDITDSEC_DEBUG=1`, `debug: true`, or
+`run -debug` (the flag wins, and only when actually passed, so `-debug=false` cannot
+silently override a file that asked for it). Turning it on also forces `log.level` to
+debug, because the two were never useful apart.
+
+What it adds is a trail for one question — *why did no alert arrive* — so each stage
+reports its own refusal:
+
+- `pipeline` logs every line read, through `redact.AuditLine` so a hex-encoded command
+  is decoded, masked and written back readable instead of being copied verbatim;
+- `semantic.MapVerbose` returns the reason a record was dropped, and an unknown audit key
+  lists the keys the build does know, because a rules file that disagrees with the binary
+  is the usual cause;
+- `telegram` logs a verdict per event (sent, grouped, held) with the reason, covering the
+  severity threshold, mute, quiet hours, the dedup window and the rate limit;
+- counters print every 30 seconds, which tells a quiet agent from a stuck one.
+
+The `/debug` bot command reports the live state and, deliberately, how to switch the mode
+on and off: a diagnostic the user cannot enable is useless. Its pipeline-side lines arrive
+through `Client.SetDiag`, a setter rather than an option because the pipeline is built
+after the client it reports to.
+
 ## Roadmap
 
 - **v0.1** (done): parser, 10 event kinds, Telegram alerts with buttons and commands,

@@ -46,6 +46,11 @@ type Options struct {
 	Started  time.Time
 	Location *time.Location
 
+	// Debug reports whether the agent runs in debug mode, and LogLevel the
+	// level its own log is written at. Both are shown by /debug.
+	Debug    bool
+	LogLevel string
+
 	MinSeverity   model.Severity
 	DedupWindow   time.Duration
 	RatePerMinute int
@@ -65,6 +70,7 @@ type Client struct {
 	poll *http.Client
 
 	mu         sync.Mutex
+	diag       DiagFunc
 	groups     map[string]*group
 	tokens     float64
 	lastRefill time.Time
@@ -222,6 +228,32 @@ func (c *Client) Broadcast(ctx context.Context, text string, kb *inlineKeyboard)
 		}
 	}
 	return firstErr
+}
+
+// DiagItem is one line of the /debug report: an i18n key for the label and the
+// value to show beside it.
+type DiagItem struct {
+	Key   string
+	Value string
+}
+
+// DiagFunc supplies the lines that only the pipeline knows, such as how many
+// events have been processed.
+type DiagFunc func() []DiagItem
+
+// SetDiag attaches the pipeline's diagnostics to the /debug command. It is a
+// setter because the pipeline is built after the client it reports to.
+func (c *Client) SetDiag(f DiagFunc) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.diag = f
+}
+
+// OpenGroups reports how many dedup windows are currently open, for /debug.
+func (c *Client) OpenGroups() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.groups)
 }
 
 // Dropped reports how many alerts the rate limiter discarded, for /status.

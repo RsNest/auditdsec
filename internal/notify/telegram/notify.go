@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 // that a compromise reaches you at 3am.
 func (c *Client) Notify(ctx context.Context, ev model.Event) error {
 	if ev.Severity < c.opt.MinSeverity {
+		c.decided(ev, "held", fmt.Sprintf("severity %s is below min_severity=%s",
+			ev.Severity, c.opt.MinSeverity))
 		return nil
 	}
 	critical := ev.Severity >= model.SevCritical
@@ -21,42 +24,67 @@ func (c *Client) Notify(ctx context.Context, ev model.Event) error {
 
 	if !critical {
 		if until := c.opt.Store.MutedUntil(); !until.IsZero() {
-			c.log.Debug("alert muted", "kind", ev.Kind, "until", until)
+			c.decided(ev, "held", "alerts are muted until "+c.fmtTime(until))
 			return nil
 		}
 		if c.inQuietHours(now) {
-			c.log.Debug("alert held back by quiet hours", "kind", ev.Kind)
+			c.decided(ev, "held", "inside quiet hours")
 			return nil
 		}
 	}
 
-	if c.suppressAsRepeat(ev, now) {
+	if n, repeat := c.suppressAsRepeat(ev, now); repeat {
+		c.decided(ev, "grouped", fmt.Sprintf("repeat %d inside the %s dedup window",
+			n, humanDuration(c.opt.DedupWindow)))
 		return nil
 	}
 	if !c.allowRate(now) {
 		c.mu.Lock()
 		c.dropped++
+		dropped := c.dropped
 		c.mu.Unlock()
-		c.log.Warn("alert dropped by the rate limit", "kind", ev.Kind, "per_minute", c.opt.RatePerMinute)
+		c.log.Warn("alert dropped by the rate limit",
+			"kind", ev.Kind, "per_minute", c.opt.RatePerMinute, "dropped_total", dropped)
 		return nil
 	}
-	return c.Broadcast(ctx, c.renderEvent(ev), c.eventKeyboard(ev))
+	if err := c.Broadcast(ctx, c.renderEvent(ev), c.eventKeyboard(ev)); err != nil {
+		return err
+	}
+	c.decided(ev, "sent", "")
+	return nil
+}
+
+// decided records what happened to an event. These lines are the trail that
+// answers "why did no alert arrive", so debug mode turns them on by raising the
+// log level rather than by a switch of its own.
+func (c *Client) decided(ev model.Event, verdict, reason string) {
+	args := []any{"verdict", verdict, "kind", string(ev.Kind), "severity", ev.Severity.String()}
+	if ev.User != "" {
+		args = append(args, "user", ev.User)
+	}
+	if ev.SrcIP != "" {
+		args = append(args, "ip", ev.SrcIP)
+	}
+	if reason != "" {
+		args = append(args, "reason", reason)
+	}
+	c.log.Debug("alert decision", args...)
 }
 
 // suppressAsRepeat reports whether the event is a repeat inside the dedup
 // window, counting it so FlushGroups can report "and 46 more" in one message
-// instead of 47 separate ones.
-func (c *Client) suppressAsRepeat(ev model.Event, now time.Time) bool {
+// instead of 47 separate ones. The count is returned for the debug trail.
+func (c *Client) suppressAsRepeat(ev model.Event, now time.Time) (int, bool) {
 	key := ev.DedupKey()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if g, ok := c.groups[key]; ok && now.Sub(g.sentAt) < c.opt.DedupWindow {
 		g.extra++
 		g.ev = ev
-		return true
+		return g.extra, true
 	}
 	c.groups[key] = &group{ev: ev, sentAt: now}
-	return false
+	return 0, false
 }
 
 // FlushGroups sends the tail of each closed dedup window and forgets it.

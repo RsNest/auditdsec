@@ -82,12 +82,17 @@ type Config struct {
 	AuditLog      string
 	StateDir      string
 	ReadFromStart bool
-	Log           LogConfig
-	Telegram      TelegramConfig
-	Store         StoreConfig
-	Heartbeat     HeartbeatConfig
-	Detect        DetectConfig
-	CrowdSec      CrowdSecConfig
+	// Debug turns on the diagnostic trail: every line read, the reason every
+	// record was dropped, the decision behind every alert, and the counters.
+	// It also forces log.level to debug, because the two were never useful
+	// apart. Switch it on with AUDITDSEC_DEBUG=1, `debug: true` or -debug.
+	Debug     bool
+	Log       LogConfig
+	Telegram  TelegramConfig
+	Store     StoreConfig
+	Heartbeat HeartbeatConfig
+	Detect    DetectConfig
+	CrowdSec  CrowdSecConfig
 
 	// Filled by validate.
 	lang      i18n.Lang
@@ -95,6 +100,7 @@ type Config struct {
 	quietFrom int // minutes from midnight, -1 when disabled
 	quietTo   int
 	badChatID string // a malformed chat id from the environment, reported by validate
+	badDebug  string // a malformed AUDITDSEC_DEBUG value, reported by validate
 }
 
 // Defaults returns the preset for a profile. The simple profile is tuned for
@@ -172,6 +178,9 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	c.applyEnv()
+	if c.Debug {
+		c.Log.Level = "debug"
+	}
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
@@ -181,13 +190,14 @@ func Load(path string) (*Config, error) {
 func (c *Config) decode(root *node) error {
 	d := &dec{}
 	d.strict(root, "", "profile", "lang", "host", "audit_log", "state_dir",
-		"read_from_start", "log", "telegram", "store", "heartbeat", "detect", "crowdsec")
+		"read_from_start", "debug", "log", "telegram", "store", "heartbeat", "detect", "crowdsec")
 
 	d.str(root, "lang", &c.Lang)
 	d.str(root, "host", &c.Host)
 	d.str(root, "audit_log", &c.AuditLog)
 	d.str(root, "state_dir", &c.StateDir)
 	d.boolean(root, "read_from_start", &c.ReadFromStart)
+	d.boolean(root, "debug", &c.Debug)
 
 	if n := d.section(root, "log"); n != nil {
 		d.strict(n, "log", "file", "level", "max_size_mb", "max_backups", "stdout")
@@ -274,6 +284,16 @@ func (c *Config) applyEnv() {
 		}
 		c.Telegram.ChatIDs = ids
 	}
+	if v := os.Getenv("AUDITDSEC_DEBUG"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Debug = true
+		case "0", "false", "no", "off":
+			c.Debug = false
+		default:
+			c.badDebug = v
+		}
+	}
 	if v := os.Getenv("AUDITDSEC_RETENTION_DAYS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Store.RetentionDays = n
@@ -308,6 +328,9 @@ func (c *Config) validate() error {
 	}
 	if c.badChatID != "" {
 		add("telegram.chat_ids: %q is not a number", c.badChatID)
+	}
+	if c.badDebug != "" {
+		add("AUDITDSEC_DEBUG: %q is not a yes/no value (use 1 or 0)", c.badDebug)
 	}
 	if len(c.Telegram.ChatIDs) == 0 {
 		add("telegram.chat_ids: at least one chat id is required; the bot answers nobody else")
@@ -417,6 +440,7 @@ func (c *Config) Redacted() string {
 	fmt.Fprintf(&b, "audit_log:        %s\n", c.AuditLog)
 	fmt.Fprintf(&b, "state_dir:        %s\n", c.StateDir)
 	fmt.Fprintf(&b, "read_from_start:  %t\n", c.ReadFromStart)
+	fmt.Fprintf(&b, "debug:            %t\n", c.Debug)
 	fmt.Fprintf(&b, "log:              %s (level %s, %d MB x %d)\n", c.Log.File, c.Log.Level, c.Log.MaxSizeMB, c.Log.MaxBackups)
 	fmt.Fprintf(&b, "telegram.token:   %s\n", redact.Token(c.Telegram.Token))
 	fmt.Fprintf(&b, "telegram.chats:   %v\n", c.Telegram.ChatIDs)

@@ -70,6 +70,7 @@ var catalogEN = map[string]string{
 		"/mute [hours] — mute alerts\n" +
 		"/unmute — unmute alerts\n" +
 		"/explain &lt;kind&gt; — explain an event kind\n" +
+		"/debug — agent diagnostics\n" +
 		"/help — this help",
 	"ui.status": "<b>{host}</b>\n" +
 		"Profile: {profile}\n" +
@@ -78,23 +79,40 @@ var catalogEN = map[string]string{
 		"Last event: {last}\n" +
 		"Allowlist: {allow}\n" +
 		"Alerts: {muted}",
-	"ui.last.header":      "Recent events ({count}):",
-	"ui.last.empty":       "No events yet.",
-	"ui.allow.ok":         "Address {ip} added to the allowlist and will not be banned.",
-	"ui.allow.removed":    "Address {ip} removed from the allowlist.",
-	"ui.allow.missing":    "Address {ip} is not in the allowlist.",
-	"ui.allow.header":     "Allowlist ({count}):",
-	"ui.allow.empty":      "The allowlist is empty.",
-	"ui.ban.recorded":     "Ban decision for {ip} recorded. Applying bans on the host arrives in v0.2.",
-	"ui.ban.allowlisted":  "Address {ip} is allowlisted, the ban was cancelled.",
-	"ui.ban.header":       "Ban decisions ({count}):",
-	"ui.ban.empty":        "No bans.",
-	"ui.ban.removed":      "Ban on {ip} lifted.",
-	"ui.ban.missing":      "There is no ban for {ip}.",
-	"ui.mute.on":          "Alerts muted until {until}. Critical events still come through.",
-	"ui.mute.off":         "Alerts unmuted.",
-	"ui.grouped":          "Similar events in {window}: {count} more.",
-	"ui.not_available":    "This capability arrives in a later version.",
+	"ui.last.header":     "Recent events ({count}):",
+	"ui.last.empty":      "No events yet.",
+	"ui.allow.ok":        "Address {ip} added to the allowlist and will not be banned.",
+	"ui.allow.removed":   "Address {ip} removed from the allowlist.",
+	"ui.allow.missing":   "Address {ip} is not in the allowlist.",
+	"ui.allow.header":    "Allowlist ({count}):",
+	"ui.allow.empty":     "The allowlist is empty.",
+	"ui.ban.recorded":    "Ban decision for {ip} recorded. Applying bans on the host arrives in v0.2.",
+	"ui.ban.allowlisted": "Address {ip} is allowlisted, the ban was cancelled.",
+	"ui.ban.header":      "Ban decisions ({count}):",
+	"ui.ban.empty":       "No bans.",
+	"ui.ban.removed":     "Ban on {ip} lifted.",
+	"ui.ban.missing":     "There is no ban for {ip}.",
+	"ui.mute.on":         "Alerts muted until {until}. Critical events still come through.",
+	"ui.mute.off":        "Alerts unmuted.",
+	"ui.grouped":         "Similar events in {window}: {count} more.",
+	"ui.not_available":   "This capability arrives in a later version.",
+	"ui.debug": "<b>Diagnostics</b>\n" +
+		"Debug mode: {debug}\n" +
+		"Log level: {level}\n" +
+		"Uptime: {uptime}\n" +
+		"Open dedup windows: {groups}\n" +
+		"Dropped by the rate limit: {dropped}\n" +
+		"Alerts: {muted}",
+	"ui.debug.on":  "on",
+	"ui.debug.off": "off",
+	"ui.debug.hint": "To turn debug on: set <code>AUDITDSEC_DEBUG=1</code> and restart the agent " +
+		"(<code>docker compose restart auditdsec</code> or <code>systemctl restart auditdsec</code>). " +
+		"The detail then appears in the agent's own log. To turn it off, remove the variable and restart.",
+	"ui.diag.events":      "Events processed",
+	"ui.diag.alerts":      "Alerts sent",
+	"ui.diag.skipped":     "Lines skipped",
+	"ui.diag.audit_log":   "Audit log",
+	"ui.diag.offset":      "Read up to byte",
 	"ui.never":            "none",
 	"val.unknown":         "unknown",
 	"ui.muted_until":      "muted until {until}",

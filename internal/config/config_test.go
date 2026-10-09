@@ -175,6 +175,72 @@ lang: ru
 	}
 }
 
+// Debug mode must be switchable three ways, and must raise the log level with
+// it: a debug mode that stayed at info would print nothing new.
+func TestDebugMode(t *testing.T) {
+	t.Run("off by default", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("AUDITDSEC_TG_TOKEN", "t")
+		t.Setenv("AUDITDSEC_TG_CHAT_ID", "1")
+		c, err := Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Debug || c.Log.Level != "info" {
+			t.Errorf("Debug = %v, level = %q", c.Debug, c.Log.Level)
+		}
+	})
+
+	t.Run("from the file", func(t *testing.T) {
+		clearEnv(t)
+		c, err := Load(writeConfig(t, "debug: true\ntelegram:\n  token: t\n  chat_ids: [1]\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !c.Debug || c.Log.Level != "debug" {
+			t.Errorf("Debug = %v, level = %q", c.Debug, c.Log.Level)
+		}
+	})
+
+	t.Run("from the environment", func(t *testing.T) {
+		for _, v := range []string{"1", "true", "yes", "on"} {
+			clearEnv(t)
+			t.Setenv("AUDITDSEC_TG_TOKEN", "t")
+			t.Setenv("AUDITDSEC_TG_CHAT_ID", "1")
+			t.Setenv("AUDITDSEC_DEBUG", v)
+			c, err := Load("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !c.Debug || c.Log.Level != "debug" {
+				t.Errorf("AUDITDSEC_DEBUG=%s gave Debug = %v, level = %q", v, c.Debug, c.Log.Level)
+			}
+		}
+	})
+
+	t.Run("the environment can also switch it off", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("AUDITDSEC_DEBUG", "0")
+		c, err := Load(writeConfig(t, "debug: true\ntelegram:\n  token: t\n  chat_ids: [1]\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Debug {
+			t.Error("AUDITDSEC_DEBUG=0 should win over the file")
+		}
+	})
+
+	t.Run("a nonsense value is an error, not a silent no", func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("AUDITDSEC_TG_TOKEN", "t")
+		t.Setenv("AUDITDSEC_TG_CHAT_ID", "1")
+		t.Setenv("AUDITDSEC_DEBUG", "maybe")
+		if _, err := Load(""); err == nil || !strings.Contains(err.Error(), "AUDITDSEC_DEBUG") {
+			t.Errorf("error = %v, want it to name AUDITDSEC_DEBUG", err)
+		}
+	})
+}
+
 func TestLoadWithoutFile(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("AUDITDSEC_TG_TOKEN", "t")

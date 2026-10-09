@@ -24,6 +24,13 @@ state_dir: /var/lib/auditdsec
 # the agent does not replay months of history into the chat.
 read_from_start: false
 
+# Debug mode: log every line read, the reason every record was ignored and the
+# decision behind every alert, plus the counters every 30 seconds. It answers
+# "why did no alert arrive". Off by default; it also raises log.level to debug
+# on its own. AUDITDSEC_DEBUG=1 and `auditdsec run -debug` do the same thing,
+# and the /debug command in the chat reports which state it is in.
+debug: false
+
 log:
   file: /var/log/auditdsec/auditdsec.log
   level: info          # debug, info, warn, error

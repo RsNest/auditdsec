@@ -10,12 +10,15 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/parse"
+	"github.com/RsNest/auditdsec/internal/redact"
 	"github.com/RsNest/auditdsec/internal/semantic"
 	"github.com/RsNest/auditdsec/internal/source"
 	"github.com/RsNest/auditdsec/internal/store"
@@ -49,6 +52,11 @@ type Options struct {
 	// PurgeEvery is how often old event files are deleted.
 	PurgeEvery time.Duration
 
+	// Debug logs every line read and the reason every record was dropped, and
+	// prints the counters periodically. It answers the question debugging this
+	// agent actually raises: why did no alert arrive for something I just did.
+	Debug bool
+
 	Store    *store.Store
 	Notifier Notifier
 	Logger   *slog.Logger
@@ -63,6 +71,7 @@ type Pipeline struct {
 
 	mapper *semantic.Mapper
 	asm    *parse.Assembler
+	tailer *source.Tailer
 
 	processed atomic.Uint64
 	reported  atomic.Uint64
@@ -95,35 +104,34 @@ func New(o Options) (*Pipeline, error) {
 	if o.PurgeEvery <= 0 {
 		o.PurgeEvery = time.Hour
 	}
+	statePath := ""
+	if o.StateDir != "" {
+		statePath = filepath.Join(o.StateDir, "tail.json")
+	}
 	return &Pipeline{
 		opt:    o,
 		log:    o.Logger,
 		now:    o.Now,
 		mapper: semantic.New(o.Host),
 		asm:    parse.NewAssembler(2 * time.Second),
+		tailer: source.New(source.Options{
+			Path:      o.AuditLog,
+			StatePath: statePath,
+			FromStart: o.ReadFromStart,
+			Logger:    o.Logger,
+		}),
 	}, nil
 }
 
 // Run follows the log until the context is cancelled.
 func (p *Pipeline) Run(ctx context.Context) error {
-	statePath := ""
-	if p.opt.StateDir != "" {
-		statePath = filepath.Join(p.opt.StateDir, "tail.json")
-	}
-	tailer := source.New(source.Options{
-		Path:      p.opt.AuditLog,
-		StatePath: statePath,
-		FromStart: p.opt.ReadFromStart,
-		Logger:    p.log,
-	})
-
 	lines := make(chan string, lineBuffer)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		defer close(lines)
-		if err := tailer.Run(ctx, func(l string) {
+		if err := p.tailer.Run(ctx, func(l string) {
 			select {
 			case lines <- l:
 			case <-ctx.Done():
@@ -140,8 +148,14 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	purge := time.NewTicker(p.opt.PurgeEvery)
 	defer purge.Stop()
 
+	// In debug mode the counters are printed regularly, so a quiet agent can be
+	// told apart from a stuck one.
+	counters := newOptionalTicker(p.opt.Debug, 30*time.Second)
+	defer counters.Stop()
+
 	p.log.Info("watching the audit log",
-		"path", p.opt.AuditLog, "host", p.opt.Host, "from_start", p.opt.ReadFromStart)
+		"path", p.opt.AuditLog, "host", p.opt.Host,
+		"from_start", p.opt.ReadFromStart, "debug", p.opt.Debug)
 	p.purgeOldEvents()
 
 	for {
@@ -168,12 +182,23 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 		case <-purge.C:
 			p.purgeOldEvents()
+
+		case <-counters.C:
+			processed, reported, skipped := p.Counters()
+			p.log.Debug("counters",
+				"events", processed, "alerts", reported, "skipped_lines", skipped,
+				"open_audit_events", p.asm.Pending())
 		}
 	}
 }
 
 // feed pushes one log line through the assembler and emits whatever it closed.
 func (p *Pipeline) feed(ctx context.Context, line string) {
+	if p.opt.Debug {
+		// Secrets are masked first: a debug log is still a file on disk, and a
+		// hex-encoded sudo command would otherwise carry a password into it.
+		p.log.Debug("audit line", "line", redact.AuditLine(line))
+	}
 	events, err := p.asm.Add(line, p.now())
 	if err != nil {
 		p.skipped.Add(1)
@@ -185,8 +210,13 @@ func (p *Pipeline) feed(ctx context.Context, line string) {
 // emit translates assembled events, stores the interesting ones and alerts.
 func (p *Pipeline) emit(ctx context.Context, events []*parse.Event) {
 	for _, ae := range events {
-		ev, ok := p.mapper.Map(ae)
+		ev, reason, ok := p.mapper.MapVerbose(ae)
 		if !ok {
+			p.log.Debug("audit event ignored",
+				"types", strings.Join(ae.Types(), ","),
+				"serial", ae.Serial,
+				"keys", strings.Join(ae.AuditKeys(), ","),
+				"reason", reason)
 			continue
 		}
 		p.processed.Add(1)
@@ -262,4 +292,54 @@ func (p *Pipeline) purgeOldEvents() {
 // Counters reports what the pipeline has done, for diagnostics.
 func (p *Pipeline) Counters() (processed, reported, skipped uint64) {
 	return p.processed.Load(), p.reported.Load(), p.skipped.Load()
+}
+
+// DiagItem is one line of the /debug report: an i18n key for the label, and the
+// value to show beside it.
+type DiagItem struct {
+	Key   string
+	Value string
+}
+
+// Diagnostics is what only the pipeline knows, for the /debug command.
+func (p *Pipeline) Diagnostics() []DiagItem {
+	processed, reported, skipped := p.Counters()
+
+	auditLog := "ok"
+	if fi, err := os.Stat(p.opt.AuditLog); err != nil {
+		auditLog = err.Error()
+	} else {
+		auditLog = fmt.Sprintf("ok, %d bytes, written %s ago",
+			fi.Size(), p.now().Sub(fi.ModTime()).Round(time.Second))
+	}
+
+	return []DiagItem{
+		{Key: "ui.diag.events", Value: strconv.FormatUint(processed, 10)},
+		{Key: "ui.diag.alerts", Value: strconv.FormatUint(reported, 10)},
+		{Key: "ui.diag.skipped", Value: strconv.FormatUint(skipped, 10)},
+		{Key: "ui.diag.audit_log", Value: auditLog},
+		{Key: "ui.diag.offset", Value: strconv.FormatInt(p.tailer.LastOffset(), 10)},
+	}
+}
+
+// optionalTicker is a ticker that can be switched off, so a select can always
+// read from its channel.
+type optionalTicker struct {
+	C  <-chan time.Time
+	t  *time.Ticker
+	on bool
+}
+
+func newOptionalTicker(on bool, d time.Duration) optionalTicker {
+	if !on {
+		return optionalTicker{C: nil}
+	}
+	t := time.NewTicker(d)
+	return optionalTicker{C: t.C, t: t, on: true}
+}
+
+func (o optionalTicker) Stop() {
+	if o.on {
+		o.t.Stop()
+	}
 }

@@ -5,6 +5,7 @@
 package redact
 
 import (
+	"encoding/hex"
 	"regexp"
 	"strings"
 )
@@ -14,7 +15,7 @@ const Mask = "***"
 
 var (
 	// key=value / key: value for secret-looking keys, with optional quotes.
-	kvRe = regexp.MustCompile(`(?i)\b(password|passwd|pass|pwd|token|secret|api[_-]?key|apikey|auth[_-]?token|access[_-]?key|private[_-]?key|credential|passphrase)(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;]+)`)
+	kvRe = regexp.MustCompile(`(?i)\b(password|passwd|pass|pwd|token|secret|api[_-]?key|apikey|auth[_-]?token|access[_-]?key|private[_-]?key|credential|passphrase)(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;"']+)`)
 
 	// --password foo / --token foo (space separated long options).
 	longOptRe = regexp.MustCompile(`(?i)(--(?:password|passwd|token|secret|api-key|apikey|auth-token|access-key|passphrase))(\s+)("[^"]*"|'[^']*'|[^\s]+)`)
@@ -28,7 +29,7 @@ var (
 	// Attached short password option, e.g. mysql -psecret. Only applied when
 	// the command line mentions a client known to use that form, because `-p`
 	// means something harmless in many other tools (cp -p, mkdir -p).
-	shortPwRe     = regexp.MustCompile(`(^|\s)(-p)([^\s]{3,})`)
+	shortPwRe     = regexp.MustCompile(`(^|\s)(-p)([^\s"']{3,})`)
 	shortPwToolRe = regexp.MustCompile(`(?i)\b(mysql|mysqldump|mysqladmin|mariadb|mariadb-dump|psql|redis-cli|mongosh|mongo)\b`)
 )
 
@@ -60,6 +61,28 @@ func Args(in map[string]string) map[string]string {
 		out[k] = String(v)
 	}
 	return out
+}
+
+// hexValueRe matches the fields auditd hex-encodes when their value contains a
+// space: those are exactly the fields that carry whole command lines.
+var hexValueRe = regexp.MustCompile(`\b(cmd|proctitle)=([0-9A-F]{4,})\b`)
+
+// AuditLine masks secrets in a raw auditd line, for debug logging. A command
+// line that auditd stored as hex is decoded, masked and written back in
+// readable form: hex is trivially reversible, so copying it into a log file
+// would copy the password with it.
+func AuditLine(s string) string {
+	s = String(s)
+	return hexValueRe.ReplaceAllStringFunc(s, func(m string) string {
+		eq := strings.IndexByte(m, '=')
+		key, val := m[:eq], m[eq+1:]
+		b, err := hex.DecodeString(val)
+		if err != nil {
+			return m
+		}
+		plain := strings.TrimSpace(strings.ReplaceAll(string(b), "\x00", " "))
+		return key + `="` + String(plain) + `"`
+	})
 }
 
 // Token masks an API token for log output, keeping only enough to tell two

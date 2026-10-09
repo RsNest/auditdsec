@@ -27,6 +27,7 @@
 - [Телеграм-бот](#телеграм-бот)
 - [Настройки](#настройки)
 - [Профили simple и pro](#профили-simple-и-pro)
+- [Режим отладки](#режим-отладки)
 - [Как это устроено](#как-это-устроено)
 - [Безопасность](#безопасность)
 - [Дорожная карта](#дорожная-карта)
@@ -167,6 +168,7 @@ curl -s "https://api.telegram.org/bot<ТОКЕН>/getUpdates" | grep -o '"chat":
 | `/mute [часы]` | заглушить оповещения (критичные всё равно придут) |
 | `/unmute` | включить оповещения |
 | `/explain <тип>` | объяснить тип события |
+| `/debug` | диагностика: состояние агента и как включить отладку |
 | `/help` | список команд |
 
 Под алертами есть кнопки: **🚫 Забанить**, **✅ Это я** (адрес уходит в белый список)
@@ -187,6 +189,7 @@ curl -s "https://api.telegram.org/bot<ТОКЕН>/getUpdates" | grep -o '"chat":
 | `AUDITDSEC_AUDIT_LOG` | путь к `audit.log` |
 | `AUDITDSEC_STATE_DIR` | каталог состояния |
 | `AUDITDSEC_CONFIG` | путь к файлу настроек |
+| `AUDITDSEC_DEBUG` | `1` — включить [режим отладки](#режим-отладки) |
 | `AUDITDSEC_LOG_FILE`, `AUDITDSEC_LOG_LEVEL` | свой журнал агента |
 | `AUDITDSEC_MIN_SEVERITY` | порог алертов: `info`, `warn`, `critical` |
 | `AUDITDSEC_RETENTION_DAYS` | срок хранения событий |
@@ -220,6 +223,90 @@ auditdsec check-config -config /etc/auditdsec/auditdsec.yaml
 | Heartbeat | 6 часов | 2 часа |
 
 Профиль — это набор значений по умолчанию, любое из них можно переопределить.
+
+## Режим отладки
+
+Отладка включается **отдельно** и отвечает на главный вопрос, который возникает при
+настройке: *почему алерт не пришёл*. По умолчанию выключена.
+
+### Как включить
+
+Три способа, любой на выбор. Каждый следующий важнее предыдущего.
+
+| Способ | Как | Когда удобнее |
+|---|---|---|
+| Переменная окружения | `AUDITDSEC_DEBUG=1` | Docker: вписать в `.env` и `docker compose up -d` |
+| Файл настроек | `debug: true` | когда агент уже настроен файлом |
+| Флаг командной строки | `auditdsec run -debug` | разовый запуск руками |
+
+```bash
+# Docker
+echo 'AUDITDSEC_DEBUG=1' >> .env
+docker compose up -d
+docker compose logs -f auditdsec
+
+# systemd
+sudo systemctl edit auditdsec     # [Service] / Environment=AUDITDSEC_DEBUG=1
+sudo systemctl restart auditdsec
+sudo journalctl -u auditdsec -f
+
+# вручную
+auditdsec run -config /etc/auditdsec/auditdsec.yaml -debug
+```
+
+Проверить, включена ли отладка, можно двумя способами: `auditdsec check-config` покажет
+строку `debug: true`, а команда **`/debug`** в чате выведет состояние агента и напомнит,
+как отладку включать и выключать.
+
+### Как выключить
+
+Убрать переменную, `debug: true` или флаг — и перезапустить агента. Отладка никогда
+не остаётся включённой «сама»: состояние берётся только из этих трёх источников.
+
+### Что появляется в журнале
+
+Уровень журнала поднимается до `debug` автоматически — отдельно его менять не нужно.
+В журнал агента (`log.file`, по умолчанию `/var/log/auditdsec/auditdsec.log`, в Docker —
+`/var/lib/auditdsec/auditdsec.log` плюс `docker compose logs`) добавляется:
+
+- **каждая прочитанная строка** `audit.log`;
+- **причина, по которой запись отброшена** — самое полезное. Например, опечатка
+  в ключе правила видна сразу:
+
+  ```json
+  {"level":"DEBUG","msg":"audit event ignored","types":"SYSCALL","serial":2,
+   "keys":"my_own_typo",
+   "reason":"no rule for audit key \"my_own_typo\" (keys the agent knows: ads_exec_tmp,
+             ads_identity, ads_logs, ads_modules, ads_persist, ads_sshd, ads_sshkeys, ads_sudoers)"}
+  ```
+
+- **решение по каждому алерту** — отправлен, склеен с повторами, задержан порогом,
+  тишиной или mute:
+
+  ```json
+  {"level":"DEBUG","msg":"alert decision","verdict":"held","kind":"sudo",
+   "severity":"info","reason":"severity info is below min_severity=warn"}
+  {"level":"DEBUG","msg":"alert decision","verdict":"grouped","kind":"ssh_login_fail",
+   "ip":"198.51.100.7","reason":"repeat 12 inside the 10m dedup window"}
+  ```
+
+- **счётчики раз в 30 секунд**, чтобы отличить спокойного агента от зависшего.
+
+### Секреты и в отладке остаются скрытыми
+
+Сырые строки проходят через ту же маскировку. auditd хранит команду в hex, поэтому агент
+декодирует её, маскирует и подставляет обратно в читаемом виде:
+
+```
+cmd=6D7973716C202D7068756E74657232   →   cmd="mysql -p***"
+```
+
+Если бы hex писался в журнал как есть, пароль утёк бы в файл в обратимом виде.
+Токен бота в журнал не попадает ни в каком режиме.
+
+Отладку стоит выключать после настройки: в журнал идёт каждая строка `audit.log`,
+на шумном сервере это заметный объём (ротация ограничивает файл, но место под ротацию
+всё равно расходуется).
 
 ## Как это устроено
 

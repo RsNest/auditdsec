@@ -80,7 +80,8 @@ func usage(w *os.File) {
 	fmt.Fprint(w, `auditdsec — auditd in plain language, with Telegram alerts
 
 Usage:
-  auditdsec run [-config FILE]       follow the audit log (the default command)
+  auditdsec run [-config FILE] [-debug]
+                                     follow the audit log (the default command)
   auditdsec check-config [-config F] load the settings and report problems
   auditdsec explain KIND [-lang ru]  explain one kind of event
   auditdsec version                  print the build version
@@ -94,6 +95,7 @@ Environment (overrides the file):
   AUDITDSEC_AUDIT_LOG     path to audit.log
   AUDITDSEC_STATE_DIR     where state is kept
   AUDITDSEC_LOG_FILE      the agent's own log file
+  AUDITDSEC_DEBUG         1 turns on debug mode (and raises the log level)
   AUDITDSEC_LOG_LEVEL     debug, info, warn or error
   AUDITDSEC_MIN_SEVERITY  info, warn or critical
   AUDITDSEC_RETENTION_DAYS how long events are kept
@@ -164,6 +166,7 @@ func cmdExplain(args []string) error {
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	path := fs.String("config", "", "path to the configuration file")
+	debug := fs.Bool("debug", false, "log every line read, every dropped record and every alert decision")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -172,6 +175,17 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The flag is the most immediate of the three switches, so it wins — but
+	// only when it was actually given, otherwise -debug=false would silently
+	// override `debug: true` in the file.
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "debug" {
+			cfg.Debug = *debug
+			if cfg.Debug {
+				cfg.Log.Level = "debug"
+			}
+		}
+	})
 
 	log, closer, err := logging.Setup(logging.Options{
 		File:       cfg.Log.File,
@@ -218,6 +232,8 @@ func cmdRun(args []string) error {
 		Store:         st,
 		Logger:        log,
 		Started:       started,
+		Debug:         cfg.Debug,
+		LogLevel:      cfg.Log.Level,
 		MinSeverity:   cfg.MinSeverity(),
 		DedupWindow:   cfg.Telegram.DedupWindow,
 		RatePerMinute: cfg.Telegram.RatePerMinute,
@@ -236,6 +252,7 @@ func cmdRun(args []string) error {
 		HeartbeatEnabled: cfg.Heartbeat.Enabled,
 		HeartbeatEvery:   cfg.Heartbeat.CheckEvery,
 		HeartbeatStale:   cfg.Heartbeat.StaleAfter,
+		Debug:            cfg.Debug,
 		Store:            st,
 		Notifier:         bot,
 		Logger:           log,
@@ -244,14 +261,31 @@ func cmdRun(args []string) error {
 		return err
 	}
 
+	// /debug reports what only the pipeline knows, so it is attached once the
+	// pipeline exists.
+	bot.SetDiag(func() []telegram.DiagItem {
+		items := pl.Diagnostics()
+		out := make([]telegram.DiagItem, 0, len(items))
+		for _, it := range items {
+			out = append(out, telegram.DiagItem{Key: it.Key, Value: it.Value})
+		}
+		return out
+	})
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	log.Info("auditdsec starting",
 		"version", version, "host", host, "profile", cfg.Profile, "lang", string(cfg.Language()),
 		"audit_log", cfg.AuditLog, "state_dir", cfg.StateDir,
-		"min_severity", cfg.Telegram.MinSeverity,
+		"min_severity", cfg.Telegram.MinSeverity, "debug", cfg.Debug,
 		"banner", action.NoopBanner{}.Name(), "detector", "none (v0.2)")
+
+	if cfg.Debug {
+		log.Warn("debug mode is on: the log records every audit line, every ignored record and every alert decision",
+			"log_file", cfg.Log.File,
+			"turn_off", "remove AUDITDSEC_DEBUG (or debug: true) and restart")
+	}
 
 	if cfg.Telegram.StartupNotice {
 		if err := bot.SendStartupNotice(ctx); err != nil {
