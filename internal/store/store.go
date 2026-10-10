@@ -10,6 +10,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -433,11 +434,17 @@ func (s *Store) fileFor(t time.Time) (*os.File, error) {
 		s.f = nil
 	}
 	path := filepath.Join(s.dir, eventsDirName, day+".jsonl")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o640)
+	// A Windows append-only handle cannot truncate a torn tail. The store
+	// mutex serializes this writer; seek to EOF after repairing the journal.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o640)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
 	if err := repairJournalTail(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
