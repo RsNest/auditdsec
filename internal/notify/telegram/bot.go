@@ -65,7 +65,7 @@ type answerCallbackRequest struct {
 // than a webhook keeps the agent usable on a host with no public HTTP port.
 func (c *Client) RunBot(ctx context.Context) error {
 	offset := int64(0)
-	if v := c.opt.Store.GetMeta(metaOffsetKey); v != "" {
+	if v := c.opt.Store.GetMeta(c.opt.OffsetKey); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			offset = n
 		}
@@ -90,13 +90,16 @@ func (c *Client) RunBot(ctx context.Context) error {
 			continue
 		}
 		for _, u := range ups {
+			if ctx.Err() != nil {
+				return nil
+			}
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
 			}
 			c.handleUpdate(ctx, u)
 		}
 		if len(ups) > 0 {
-			if err := c.opt.Store.SetMeta(metaOffsetKey, strconv.FormatInt(offset, 10)); err != nil {
+			if err := c.opt.Store.SetMeta(c.opt.OffsetKey, strconv.FormatInt(offset, 10)); err != nil {
 				c.log.Warn("cannot persist the Telegram offset", "error", err)
 			}
 			continue

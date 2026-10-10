@@ -492,9 +492,6 @@ func (c *Config) validate() error {
 	if c.StateDir == "" {
 		add("state_dir: must not be empty")
 	}
-	if c.Telegram.Token == "" {
-		add("telegram.token: required (set it in the file or in AUDITDSEC_TG_TOKEN)")
-	}
 	if c.badChatID != "" {
 		add("telegram.chat_ids: %q is not a number", c.badChatID)
 	}
@@ -503,9 +500,6 @@ func (c *Config) validate() error {
 	}
 	if c.badDryRun != "" {
 		add("AUDITDSEC_BAN_DRY_RUN: %q is not a yes/no value (use 1 or 0)", c.badDryRun)
-	}
-	if len(c.Telegram.ChatIDs) == 0 {
-		add("telegram.chat_ids: at least one chat id is required; the bot answers nobody else")
 	}
 	if c.Telegram.APIBase == "" {
 		add("telegram.api_base: must not be empty")

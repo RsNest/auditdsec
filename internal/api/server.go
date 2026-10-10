@@ -23,6 +23,7 @@ import (
 	"github.com/RsNest/auditdsec/internal/config"
 	"github.com/RsNest/auditdsec/internal/i18n"
 	"github.com/RsNest/auditdsec/internal/model"
+	"github.com/RsNest/auditdsec/internal/notify/telegram"
 	"github.com/RsNest/auditdsec/internal/pipeline"
 	"github.com/RsNest/auditdsec/internal/store"
 	"github.com/RsNest/auditdsec/internal/web"
@@ -46,6 +47,7 @@ type Options struct {
 	Store    *store.Store
 	Enforcer Enforcer // nil when no firewall backend is configured
 	Runtime  Runtime  // may be nil in tests
+	Telegram *telegram.Managed
 	Host     string
 	Version  string
 	Started  time.Time
@@ -180,6 +182,10 @@ func (s *Server) routes() {
 	api("POST /api/v1/mute", true, s.handleMute)
 	api("DELETE /api/v1/mute", true, s.handleUnmute)
 	api("GET /api/v1/config", true, s.handleConfig)
+	api("GET /api/v1/settings/telegram", true, s.handleTelegram)
+	api("PUT /api/v1/settings/telegram", true, s.handleTelegram)
+	api("POST /api/v1/settings/telegram/verify", true, s.handleTelegram)
+	api("POST /api/v1/settings/telegram/test", true, s.handleTelegram)
 	api("GET /api/v1/diagnostics", true, s.handleDiagnostics)
 	s.mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, "not_found", "no such endpoint")
@@ -668,12 +674,21 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if ids == nil {
 		ids = []int64{}
 	}
+	minSeverity, rate := c.Telegram.MinSeverity, c.Telegram.RatePerMinute
+	if s.opt.Telegram != nil {
+		v := s.opt.Telegram.View()
+		ids, minSeverity, rate = v.ChatIDs, v.MinSeverity, v.RatePerMinute
+		quiet = nil
+		if v.QuietFrom != "" {
+			quiet = v.QuietFrom + "-" + v.QuietTo
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"host": s.opt.Host, "profile": c.Profile, "lang": c.Lang,
 		"telegram": map[string]any{
-			"token": "***", "chat_ids": ids, "min_severity": c.Telegram.MinSeverity,
+			"token": "***", "chat_ids": ids, "min_severity": minSeverity,
 			"quiet_hours": quiet, "dedup_window": shortDur(c.Telegram.DedupWindow),
-			"rate_per_minute": c.Telegram.RatePerMinute, "retention_days": c.Store.RetentionDays,
+			"rate_per_minute": rate, "retention_days": c.Store.RetentionDays,
 		},
 		"detect": map[string]any{
 			"enabled": c.Detect.Enabled, "window": shortDur(c.Detect.Window),

@@ -461,7 +461,7 @@ func cmdRun(args []string) error {
 
 	started := time.Now()
 	quietFrom, quietTo, _ := cfg.QuietHours()
-	bot, err := telegram.New(telegram.Options{
+	bot, err := telegram.NewManaged(telegram.Options{
 		Token:         cfg.Telegram.Token,
 		ChatIDs:       cfg.Telegram.ChatIDs,
 		APIBase:       cfg.Telegram.APIBase,
@@ -480,7 +480,7 @@ func cmdRun(args []string) error {
 		RatePerMinute: cfg.Telegram.RatePerMinute,
 		QuietFrom:     quietFrom,
 		QuietTo:       quietTo,
-	})
+	}, cfg.StateDir, cfg.Telegram.StartupNotice)
 	if err != nil {
 		return err
 	}
@@ -555,20 +555,12 @@ func cmdRun(args []string) error {
 			"turn_off", "remove AUDITDSEC_DEBUG (or debug: true) and restart")
 	}
 
-	if cfg.Telegram.StartupNotice {
-		if err := bot.SendStartupNotice(ctx); err != nil {
-			// A bad token or chat id is the most common install mistake, and
-			// the agent would otherwise sit there looking healthy.
-			log.Error("cannot reach Telegram; check the token and the chat id", "error", err)
-		}
-	}
-
 	// The panel, when it is switched on. It refuses to start without a
 	// password, which is why this happens before anything else is launched.
 	var panel *api.Server
 	if cfg.Web.Enabled {
 		panel, err = api.New(api.Options{
-			Config: cfg, Store: st, Enforcer: enforcer, Runtime: pl,
+			Config: cfg, Store: st, Enforcer: enforcer, Runtime: pl, Telegram: bot,
 			Host: host, Version: version, Started: started, Logger: log,
 		})
 		if err != nil {
@@ -584,16 +576,10 @@ func cmdRun(args []string) error {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if err := bot.RunBot(ctx); err != nil {
-			log.Error("the bot stopped", "error", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		bot.RunGrouper(ctx)
+		bot.Run(ctx)
 	}()
 	if panel != nil {
 		wg.Add(1)

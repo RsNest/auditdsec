@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,19 +37,20 @@ const (
 
 // Options configures the client.
 type Options struct {
-	Token    string
-	ChatIDs  []int64
-	APIBase  string
-	Lang     i18n.Lang
-	Host     string
-	Profile  string
-	BanHint  string // what to say about enforcement not being wired up yet
-	Store    *store.Store
-	Logger   *slog.Logger
-	HTTP     *http.Client
-	Now      func() time.Time
-	Started  time.Time
-	Location *time.Location
+	Token     string
+	OffsetKey string
+	ChatIDs   []int64
+	APIBase   string
+	Lang      i18n.Lang
+	Host      string
+	Profile   string
+	BanHint   string // what to say about enforcement not being wired up yet
+	Store     *store.Store
+	Logger    *slog.Logger
+	HTTP      *http.Client
+	Now       func() time.Time
+	Started   time.Time
+	Location  *time.Location
 
 	// Debug reports whether the agent runs in debug mode, and LogLevel the
 	// level its own log is written at. Both are shown by /debug.
@@ -80,12 +82,14 @@ type Client struct {
 	send *http.Client
 	poll *http.Client
 
-	mu         sync.Mutex
-	diag       DiagFunc
-	groups     map[string]*group
-	tokens     float64
-	lastRefill time.Time
-	dropped    int
+	mu           sync.Mutex
+	diag         DiagFunc
+	groups       map[string]*group
+	tokens       float64
+	lastRefill   time.Time
+	dropped      int
+	lastDelivery time.Time
+	lastError    string
 }
 
 // group tracks repeats of one kind of event inside the dedup window.
@@ -106,6 +110,9 @@ func New(o Options) (*Client, error) {
 	}
 	if o.APIBase == "" {
 		o.APIBase = defaultAPIBase
+	}
+	if o.OffsetKey == "" {
+		o.OffsetKey = metaOffsetKey
 	}
 	if o.Lang == "" {
 		o.Lang = i18n.Default
@@ -171,7 +178,7 @@ func (c *Client) call(ctx context.Context, hc *http.Client, method string, req, 
 	url := fmt.Sprintf("%s/bot%s/%s", c.opt.APIBase, c.opt.Token, method)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
 	if err != nil {
-		return fmt.Errorf("telegram %s: build request: %w", method, err)
+		return fmt.Errorf("telegram %s: invalid request URL", method)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -191,7 +198,7 @@ func (c *Client) call(ctx context.Context, hc *http.Client, method string, req, 
 		return fmt.Errorf("telegram %s: bad response (http %d)", method, resp.StatusCode)
 	}
 	if !ar.OK {
-		return fmt.Errorf("telegram %s: %s (code %d)", method, ar.Description, ar.ErrorCode)
+		return fmt.Errorf("telegram %s: %s (code %d)", method, strings.ReplaceAll(ar.Description, c.opt.Token, "[redacted]"), ar.ErrorCode)
 	}
 	if out != nil && len(ar.Result) > 0 {
 		if err := json.Unmarshal(ar.Result, out); err != nil {
@@ -238,6 +245,13 @@ func (c *Client) Broadcast(ctx context.Context, text string, kb *inlineKeyboard)
 			firstErr = err
 		}
 	}
+	c.mu.Lock()
+	if firstErr == nil {
+		c.lastDelivery, c.lastError = c.now(), ""
+	} else {
+		c.lastError = "delivery_failed"
+	}
+	c.mu.Unlock()
 	return firstErr
 }
 

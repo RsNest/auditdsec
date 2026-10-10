@@ -268,18 +268,12 @@ func TestProfileFromEnv(t *testing.T) {
 	}
 }
 
-// The bot must refuse to start without an allowlist: a bot with a token but no
-// chat id would answer whoever found it.
-func TestValidationRequiresTokenAndChat(t *testing.T) {
+// Telegram can be configured later in the authenticated panel.
+func TestValidationAllowsUnconfiguredTelegram(t *testing.T) {
 	clearEnv(t)
 	_, err := Load(writeConfig(t, "profile: simple\n"))
-	if err == nil {
-		t.Fatal("expected validation to fail")
-	}
-	for _, want := range []string{"telegram.token", "telegram.chat_ids"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error should mention %s, got: %v", want, err)
-		}
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

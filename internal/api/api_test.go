@@ -108,6 +108,10 @@ func TestEveryEndpointNeedsASession(t *testing.T) {
 		{http.MethodDelete, "/api/v1/mute"},
 		{http.MethodGet, "/api/v1/config"},
 		{http.MethodGet, "/api/v1/diagnostics"},
+		{http.MethodGet, "/api/v1/settings/telegram"},
+		{http.MethodPut, "/api/v1/settings/telegram"},
+		{http.MethodPost, "/api/v1/settings/telegram/verify"},
+		{http.MethodPost, "/api/v1/settings/telegram/test"},
 	}
 	for _, c := range cases {
 		rec := do(t, s, c.method, c.path, "", nil)
@@ -500,10 +504,18 @@ func TestFirstLoginIsASetupSessionNotAPanelSession(t *testing.T) {
 		t.Fatalf("admin/admin = %d %s", rec.Code, rec.Body)
 	}
 	tok := tokenOf(t, rec)
-	for _, p := range []string{"/api/v1/status", "/api/v1/events", "/api/v1/bans", "/api/v1/config", "/api/v1/diagnostics", "/api/v1/allowlist"} {
+	for _, p := range []string{"/api/v1/status", "/api/v1/events", "/api/v1/bans", "/api/v1/config", "/api/v1/diagnostics", "/api/v1/allowlist", "/api/v1/settings/telegram"} {
 		if r := do(t, s, "GET", p, tok, nil); r.Code != 401 {
 			t.Errorf("GET %s with a setup session = %d, want 401", p, r.Code)
 		}
+	}
+	for _, p := range []string{"/api/v1/settings/telegram/verify", "/api/v1/settings/telegram/test"} {
+		if r := do(t, s, "POST", p, tok, map[string]any{}); r.Code != 401 {
+			t.Errorf("setup session reached %s", p)
+		}
+	}
+	if r := do(t, s, "PUT", "/api/v1/settings/telegram", tok, map[string]any{}); r.Code != 401 {
+		t.Error("setup session changed Telegram settings")
 	}
 	if r := do(t, s, "POST", "/api/v1/bans", tok, map[string]string{"ip": "203.0.113.5"}); r.Code != 401 {
 		t.Errorf("POST bans = %d", r.Code)
