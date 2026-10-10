@@ -487,7 +487,7 @@ func cmdRun(args []string) error {
 
 	var detector detect.Detector
 	if cfg.Detect.Enabled {
-		detector = detect.NewBruteForce(detect.Options{
+		bf := detect.NewBruteForce(detect.Options{
 			Window:               cfg.Detect.Window,
 			FailThreshold:        cfg.Detect.FailThreshold,
 			SuccessAfterFailures: cfg.Detect.SuccessAfterFailures,
@@ -496,6 +496,14 @@ func cmdRun(args []string) error {
 			Allowed:              st.IsAllowed,
 			Host:                 host,
 		})
+		observedAt := time.Now()
+		if err := st.WalkEvents(observedAt.Add(-cfg.Detect.Window), observedAt, func(ev model.Event) bool {
+			bf.RestoreFailure(ev, observedAt)
+			return true
+		}); err != nil {
+			return fmt.Errorf("restore brute-force history: %w", err)
+		}
+		detector = bf
 	}
 
 	pl, err := pipeline.New(pipeline.Options{

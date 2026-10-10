@@ -3,6 +3,7 @@ package detect
 import (
 	"fmt"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -96,6 +97,26 @@ func NewBruteForce(o Options) *BruteForce {
 
 // Name identifies the detector in logs and in /status.
 func (d *BruteForce) Name() string { return "brute-force" }
+
+// RestoreFailure seeds the current window from committed journal evidence at
+// startup. It never emits a decision or notification for a historical record.
+// The next live failure still reaches the threshold if five preceded a restart.
+// Journal completion order can differ from audit timestamp order.
+func (d *BruteForce) RestoreFailure(ev model.Event, observedAt time.Time) {
+	if ev.Kind != model.KindSSHLoginFail || !bannable(ev.SrcIP) ||
+		!ev.Time.After(observedAt.Add(-d.opt.Window)) || ev.Time.After(observedAt) {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	t := d.track(ev.SrcIP, observedAt)
+	t.fails = append(t.fails, ev.Time)
+	sort.Slice(t.fails, func(i, j int) bool { return t.fails[i].Before(t.fails[j]) })
+	capacity := max(d.opt.FailThreshold, d.opt.SuccessAfterFailures)
+	if len(t.fails) > capacity {
+		t.fails = t.fails[len(t.fails)-capacity:]
+	}
+}
 
 // Feed consumes one event and reports what it triggered.
 func (d *BruteForce) Feed(ev model.Event) Result {

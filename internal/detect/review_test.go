@@ -30,3 +30,21 @@ func TestDefaultSixthFailureBansAndRetainsSuccessCorrelation(t *testing.T) {
 		t.Fatal("failure history did not remain bounded", n)
 	}
 }
+
+func TestRestoredWindowStillBansOnSixthFailure(t *testing.T) {
+	d := NewBruteForce(Options{})
+	now := base.Add(time.Minute)
+	// These events represent five failures committed before a restart, including
+	// out-of-order assembler completions. Restoration itself has no side effects.
+	for _, seconds := range []int{5, 1, 3, 2, 4} {
+		d.RestoreFailure(fail("198.51.100.7", base.Add(time.Duration(seconds)*time.Second)), now)
+	}
+	d.RestoreFailure(fail("198.51.100.7", now.Add(-11*time.Minute)), now)
+	d.RestoreFailure(fail("198.51.100.7", now.Add(time.Minute)), now)
+	if n := d.Failures("198.51.100.7", now); n != 5 {
+		t.Fatalf("restored count = %d", n)
+	}
+	if r := d.Feed(fail("198.51.100.7", now.Add(time.Second))); len(r.Decisions) != 1 {
+		t.Fatalf("the sixth failure after restart did not ban: %+v", r)
+	}
+}
