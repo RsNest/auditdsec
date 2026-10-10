@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/RsNest/auditdsec/internal/api"
 	"github.com/RsNest/auditdsec/internal/config"
 )
 
@@ -66,8 +67,8 @@ func TestPrintPanelBanner(t *testing.T) {
 	cfg.Web.Listen, cfg.Web.Login = "127.0.0.1:9477", "admin"
 
 	var local strings.Builder
-	printPanelBanner(&local, cfg)
-	for _, want := range []string{"http://127.0.0.1:9477", "admin", "ssh -L 9477:127.0.0.1:9477"} {
+	printPanelBanner(&local, cfg, api.StateBootstrap)
+	for _, want := range []string{"http://127.0.0.1:9477", "admin / admin", "ssh -L 9477:127.0.0.1:9477"} {
 		if !strings.Contains(local.String(), want) {
 			t.Errorf("the loopback banner does not mention %q:\n%s", want, local.String())
 		}
@@ -75,11 +76,28 @@ func TestPrintPanelBanner(t *testing.T) {
 
 	cfg.Web.PublicURL = "https://panel.example.com"
 	var public strings.Builder
-	printPanelBanner(&public, cfg)
+	printPanelBanner(&public, cfg, api.StateReady)
 	if !strings.Contains(public.String(), "https://panel.example.com") {
 		t.Errorf("the banner does not show the public address:\n%s", public.String())
 	}
 	if strings.Contains(public.String(), "ssh -L") {
 		t.Errorf("the banner offers a tunnel for a panel that is already published:\n%s", public.String())
+	}
+}
+
+// After setup the banner must not name admin, nor a login from the
+// environment that the owner may have replaced in the panel.
+func TestBannerAfterSetupDoesNotOfferTheDefaultPair(t *testing.T) {
+	cfg := config.Defaults(config.ProfileSimple)
+	cfg.Web.Listen, cfg.Web.Login, cfg.Web.PublicURL = "127.0.0.1:9477", "admin", "https://panel.example.com:27431"
+	var b strings.Builder
+	printPanelBanner(&b, cfg, api.StateReady)
+	if strings.Contains(b.String(), "admin") || !strings.Contains(b.String(), "https://panel.example.com:27431") {
+		t.Errorf("banner:\n%s", b.String())
+	}
+	b.Reset()
+	printPanelBanner(&b, cfg, api.StateLocked)
+	if !strings.Contains(b.String(), "STOPPED") {
+		t.Errorf("locked banner:\n%s", b.String())
 	}
 }

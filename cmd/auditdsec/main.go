@@ -366,8 +366,16 @@ func readPassword(fromStdin bool) (string, error) {
 }
 
 // printPanelBanner says where the panel is, in the form the person will type.
-func printPanelBanner(w io.Writer, cfg *config.Config) {
-	fmt.Fprintf(w, "\n  panel:  %s\n  sign in as:  %s\n", cfg.PanelURL(), cfg.Web.Login)
+func printPanelBanner(w io.Writer, cfg *config.Config, setup string) {
+	fmt.Fprintf(w, "\n  panel:  %s\n", cfg.PanelURL())
+	switch setup {
+	case api.StateBootstrap:
+		fmt.Fprintf(w, "  first sign-in:  admin / admin  (it opens only the screen where the owner chooses a login and password)\n")
+	case api.StateLocked:
+		fmt.Fprintf(w, "  sign-in is STOPPED: the saved credentials cannot be used; see the log above\n")
+	default:
+		fmt.Fprintf(w, "  sign in with the login and password chosen at setup\n")
+	}
 	if cfg.PanelIsLoopbackOnly() {
 		_, port, err := net.SplitHostPort(cfg.Web.Listen)
 		if err != nil {
@@ -570,7 +578,7 @@ func cmdRun(args []string) error {
 		// The link is the one thing the person actually needs after
 		// installing, and hunting for it in a log line of key=value pairs is
 		// a poor way to find it.
-		printPanelBanner(os.Stdout, cfg)
+		printPanelBanner(os.Stdout, cfg, panel.SetupState())
 	}
 
 	var wg sync.WaitGroup
