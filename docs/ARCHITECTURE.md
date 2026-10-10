@@ -108,8 +108,9 @@ The API's existing `id` remains an ordinal pagination cursor, separate from `eve
 
 This is a durable event boundary, not a transaction covering detection, firewall actions
 and notification delivery. A crash after journaling but before a side effect may leave
-that side effect unperformed; replay does not repeat already stored events. A durable
-outbox and decision reconciler remain required. Notifications still block detection.
+that side effect unperformed; replay does not repeat already stored events. Stage 1.3
+now journals notification intents atomically with each event and recovers them through
+the outbox. Detection and firewall decisions still require the stage 1.6 reconciler.
 Day scans still read a whole day's events into memory; bounded dedup and the 16-line
 source queue do not make the entire store memory-bounded.
 
@@ -124,6 +125,28 @@ skip mute and quiet hours, which is the whole point of the agent. Identical even
 `dedup_window` become one message plus a trailing count, so 47 failed logins are one
 alert and "46 more", not 47 messages. The rate limiter is a token bucket, so a storm
 cannot get the bot throttled by Telegram itself.
+
+## Durable notification delivery (stage 1.3)
+
+Automatic event alerts, detector ban notices, first-login notices and startup notices
+use the durable outbox. The pipeline snapshots recipient routes and policy without HTTP;
+`notification_plan` is an additive field in the same synced JSONL row as the event.
+Each recipient receives an independent job. The queue atomically stores admitted jobs
+and daily journal byte receipts in its WAL. Recovery imports only rows after those
+receipts; legacy rows generate no historical notifications.
+
+The routine and critical workers run independently. Retries honor Telegram `retry_after`,
+use exponential backoff and jitter, and remain pending across restart. Permanent rejection
+or a seven-day expiry is explicit. Group windows start only after a provider acknowledgment;
+repeat counts and trailing summaries are durable. Changed credentials or removed recipients
+cancel stale routes. Tokens never enter plans, queue state, metrics or failure records.
+
+`alerts_sent` counts provider-confirmed notifications per recipient, including automatic
+notices; queue, suppression, grouping, deferral, retry, failure, cancellation and overflow
+counts are separate. Delivery is at least once: a crash after Telegram accepts a request
+but before its acknowledgment is persisted can produce a duplicate. A critical capacity
+shortage holds the intake cursor; routine overflow is counted while the event stays in
+its journal. See [DELIVERY.md](DELIVERY.md) for state recovery and operational limits.
 
 ## Detection
 
@@ -147,8 +170,9 @@ until new failure evidence arrives. Timestamp history per IP is capped at the la
 of the ban and correlation thresholds; tracked addresses are capped and evicted
 least-recently-seen first. Startup restores recent failures from the committed journal
 without producing historical decisions: five failures before restart plus one after
-restart still meet the threshold. Notification delivery remains synchronous; earlier
-alerts can still delay reading subsequent records until the durable outbox is implemented.
+restart still meet the threshold. Telegram requests run in independent outbox workers,
+so routine provider latency does not delay subsequent detection. A full critical queue
+backpressures intake instead of silently dropping critical notification intents.
 
 ## Bans
 
@@ -437,13 +461,17 @@ agent, and is applied only when the enforce overlay gave the agent `NET_ADMIN`.
 | DNS check | 3 resolvers, up to 3 rounds 5 s apart, 2 minutes in all |
 | temporary nonce listener | 3 minutes at most |
 
-Stage 1 adds budgets for pending audit records, event size, tracker memory and the
-outbox; they are not enforced today beyond what the current code does.
+Implemented stage 1 budgets cover pending audit records, assembled event size, tracker
+history and delivery jobs. The outbox holds at most 2048 pending jobs and 16 MiB of
+message payloads including grouping state; 512 jobs and 4 MiB are reserved for critical
+traffic. Serialization and existing day scans need additional memory; these limits are
+not a bound on total process memory. See [DELIVERY.md](DELIVERY.md).
 
 ## Target architecture
 
-**Not implemented.** This is what stage 1 and later build towards; nothing here is
-claimed by the code above.
+**Partly implemented.** The recovery boundary, assembler, bounded correlation and
+notification outbox are implemented. The unified sanitizer, incident store and decision
+reconciler remain targets; the diagram does not claim those remaining stages are complete.
 
 ```text
 audit.log / optional journald
@@ -504,7 +532,8 @@ Interfaces only where there are already two clients, a retry or two implementati
      timeout; caps with an `incomplete` event instead of silent loss; PATH chosen by
      `item` / `nametype`;
   2. **implemented** — cursor with file identity and replay with a held cursor; stable event IDs;
-  3. durable outbox and channel workers; critical with a protected share; real counters;
+  3. **implemented** — durable outbox and Telegram workers, protected critical capacity
+     and rate share, per-recipient retries and real delivery counters;
   4. **implemented** — brute-force: bounded correlation history kept apart from the ban
      cooldown, recent failures restored from the journal;
   5. one sanitizer before storage, logs, API and messages (PROCTITLE, EXECVE argv);

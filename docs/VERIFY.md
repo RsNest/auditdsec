@@ -169,3 +169,17 @@ SSH-туннель проверялся на локальном sshd (`ssh -N -L
 8. **Разные версии Docker Compose:** проверено на Docker 29.x.
 9. **Режим `enforce` (nftables)** вместе с панелью не прогонялся.
 10. **Внешний аудит безопасности** установщика и зонда не проводился.
+
+## Stage 1.3 focused verification
+
+Unit tests cover journal-to-outbox recovery after an interrupted import, legacy migration
+without retrospective notifications, durable intake receipts, compaction, torn-tail repair,
+fail-closed corrupt/missing state, queue reserves, critical backpressure, independent workers,
+provider acknowledgment counters, policy suppression, durable grouping and Telegram route
+validation/error classification. Tests use local fake senders or `httptest`; no real owner
+receives messages. CI runs the full Go suite with the race detector on Linux and publishes
+commit-tagged amd64/arm64 images only after the checks pass.
+
+No live VDS, real Telegram outage, or forced machine power loss was exercised for this
+stage. Crash behavior is verified at the persisted journal/WAL boundaries; the unavoidable
+provider-acceptance/receipt gap is documented as at-least-once delivery.

@@ -755,6 +755,10 @@ func (p *Pipeline) Diagnostics() []DiagItem {
 		{Key: "ui.diag.banner", Value: bannerName(p.opt.Banner)},
 		{Key: "ui.diag.bans", Value: strconv.FormatUint(p.Banned(), 10)},
 	}
+	if p.outbox != nil {
+		s := p.outbox.Stats()
+		items = append(items, DiagItem{Key: "ui.diag.delivery", Value: fmt.Sprintf("queued=%d, pending=%d (critical=%d), delivered=%d, suppressed=%d, grouped=%d, deferred=%d, retries=%d, failed=%d, cancelled=%d, overflow=%d", s.Queued, s.Pending, s.Critical, s.Delivered, s.Suppressed, s.Grouped, s.Deferred, s.Retries, s.Failed, s.Cancelled, s.Overflow)})
+	}
 	if s := p.PanelCertStatus(); s != "" {
 		items = append(items, DiagItem{Key: "ui.diag.panel_cert", Value: s})
 	}

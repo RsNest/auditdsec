@@ -837,6 +837,12 @@
       [t("diag.ratelimited"), A.num(c.rate_limited)]
     ].forEach(function (r) { add(R.sysKv, kvRow(r[0], r[1])); });
 
+    if (c.delivery) {
+      ["pending", "critical_pending", "queued", "suppressed", "grouped", "retries", "failed", "cancelled", "overflow"].forEach(function (key) {
+        add(R.sysKv, kvRow(t("delivery." + key), A.num(c.delivery[key])));
+      });
+    }
+
     var tg = (model.cfg && model.cfg.telegram) || {};
     clear(R.checks);
     add(R.checks, [

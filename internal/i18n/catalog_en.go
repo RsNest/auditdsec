@@ -127,7 +127,8 @@ var catalogEN = map[string]string{
 		"(<code>docker compose restart auditdsec</code> or <code>systemctl restart auditdsec</code>). " +
 		"The detail then appears in the agent's own log. To turn it off, remove the variable and restart.",
 	"ui.diag.events":      "Events processed",
-	"ui.diag.alerts":      "Alerts sent",
+	"ui.diag.alerts":      "Notifications acknowledged",
+	"ui.diag.delivery":    "Delivery outbox",
 	"ui.diag.skipped":     "Lines skipped",
 	"ui.diag.audit_log":   "Audit log",
 	"ui.diag.offset":      "Read up to byte",

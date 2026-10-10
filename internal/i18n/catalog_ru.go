@@ -128,7 +128,8 @@ var catalogRU = map[string]string{
 		"(<code>docker compose restart auditdsec</code> или <code>systemctl restart auditdsec</code>). " +
 		"Подробности появятся в журнале агента. Чтобы выключить, уберите переменную и перезапустите.",
 	"ui.diag.events":     "Событий обработано",
-	"ui.diag.alerts":     "Отправлено алертов",
+	"ui.diag.alerts":     "Доставлено уведомлений",
+	"ui.diag.delivery":   "Очередь доставки",
 	"ui.diag.skipped":    "Строк пропущено",
 	"ui.diag.audit_log":  "Журнал аудита",
 	"ui.diag.offset":     "Прочитано до байта",

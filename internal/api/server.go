@@ -189,6 +189,7 @@ func (s *Server) routes() {
 	api("POST /api/v1/settings/telegram/verify", true, s.handleTelegram)
 	api("POST /api/v1/settings/telegram/test", true, s.handleTelegram)
 	api("GET /api/v1/diagnostics", true, s.handleDiagnostics)
+	api("GET /api/v1/deliveries", true, s.handleDeliveries)
 	s.mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, "not_found", "no such endpoint")
 	})
@@ -619,11 +620,18 @@ func (s *Server) counters(d statusDigest) map[string]any {
 	if s.opt.Runtime != nil {
 		processed, reported, skipped = s.opt.Runtime.Counters()
 	}
-	return map[string]any{
+	out := map[string]any{
 		"events_24h": d.events24, "critical_24h": d.crit24, "warn_24h": d.warn24,
 		"events_total": processed, "alerts_sent": reported,
 		"lines_skipped": skipped, "rate_limited": 0,
 	}
+	if runtime, ok := s.opt.Runtime.(deliveryRuntime); ok {
+		stats, _ := runtime.DeliveryState()
+		out["delivery"] = stats
+		out["alerts_sent"] = stats.Delivered
+		out["rate_limited"] = stats.Deferred
+	}
+	return out
 }
 
 func (s *Server) auditHealth() map[string]any {

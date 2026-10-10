@@ -796,3 +796,17 @@ library only.
 ## Лицензия
 
 MIT. См. [LICENSE](LICENSE).
+
+### Durable alert delivery (stage 1.3)
+
+Automatic Telegram notifications are journaled before delivery and sent by separate
+routine/critical workers. Pending jobs, per-recipient retries, grouping counts and delivery
+counters survive restart. The System panel shows pending, suppressed, grouped, deferred,
+failed, cancelled and overflow counts. `alerts_sent` means provider acknowledgments per
+recipient, not events passed to a notifier. Token changes and recipient removal cancel
+stale jobs; queued messages are never rerouted to a replacement bot.
+
+Keep `outbox/outbox.wal` and `.outbox.initialized` with the existing state volume when
+updating. Missing or corrupt initialized outbox state stops startup. Do not remove the
+marker to clear an error. Restore a matching state backup instead. See
+[delivery guarantees and limits](docs/DELIVERY.md).

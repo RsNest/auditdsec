@@ -45,7 +45,9 @@ func (q *Queue) Run(ctx context.Context, sender Sender) error {
 	}
 }
 
-func groupKey(in Intent) string { return ID(in.Channel, in.Route, in.Destination, in.DedupKey) }
+func groupKey(in Intent) string {
+	return ID(in.Channel, in.Route, in.Destination, string(in.Priority), strconv.Itoa(in.Severity), in.DedupKey)
+}
 
 func (q *Queue) flushGroups(now time.Time) error {
 	for key, g := range q.s.Groups {

@@ -333,3 +333,22 @@ loopback, private, link-local, CGNAT, multicast, документационны�
 3. Вторая страница для нескольких хостов.
 4. Явный режим за CDN/балансировщиком (сейчас поддерживается только DNS-only, прямой
    доступ к VPS) и DNS-01 для домена при закрытых 80 и 443.
+
+## Delivery diagnostics (stage 1.3)
+
+`GET /api/v1/deliveries` requires a full authenticated session and returns
+`{enabled, stats, recent_failures}`. The last 100 terminal failures contain job ID,
+recipient, time, attempts and a safe reason label; they contain no credentials or message
+bodies. Stats include `queued`, `delivered`, `suppressed`, `grouped`, `deferred`, `retries`,
+`failed`, `cancelled`, `overflow`, `pending`, `critical_pending`, `in_flight`, `payload_bytes`.
+
+Status and diagnostics include the same stats under `counters.delivery`. The System view
+shows queue occupancy and outcomes. `counters.alerts_sent` is the durable count of provider
+acknowledgments per recipient; `counters.rate_limited` is a compatibility alias for rate
+**deferrals**, which remain queued. The notification counters survive restarts; event
+processing and skipped-line counters still describe the current agent process.
+
+Startup and automatic ban/allowlist notices are included. Bot command replies and the
+explicit settings test send remain immediate operations and are excluded from outbox
+counters. Provider confirmation means Telegram accepted the message, not that the owner
+read it. See [DELIVERY.md](DELIVERY.md).

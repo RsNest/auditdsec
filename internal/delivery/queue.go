@@ -134,6 +134,19 @@ func Open(o Options) (*Queue, error) {
 		return nil, err
 	}
 	q.size = fi.Size()
+	if q.size == 0 {
+		if _, err := os.Stat(marker); err == nil {
+			f.Close()
+			return nil, errors.New("delivery: initialized WAL is empty; restore its state")
+		}
+		// Even an unused outbox has a committed baseline. Truncation to zero
+		// must not silently turn a used outbox into a fresh installation.
+		if err := q.compact(); err != nil {
+			q.f.Close()
+			return nil, err
+		}
+		f = q.f
+	}
 	if err := f.Sync(); err != nil {
 		f.Close()
 		return nil, err
