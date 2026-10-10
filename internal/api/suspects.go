@@ -5,8 +5,10 @@ import (
 	"sort"
 	"time"
 
+	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/i18n"
 	"github.com/RsNest/auditdsec/internal/model"
+	"github.com/RsNest/auditdsec/internal/store"
 )
 
 type suspectJSON struct {
@@ -36,7 +38,7 @@ func (s *Server) handleSuspects(w http.ResponseWriter, r *http.Request) {
 	blocked := make(map[string]bool)
 	pending := make(map[string]bool)
 	for _, b := range s.opt.Store.Bans() {
-		if s.opt.Enforcer != nil && b.Applied && b.Active(now) {
+		if b.State == store.StateApplied && s.decisions().Mode() == action.ModeEnforcing && b.Active(now) {
 			blocked[b.IP] = true
 		} else if b.Active(now) {
 			pending[b.IP] = true
@@ -54,9 +56,8 @@ func (s *Server) handleSuspects(w http.ResponseWriter, r *http.Request) {
 			return true
 		}
 		ip, ok := parseIP(ev.SrcIP)
-		if !ok || ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified() ||
-			ip.IsLinkLocalUnicast() || ip.IsMulticast() {
-			return true
+		if !ok || s.decisions().Check(ip) != nil {
+			return true // the one policy about which addresses may be blocked
 		}
 		key := ip.String()
 		if blocked[key] || protected[key] {
@@ -116,7 +117,7 @@ func (s *Server) handleSuspects(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items, "threshold": threshold, "window_seconds": int64(window / time.Second),
-		"auto_enforcing": s.opt.Config.Detect.Enabled && s.opt.Enforcer != nil,
+		"auto_enforcing": s.opt.Config.Detect.Enabled && s.decisions().Mode() == action.ModeEnforcing,
 		"truncated":      truncated,
 	})
 }

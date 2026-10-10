@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/action"
+	"github.com/RsNest/auditdsec/internal/decision"
 	"github.com/RsNest/auditdsec/internal/model"
 )
 
@@ -23,7 +24,7 @@ func (e *reviewEnforcer) Unban(context.Context, string) error        { return ni
 func TestRepeatedPanelBanRetainsOriginalDecision(t *testing.T) {
 	s, st, clock := newServer(t)
 	e := &reviewEnforcer{}
-	s.opt.Enforcer = e
+	useEnforcer(s, e)
 	token := signIn(t, s)
 	request := map[string]string{"ip": "198.51.100.5", "duration": "1h"}
 	if r := do(t, s, "POST", "/api/v1/bans", token, request); r.Code != 200 {
@@ -52,7 +53,7 @@ func TestRepeatedPanelBanRetainsOriginalDecision(t *testing.T) {
 func TestFailedBanCanBeRetriedWithoutEscalation(t *testing.T) {
 	s, st, _ := newServer(t)
 	e := &reviewEnforcer{err: errors.New("refused")}
-	s.opt.Enforcer = e
+	useEnforcer(s, e)
 	token := signIn(t, s)
 	request := map[string]string{"ip": "198.51.100.5", "duration": "1h"}
 	if r := do(t, s, "POST", "/api/v1/bans", token, request); r.Code != 502 {
@@ -74,7 +75,7 @@ func TestFailedBanCanBeRetriedWithoutEscalation(t *testing.T) {
 
 func TestSuspectsAggregateBeyondEventPageAndKeepFailedEnforcementVisible(t *testing.T) {
 	s, st, now := newServer(t)
-	s.opt.Enforcer = &reviewEnforcer{}
+	useEnforcer(s, &reviewEnforcer{})
 	token := signIn(t, s)
 	for ip, count := range map[string]int{
 		"198.51.100.1": 1, "198.51.100.2": 5, "198.51.100.3": 230,
@@ -106,10 +107,19 @@ func TestSuspectsAggregateBeyondEventPageAndKeepFailedEnforcementVisible(t *test
 		t.Fatalf("review list: %+v", page)
 	}
 	// Removing the backend must reveal previously applied records too.
-	s.opt.Enforcer = nil
+	useEnforcer(s, nil)
 	r = do(t, s, "GET", "/api/v1/suspects", token, nil)
 	_ = json.Unmarshal(r.Body.Bytes(), &page)
 	if len(page.Items) != 4 {
 		t.Fatalf("disabled enforcement concealed a source: %s", r.Body)
 	}
+}
+
+// useEnforcer swaps the firewall behind the server's decision service.
+func useEnforcer(s *Server, e Enforcer) {
+	var banner action.Banner
+	if e != nil {
+		banner = enforcerBanner{e}
+	}
+	s.opt.Decisions = decision.New(decision.Options{Store: s.opt.Store, Banner: banner, Now: s.now})
 }

@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ import (
 	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/api"
 	"github.com/RsNest/auditdsec/internal/config"
+	"github.com/RsNest/auditdsec/internal/decision"
 	"github.com/RsNest/auditdsec/internal/detect"
 	"github.com/RsNest/auditdsec/internal/i18n"
 	"github.com/RsNest/auditdsec/internal/logging"
@@ -459,6 +461,27 @@ func cmdRun(args []string) error {
 		return err
 	}
 
+	// One service for every interface: the detector, the bot and the panel ask
+	// it, so an address gets the same answer from each, and what the firewall
+	// holds is recorded in one way.
+	dec := decision.New(decision.Options{
+		Store: st, Banner: banner, BanPrivate: cfg.Ban.BanPrivate, Log: log,
+		Actions: &decision.ActionLog{Path: filepath.Join(cfg.StateDir, "actions.jsonl")},
+	})
+
+	// Trusting the first successful login is off for a new installation. One
+	// that has already used it (its state says so) and has not been told
+	// otherwise keeps it, so this update does not silently remove a protection
+	// the owner may rely on.
+	autoAllow := cfg.Ban.AutoAllowlist
+	if autoAllow != config.AutoAllowFirstLogin && !cfg.Ban.AutoAllowlistExplicit &&
+		st.GetMeta(pipeline.MetaFirstLoginAllowed) != "" {
+		autoAllow = config.AutoAllowFirstLogin
+		log.Warn("keeping the automatic allowlisting of the first login, because this installation already used it",
+			"how_to_turn_off", "set ban.auto_allowlist: off",
+			"note", "a successful login does not prove that the owner made it; new installations do not trust it")
+	}
+
 	started := time.Now()
 	quietFrom, quietTo, _ := cfg.QuietHours()
 	bot, err := telegram.NewManaged(telegram.Options{
@@ -475,6 +498,7 @@ func cmdRun(args []string) error {
 		LogLevel:      cfg.Log.Level,
 		Enforcing:     cfg.EnforcesBans(),
 		Enforcer:      enforcer,
+		Decisions:     dec,
 		MinSeverity:   cfg.MinSeverity(),
 		DedupWindow:   cfg.Telegram.DedupWindow,
 		RatePerMinute: cfg.Telegram.RatePerMinute,
@@ -517,7 +541,8 @@ func cmdRun(args []string) error {
 		Debug:                   cfg.Debug,
 		Detector:                detector,
 		Banner:                  banner,
-		AutoAllowlistFirstLogin: cfg.Ban.AutoAllowlist == config.AutoAllowFirstLogin,
+		AutoAllowlistFirstLogin: autoAllow == config.AutoAllowFirstLogin,
+		Decisions:               dec,
 		PanelURL:                panelCertURL(cfg),
 		PanelCertTrust:          cfg.Web.CertCheck != "expiry",
 		Store:                   st,
@@ -549,7 +574,7 @@ func cmdRun(args []string) error {
 		"audit_log", cfg.AuditLog, "state_dir", cfg.StateDir,
 		"min_severity", cfg.Telegram.MinSeverity, "debug", cfg.Debug,
 		"detect", cfg.Detect.Enabled, "ban_backend", cfg.Ban.Backend,
-		"auto_allowlist", cfg.Ban.AutoAllowlist)
+		"auto_allowlist", autoAllow)
 
 	if cfg.Detect.Enabled && !cfg.EnforcesBans() {
 		// Saying this plainly matters: the owner would otherwise believe the
@@ -570,7 +595,7 @@ func cmdRun(args []string) error {
 	var panel *api.Server
 	if cfg.Web.Enabled {
 		panel, err = api.New(api.Options{
-			Config: cfg, Store: st, Enforcer: enforcer, Runtime: pl, Telegram: bot,
+			Config: cfg, Store: st, Enforcer: enforcer, Decisions: dec, Runtime: pl, Telegram: bot,
 			Host: host, Version: version, Started: started, Logger: log,
 		})
 		if err != nil {

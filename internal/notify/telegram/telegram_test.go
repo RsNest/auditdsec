@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/action"
+	"github.com/RsNest/auditdsec/internal/decision"
 	"github.com/RsNest/auditdsec/internal/i18n"
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/store"
@@ -1020,5 +1021,97 @@ func TestRunBotDoesNotSpinOnInstantEmptyPolls(t *testing.T) {
 	// With the pause in place this is one or two polls; without it, hundreds.
 	if polls > 5 {
 		t.Errorf("made %d polls in 400ms, the loop is spinning", polls)
+	}
+}
+
+func press(f *clientFixture, data string) string {
+	f.api.reset()
+	f.client.handleUpdate(context.Background(), update{Callback: &callbackQuery{
+		ID: "cb", Data: data, Message: &tgMessage{Chat: tgChat{ID: 100}},
+	}})
+	sent := f.api.sent()
+	if len(sent) == 0 {
+		return ""
+	}
+	return sent[len(sent)-1].Text
+}
+
+// When the firewall does not confirm an unblock, the reply must not say the
+// address is free; the record is gone and the unblock is retried.
+func TestUnbanReportsAnUnconfirmedUnblock(t *testing.T) {
+	enf := &fakeEnforcer{}
+	f := newClient(t, func(o *Options) { o.Enforcer = enf; o.Enforcing = true })
+	if _, err := f.store.RecordBan("198.51.100.7", "burst", f.now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	enf.err = errors.New("firewall busy")
+	text := press(f, "unban:198.51.100.7")
+	if !strings.Contains(text, "firewall busy") || !strings.Contains(text, "не подтвердил") {
+		t.Errorf("the reply should say the unblock is not confirmed: %q", text)
+	}
+	if rel := f.store.Releases(); len(f.store.Bans()) != 0 || len(rel) != 1 {
+		t.Errorf("the record is removed and the unblock stays owed: %+v %+v", f.store.Bans(), rel)
+	}
+	enf.err = nil
+	if text := press(f, "unban:198.51.100.7"); !strings.Contains(text, "198.51.100.7") || len(f.store.Releases()) != 0 {
+		t.Errorf("a second try completes it: %q %+v", text, f.store.Releases())
+	}
+}
+
+func TestAllowReportsAnUnconfirmedUnblock(t *testing.T) {
+	enf := &fakeEnforcer{}
+	f := newClient(t, func(o *Options) { o.Enforcer = enf; o.Enforcing = true })
+	f.store.RecordBan("203.0.113.9", "burst", f.now.Add(time.Hour))
+	enf.err = errors.New("firewall busy")
+	text := press(f, "allow:203.0.113.9")
+	if !f.store.IsAllowed("203.0.113.9") || !strings.Contains(text, "не подтвердил") {
+		t.Errorf("trusted, but the unblock is not complete: %q", text)
+	}
+}
+
+// One policy: a private-network address is not banned from Telegram either.
+func TestBanOfAPrivateAddressIsRefused(t *testing.T) {
+	f := newClient(t, func(o *Options) { o.Enforcer = &fakeEnforcer{}; o.Enforcing = true })
+	for _, ip := range []string{"10.0.0.5", "127.0.0.1", "::ffff:192.168.1.1"} {
+		if text := press(f, "ban:"+ip); !strings.Contains(text, "не блокируются") {
+			t.Errorf("%s: %q", ip, text)
+		}
+	}
+	if len(f.store.Bans()) != 0 {
+		t.Errorf("a refused ban left a record: %+v", f.store.Bans())
+	}
+}
+
+func TestAllowCommandAcceptsANetwork(t *testing.T) {
+	f := newClient(t, nil)
+	f.client.handleUpdate(context.Background(), update{Message: &tgMessage{Chat: tgChat{ID: 100}, Text: "/allow 203.0.113.77/24"}})
+	if !f.store.IsAllowed("203.0.113.5") {
+		t.Error("the network is trusted")
+	}
+	if text := press(f, "ban:203.0.113.5"); !strings.Contains(text, "203.0.113.5") || len(f.store.Bans()) != 0 {
+		t.Errorf("a ban inside a trusted network: %q", text)
+	}
+}
+
+type dryBanner struct{}
+
+func (dryBanner) Ban(context.Context, action.Decision) error      { return nil }
+func (dryBanner) Unban(context.Context, string) error             { return nil }
+func (dryBanner) List(context.Context) ([]action.Decision, error) { return nil, nil }
+func (dryBanner) Name() string                                    { return "nftables (dry run)" }
+func (dryBanner) DryRun() bool                                    { return true }
+
+// A dry run must never read as a block.
+func TestDryRunIsNotReportedAsBlocked(t *testing.T) {
+	var f *clientFixture
+	f = newClient(t, func(o *Options) {
+		o.Decisions = decision.New(decision.Options{Store: o.Store, Banner: dryBanner{}, Now: o.Now})
+	})
+	text := press(f, "ban:198.51.100.7")
+	if !strings.Contains(text, "Пробный режим") || strings.Contains(text, "заблокирован до") {
+		t.Errorf("a dry run reported as a block: %q", text)
+	}
+	if b := f.store.Bans()[0]; b.State != store.StateDryRun || b.Applied {
+		t.Errorf("%+v", b)
 	}
 }

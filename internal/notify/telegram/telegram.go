@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/action"
+	"github.com/RsNest/auditdsec/internal/decision"
 	"github.com/RsNest/auditdsec/internal/i18n"
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/store"
@@ -63,6 +64,9 @@ type Options struct {
 	// Enforcer applies the bans pressed by hand in the chat. Nil means the
 	// button records the decision and nothing more.
 	Enforcer Enforcer
+	// Decisions is the service every interface asks for bans, unbans and
+	// the allowlist. Without one, a service over Store and Enforcer is made.
+	Decisions *decision.Service
 
 	MinSeverity   model.Severity
 	DedupWindow   time.Duration
@@ -143,6 +147,13 @@ func New(o Options) (*Client, error) {
 	if o.HTTP != nil {
 		// Tests inject one client; reuse it for both paths.
 		poll = o.HTTP
+	}
+	if o.Decisions == nil && o.Store != nil {
+		var banner action.Banner
+		if o.Enforcer != nil {
+			banner = enforcerBanner{o.Enforcer}
+		}
+		o.Decisions = decision.New(decision.Options{Store: o.Store, Banner: banner, Log: o.Logger, Now: o.Now})
 	}
 	return &Client{
 		opt:        o,

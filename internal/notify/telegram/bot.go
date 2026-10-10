@@ -2,18 +2,14 @@ package telegram
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"html"
-	"net"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/i18n"
 	"github.com/RsNest/auditdsec/internal/model"
-	"github.com/RsNest/auditdsec/internal/store"
 )
 
 // manualBanDuration is how long a ban pressed by hand lasts. A day is long
@@ -203,7 +199,7 @@ func (c *Client) handleCommand(ctx context.Context, m *tgMessage) {
 			c.reply(ctx, chat, c.tr("ui.err.need_arg", map[string]string{"usage": "/ban 198.51.100.7"}))
 			return
 		}
-		c.reply(ctx, chat, c.applyBan(ctx, args[0]))
+		c.reply(ctx, chat, c.applyBan(ctx, chat, args[0]))
 	case "/allow":
 		c.cmdAllow(ctx, chat, args)
 	case "/unallow":
@@ -238,11 +234,11 @@ func (c *Client) handleCallback(ctx context.Context, q *callbackQuery, chat int6
 
 	switch kind {
 	case "ban":
-		answer = c.applyBan(ctx, arg)
+		answer = c.applyBan(ctx, chat, arg)
 	case "unban":
-		answer = c.applyUnban(ctx, arg)
+		answer = c.applyUnban(ctx, chat, arg)
 	case "allow":
-		answer = c.applyAllow(ctx, arg)
+		answer = c.applyAllow(ctx, chat, arg)
 	case "mute":
 		hours, err := strconv.Atoi(arg)
 		if err != nil || hours <= 0 {
@@ -267,99 +263,12 @@ func (c *Client) handleCallback(ctx context.Context, q *callbackQuery, chat int6
 	c.reply(ctx, chat, answer)
 }
 
-// applyBan records a ban pressed by hand and, when a backend is configured,
-// blocks the address. The reply says which of the two happened: "banned" and
-// "noted that it should be banned" are very different outcomes.
-func (c *Client) applyBan(ctx context.Context, ip string) string {
-	parsed := net.ParseIP(ip)
-	if parsed == nil {
-		return c.tr("ui.err.bad_ip", map[string]string{"value": ip})
-	}
-	ip = parsed.String()
-	until := c.now().Add(manualBanDuration)
-	ban, _, err := c.opt.Store.EnsureBan(ip, "manual ban from Telegram", until)
-	if err != nil {
-		if errors.Is(err, store.ErrAllowlisted) {
-			return c.tr("ui.ban.allowlisted", map[string]string{"ip": ip})
-		}
-		c.log.Warn("cannot record the ban", "error", err)
-		return c.tr("ui.err.unknown_cmd", nil)
-	}
-	until = ban.Until
-
-	text := c.tr("ui.ban.recorded", map[string]string{"ip": ip, "until": c.fmtTime(until)})
-	if ban.Permanent() {
-		text = c.tr("ui.ban.recorded_permanent", map[string]string{"ip": ip})
-	}
-	if c.opt.Enforcer == nil {
-		return text + "\n\n" + c.tr("ui.ban.no_backend", nil)
-	}
-	if ban.Applied {
-		return text
-	}
-	if err := c.opt.Enforcer.Ban(ctx, action.Decision{
-		IP: ip, Until: until, Reason: ban.Reason,
-	}); err != nil {
-		c.log.Error("the firewall refused the ban", "ip", ip, "error", err)
-		return text + "\n\n" + c.tr("ui.ban.not_applied", map[string]string{
-			"ip": ip, "error": err.Error(),
-		})
-	}
-	if err := c.opt.Store.MarkBanApplied(ip); err != nil {
-		c.log.Warn("cannot mark the ban as applied", "ip", ip, "error", err)
-	}
-	return text
-}
-
-// applyUnban lifts a ban both in the store and in the firewall. The firewall
-// comes first: leaving an address blocked after saying it was unblocked is the
-// worse failure.
-func (c *Client) applyUnban(ctx context.Context, ip string) string {
-	if net.ParseIP(ip) == nil {
-		return c.tr("ui.err.bad_ip", map[string]string{"value": ip})
-	}
-	if c.opt.Enforcer != nil {
-		if err := c.opt.Enforcer.Unban(ctx, ip); err != nil {
-			c.log.Error("the firewall refused the unban", "ip", ip, "error", err)
-			return c.tr("ui.ban.not_applied", map[string]string{"ip": ip, "error": err.Error()})
-		}
-	}
-	removed, err := c.opt.Store.Unban(ip)
-	if err != nil {
-		c.log.Warn("cannot lift the ban", "error", err)
-	}
-	key := "ui.ban.missing"
-	if removed {
-		key = "ui.ban.removed"
-	}
-	return c.tr(key, map[string]string{"ip": ip})
-}
-
-// applyAllow protects an address. It also lifts any ban on it, in the firewall
-// as well as in the store: "that was me" has to restore access, not just stop
-// the next ban.
-func (c *Client) applyAllow(ctx context.Context, ip string) string {
-	if net.ParseIP(ip) == nil {
-		return c.tr("ui.err.bad_ip", map[string]string{"value": ip})
-	}
-	if c.opt.Enforcer != nil {
-		if err := c.opt.Enforcer.Unban(ctx, ip); err != nil {
-			c.log.Warn("cannot unblock the address being allowlisted", "ip", ip, "error", err)
-		}
-	}
-	if err := c.opt.Store.Allow(ip, "confirmed by the owner in Telegram"); err != nil {
-		c.log.Warn("cannot allowlist the address", "error", err)
-		return c.tr("ui.err.unknown_cmd", nil)
-	}
-	return c.tr("ui.allow.ok", map[string]string{"ip": ip})
-}
-
 func (c *Client) cmdAllow(ctx context.Context, chat int64, args []string) {
 	if len(args) == 0 {
 		c.reply(ctx, chat, c.tr("ui.err.need_arg", map[string]string{"usage": "/allow 203.0.113.9"}))
 		return
 	}
-	c.reply(ctx, chat, c.applyAllow(ctx, args[0]))
+	c.reply(ctx, chat, c.applyAllow(ctx, chat, args[0]))
 }
 
 func (c *Client) cmdUnallow(ctx context.Context, chat int64, args []string) {
@@ -368,8 +277,12 @@ func (c *Client) cmdUnallow(ctx context.Context, chat int64, args []string) {
 		return
 	}
 	ip := args[0]
-	removed, err := c.opt.Store.Unallow(ip)
+	removed, err := c.decisions().Unallow(ip, c.actor(chat))
 	if err != nil {
+		if text, ok := c.refusalText(ip, err); ok {
+			c.reply(ctx, chat, text)
+			return
+		}
 		c.log.Warn("cannot update the allowlist", "error", err)
 	}
 	key := "ui.allow.missing"
@@ -384,7 +297,7 @@ func (c *Client) cmdUnban(ctx context.Context, chat int64, args []string) {
 		c.reply(ctx, chat, c.tr("ui.err.need_arg", map[string]string{"usage": "/unban 203.0.113.9"}))
 		return
 	}
-	c.reply(ctx, chat, c.applyUnban(ctx, args[0]))
+	c.reply(ctx, chat, c.applyUnban(ctx, chat, args[0]))
 }
 
 func (c *Client) cmdMute(ctx context.Context, chat int64, args []string) {

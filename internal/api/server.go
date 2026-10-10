@@ -21,6 +21,7 @@ import (
 
 	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/config"
+	"github.com/RsNest/auditdsec/internal/decision"
 	"github.com/RsNest/auditdsec/internal/i18n"
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/notify/telegram"
@@ -47,13 +48,16 @@ type Options struct {
 	Config   *config.Config
 	Store    *store.Store
 	Enforcer Enforcer // nil when no firewall backend is configured
-	Runtime  Runtime  // may be nil in tests
-	Telegram *telegram.Managed
-	Host     string
-	Version  string
-	Started  time.Time
-	Logger   *slog.Logger
-	Now      func() time.Time
+	// Decisions is the service every interface uses for bans and the allowlist.
+	// Without one, a service over Store and Enforcer is made.
+	Decisions *decision.Service
+	Runtime   Runtime // may be nil in tests
+	Telegram  *telegram.Managed
+	Host      string
+	Version   string
+	Started   time.Time
+	Logger    *slog.Logger
+	Now       func() time.Time
 }
 
 // Server is the panel's HTTP server.
@@ -64,7 +68,6 @@ type Server struct {
 	cred       credState
 	global     *limiter
 	finalizeMu sync.Mutex
-	actionMu   sync.Mutex // serializes panel ban/unban/allow operations
 	proxies    proxySet
 	sessions   *sessions
 	limit      *limiter
@@ -89,6 +92,13 @@ func New(o Options) (*Server, error) {
 	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
+	}
+	if o.Decisions == nil {
+		var banner action.Banner
+		if o.Enforcer != nil {
+			banner = enforcerBanner{o.Enforcer}
+		}
+		o.Decisions = decision.New(decision.Options{Store: o.Store, Banner: banner, Log: o.Logger, Now: o.Now})
 	}
 	proxies, err := parseProxies(w.TrustedProxies)
 	if err != nil {
@@ -519,45 +529,6 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-type banJSON struct {
-	IP          string     `json:"ip"`
-	Reason      string     `json:"reason"`
-	Created     time.Time  `json:"created"`
-	Until       *time.Time `json:"until"`
-	Permanent   bool       `json:"permanent"`
-	RepeatCount int        `json:"repeat_count"`
-	Applied     bool       `json:"applied"`
-	Source      string     `json:"source"`
-}
-
-func toBanJSON(b store.Ban) banJSON {
-	out := banJSON{
-		IP: b.IP, Reason: b.Reason, Created: b.CreatedAt.UTC(), Permanent: b.Permanent(),
-		RepeatCount: b.Count, Applied: b.Applied, Source: "auto",
-	}
-	if !b.Permanent() {
-		u := b.Until.UTC()
-		out.Until = &u
-	}
-	if strings.HasPrefix(b.Reason, "manual") {
-		out.Source = "manual"
-	}
-	return out
-}
-
-func (s *Server) activeBans() []banJSON {
-	now := s.now()
-	out := []banJSON{}
-	for _, b := range s.opt.Store.Bans() {
-		if b.Active(now) {
-			item := toBanJSON(b)
-			item.Applied = item.Applied && s.opt.Enforcer != nil
-			out = append(out, item)
-		}
-	}
-	return out
-}
-
 func (s *Server) handleBans(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.activeBans())
 }
@@ -767,152 +738,6 @@ func shortDur(d time.Duration) string {
 		s = s[:len(s)-2]
 	}
 	return s
-}
-
-var durations = map[string]time.Duration{
-	"1h": time.Hour, "24h": 24 * time.Hour, "30d": 30 * 24 * time.Hour, "permanent": 0,
-}
-
-func cleanReason(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if r >= 32 && r != 127 {
-			b.WriteRune(r)
-		}
-		if b.Len() >= 200 {
-			break
-		}
-	}
-	return strings.TrimSpace(b.String())
-}
-
-// parseIP accepts only a plain address and returns its canonical form.
-func parseIP(v string) (netip.Addr, bool) {
-	a, err := netip.ParseAddr(strings.TrimSpace(v))
-	if err != nil || a.Zone() != "" {
-		return netip.Addr{}, false
-	}
-	return a.Unmap(), true
-}
-
-func (s *Server) handleBan(w http.ResponseWriter, r *http.Request) {
-	var in struct{ IP, Duration, Reason string }
-	if !decode(w, r, &in) {
-		return
-	}
-	ip, ok := parseIP(in.IP)
-	if !ok || ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() {
-		fail(w, http.StatusBadRequest, "bad_ip", "not a bannable address")
-		return
-	}
-	d, ok := durations[in.Duration]
-	if !ok {
-		fail(w, http.StatusBadRequest, "bad_duration", "duration must be 1h, 24h, 30d or permanent")
-		return
-	}
-	if me := s.clientIP(r); me == ip.String() {
-		fail(w, http.StatusConflict, "self", "that is your own address; banning it would lock you out")
-		return
-	}
-	var until time.Time
-	if d > 0 {
-		until = s.now().Add(d)
-	}
-	reason := "manual ban from the panel"
-	if extra := cleanReason(in.Reason); extra != "" {
-		reason += ": " + extra
-	}
-	s.actionMu.Lock()
-	defer s.actionMu.Unlock()
-	b, created, err := s.opt.Store.EnsureBan(ip.String(), reason, until)
-	if errors.Is(err, store.ErrAllowlisted) {
-		fail(w, http.StatusConflict, "allowlisted", "the address is on the allowlist")
-		return
-	}
-	if err != nil {
-		s.log.Error("cannot record the ban", "error", err)
-		fail(w, http.StatusInternalServerError, "internal", "cannot record the ban")
-		return
-	}
-	s.log.Info("panel: ban", "ip", ip, "until", until, "by", s.clientIP(r))
-	if s.opt.Enforcer != nil && !b.Applied {
-		if err := s.opt.Enforcer.Ban(r.Context(), action.Decision{IP: b.IP, Until: b.Until, Reason: b.Reason}); err != nil {
-			s.log.Error("the firewall refused the ban", "ip", ip, "error", err)
-			fail(w, http.StatusBadGateway, "firewall", "the decision was recorded, but the firewall refused the ban")
-			return
-		} else if err := s.opt.Store.MarkBanApplied(ip.String()); err == nil {
-			b.Applied = true
-		} else {
-			fail(w, http.StatusInternalServerError, "internal", "the firewall accepted the ban, but its state could not be saved")
-			return
-		}
-	}
-	b.Applied = b.Applied && s.opt.Enforcer != nil
-	writeJSON(w, http.StatusOK, struct {
-		banJSON
-		AlreadyBanned bool `json:"already_banned"`
-	}{toBanJSON(b), !created})
-}
-
-func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
-	s.actionMu.Lock()
-	defer s.actionMu.Unlock()
-	ip, ok := parseIP(r.PathValue("ip"))
-	if !ok {
-		fail(w, http.StatusBadRequest, "bad_ip", "not an address")
-		return
-	}
-	if s.opt.Enforcer != nil {
-		if err := s.opt.Enforcer.Unban(r.Context(), ip.String()); err != nil {
-			s.log.Error("the firewall refused the unban", "ip", ip, "error", err)
-			fail(w, http.StatusBadGateway, "firewall", "the firewall refused to lift the block")
-			return
-		}
-	}
-	if _, err := s.opt.Store.Unban(ip.String()); err != nil {
-		s.log.Warn("cannot lift the ban", "error", err)
-	}
-	s.log.Info("panel: unban", "ip", ip, "by", s.clientIP(r))
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) handleAllow(w http.ResponseWriter, r *http.Request) {
-	s.actionMu.Lock()
-	defer s.actionMu.Unlock()
-	var in struct{ IP string }
-	if !decode(w, r, &in) {
-		return
-	}
-	ip, ok := parseIP(in.IP)
-	if !ok {
-		fail(w, http.StatusBadRequest, "bad_ip", "not an address")
-		return
-	}
-	if s.opt.Enforcer != nil {
-		if err := s.opt.Enforcer.Unban(r.Context(), ip.String()); err != nil {
-			s.log.Warn("cannot unblock the address being allowlisted", "ip", ip, "error", err)
-		}
-	}
-	if err := s.opt.Store.Allow(ip.String(), "added from the panel"); err != nil {
-		fail(w, http.StatusInternalServerError, "internal", "cannot save")
-		return
-	}
-	s.log.Info("panel: allow", "ip", ip, "by", s.clientIP(r))
-	writeJSON(w, http.StatusOK, map[string]any{"ip": ip.String(), "added": s.now().UTC(), "source": "manual"})
-}
-
-func (s *Server) handleUnallow(w http.ResponseWriter, r *http.Request) {
-	ip, ok := parseIP(r.PathValue("ip"))
-	if !ok {
-		fail(w, http.StatusBadRequest, "bad_ip", "not an address")
-		return
-	}
-	if _, err := s.opt.Store.Unallow(ip.String()); err != nil {
-		fail(w, http.StatusInternalServerError, "internal", "cannot save")
-		return
-	}
-	s.log.Info("panel: unallow", "ip", ip, "by", s.clientIP(r))
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleMute(w http.ResponseWriter, r *http.Request) {

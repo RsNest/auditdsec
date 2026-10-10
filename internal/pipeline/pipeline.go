@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/action"
+	"github.com/RsNest/auditdsec/internal/decision"
 	"github.com/RsNest/auditdsec/internal/delivery"
 	"github.com/RsNest/auditdsec/internal/detect"
 	"github.com/RsNest/auditdsec/internal/model"
@@ -54,9 +55,9 @@ type Notifier interface {
 	NotifyMessage(ctx context.Context, key string, args map[string]string) error
 }
 
-// metaFirstLoginAllowed records that the owner's address has been protected,
+// MetaFirstLoginAllowed records that the owner's address has been protected,
 // so it happens once per installation rather than on every restart.
-const metaFirstLoginAllowed = "first_login_allowlisted"
+const MetaFirstLoginAllowed = "first_login_allowlisted"
 
 // lineBuffer is how many log lines may wait to be processed. When it fills the
 // tailer blocks, which is the right trade: slowing down beats losing events.
@@ -94,6 +95,13 @@ type Options struct {
 	// agent. It is what stops the detector locking its owner out.
 	AutoAllowlistFirstLogin bool
 
+	// Decisions is the service for bans, unbans and the allowlist; the panel
+	// and the bot are given the same one. Without it, one is made from Store
+	// and Banner. ReconcileEvery is how often the firewall is compared with the
+	// records (default two minutes).
+	Decisions      *decision.Service
+	ReconcileEvery time.Duration
+
 	// PanelURL is the panel's public https link. When set, the certificate the
 	// proxy actually serves there is checked every PanelCertEvery (default an
 	// hour); a certificate close to its end, or one that does not verify when
@@ -111,6 +119,9 @@ type Options struct {
 
 // Pipeline is the running agent.
 type Pipeline struct {
+	dec        *decision.Service
+	noticeKick chan struct{}
+
 	opt Options
 	log *slog.Logger
 	now func() time.Time
@@ -168,7 +179,12 @@ func New(o Options) (*Pipeline, error) {
 	if o.StateDir != "" {
 		statePath = filepath.Join(o.StateDir, "tail.json")
 	}
+	if o.Decisions == nil {
+		o.Decisions = decision.New(decision.Options{Store: o.Store, Banner: o.Banner, Log: o.Logger, Now: o.Now})
+	}
 	p := &Pipeline{
+		dec:           o.Decisions,
+		noticeKick:    make(chan struct{}, 1),
 		opt:           o,
 		log:           o.Logger,
 		now:           o.Now,
@@ -209,7 +225,10 @@ func (p *Pipeline) Close() error {
 
 // Run follows the log until the context is cancelled.
 func (p *Pipeline) Run(ctx context.Context) error {
-	p.reapplyBans(ctx)
+	// What the firewall holds is compared with the records before anything
+	// else: a block lost across a restart is put back, one that was never
+	// confirmed is retried. The comparison then repeats in the background.
+	go p.reconcileLoop(ctx)
 	if p.outbox != nil {
 		workerctx, cancel := context.WithCancel(ctx)
 		done := make(chan struct{})
@@ -314,6 +333,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 		case r := <-certs:
 			p.judgePanelCert(ctx, r)
+
+		case <-p.noticeKick:
+			p.flushBanNotices(ctx)
 
 		case <-counters.C:
 			processed, reported, skipped := p.Counters()
@@ -451,11 +473,15 @@ func (p *Pipeline) handle(ctx context.Context, ev model.Event) error {
 	return nil
 }
 
-// applyDecision records a ban, applies it to the firewall when a backend is
-// configured, and tells the owner either way.
+// applyDecision hands the detector's ban decision to the decision service,
+// which applies the one policy of the agent (canonical addresses, never
+// loopback or link-local, private networks only when allowed, the allowlist
+// first), enforces it and records what the firewall did. The owner is told
+// either way — unless the policy refused: that is the protection working, not
+// an event.
 //
-// The store refuses a ban for an allowlisted address, and that refusal is
-// deliberately not an error here: it is the protection working.
+// The notification duty is written with the decision itself (NoticeDue), so a
+// crash between the two cannot lose the notice; flushBanNotices settles it.
 func (p *Pipeline) applyDecision(ctx context.Context, d action.Decision) {
 	// The detector times decisions by the event's own clock, so replaying an
 	// existing audit log produces decisions whose window is already over.
@@ -469,74 +495,106 @@ func (p *Pipeline) applyDecision(ctx context.Context, d action.Decision) {
 		return
 	}
 
-	ban, created, err := p.opt.Store.EnsureBan(d.IP, d.Reason, d.Until)
+	res, err := p.dec.Ban(ctx, decision.BanRequest{
+		IP: d.IP, Until: d.Until, Reason: d.Reason,
+		Actor: decision.Actor{Origin: decision.FromDetector}, NoticeDue: true,
+	})
 	if err != nil {
-		if errors.Is(err, store.ErrAllowlisted) {
-			p.log.Info("ban refused: the address is allowlisted", "ip", d.IP, "reason", d.Reason)
+		if ref, ok := decision.IsRefusal(err); ok {
+			p.log.Info("ban refused by policy", "ip", d.IP, "reason", d.Reason, "policy", ref.Error())
 			return
 		}
 		p.log.Error("cannot record the ban", "ip", d.IP, "error", err)
 		return
 	}
-	if !created {
+	if !res.Created {
 		return // an active decision is not another offence
 	}
 	p.banned.Add(1)
-
-	var applyErr error
-	d = action.Decision{IP: ban.IP, Until: ban.Until, Reason: ban.Reason}
-	if p.opt.Banner != nil {
-		applyErr = p.opt.Banner.Ban(ctx, d)
-		if applyErr != nil {
-			p.log.Error("the firewall refused the ban", "ip", d.IP, "error", applyErr)
-		} else if err := p.opt.Store.MarkBanApplied(d.IP); err != nil {
-			applyErr = err
-			p.log.Warn("cannot mark the ban as applied", "ip", d.IP, "error", err)
-		} else {
-			ban.Applied = true
-		}
-	}
 	p.log.Warn("ban decision recorded",
-		"ip", d.IP, "reason", d.Reason, "until", untilLabel(d.Until),
-		"repeat", ban.Count, "applied", applyErr == nil && p.opt.Banner != nil)
+		"ip", res.Ban.IP, "reason", res.Ban.Reason, "until", untilLabel(res.Ban.Until),
+		"repeat", res.Ban.Count, "state", res.Ban.State, "backend", res.Ban.Backend)
+	p.flushBanNotices(ctx)
+}
 
-	if p.planner != nil {
-		if err := p.enqueueNotice(ctx, p.planner.PlanBan(ban, applyErr)); err != nil {
-			p.failDelivery(err)
+// flushBanNotices sends the notification of every automatic ban whose notice
+// is still owed, then clears the duty. It is what runs after a decision, after
+// each reconciliation and at start, so a notice owed at a crash is not lost.
+// Delivery is at least once: a crash between the outbox accepting a notice and
+// the duty being cleared repeats it, and the outbox refuses a notice it
+// already holds.
+func (p *Pipeline) flushBanNotices(ctx context.Context) {
+	for _, ban := range p.dec.DueNotices() {
+		var applyErr error
+		if ban.State == store.StateFailed {
+			applyErr = errors.New(ban.LastError)
 		}
-		return
-	}
-	if err := p.opt.Notifier.NotifyBan(ctx, ban, applyErr); err != nil {
-		p.log.Error("cannot report the ban", "ip", d.IP, "error", err)
+		if p.planner != nil {
+			if err := p.enqueueNotice(ctx, p.planner.PlanBan(ban, applyErr)); err != nil {
+				p.failDelivery(err)
+				return
+			}
+		} else if err := p.opt.Notifier.NotifyBan(ctx, ban, applyErr); err != nil {
+			p.log.Error("cannot report the ban", "ip", ban.IP, "error", err)
+			continue // the duty stays; the next pass tries again
+		}
+		if err := p.dec.NoticeSent(ban.IP); err != nil {
+			p.log.Warn("cannot record that the ban was reported", "ip", ban.IP, "error", err)
+		}
 	}
 }
 
+// reconcileLoop compares the records with the firewall now and then, off the
+// main loop (a slow firewall must not hold up reading), and asks the main loop
+// to settle owed notices.
+func (p *Pipeline) reconcileLoop(ctx context.Context) {
+	p.dec.Run(ctx, p.opt.ReconcileEvery, func(rep decision.Report) {
+		if rep.ListErr != nil || rep.Reapplied+rep.Renewed+rep.Released+rep.Orphans+rep.Expired+rep.Failed > 0 {
+			p.log.Info("firewall reconciled",
+				"checked", rep.Checked, "reapplied", rep.Reapplied, "renewed", rep.Renewed,
+				"released", rep.Released, "orphans_removed", rep.Orphans, "expired", rep.Expired,
+				"failed", rep.Failed, "unreadable", rep.ListErr != nil)
+		}
+		select {
+		case p.noticeKick <- struct{}{}:
+		default:
+		}
+	})
+}
+
 // autoAllowlist protects the source of the first successful login after the
-// agent starts. Without it, an owner whose address changes — carrier NAT, a
-// phone, a dynamic home line — can be banned by their own agent after a few
-// typos, with no way back in.
+// agent starts. It is off for new installations: a successful login does not
+// prove that the owner made it (the first one may be an attacker's), so
+// trusting it is a choice. An installation that already relied on it keeps it
+// until the owner decides (ban.auto_allowlist).
 func (p *Pipeline) autoAllowlist(ctx context.Context, ev model.Event) {
 	if !p.opt.AutoAllowlistFirstLogin ||
 		ev.Kind != model.KindSSHLoginOK ||
 		ev.SrcIP == "" {
 		return
 	}
-	if p.opt.Store.GetMeta(metaFirstLoginAllowed) != "" {
+	if p.opt.Store.GetMeta(MetaFirstLoginAllowed) != "" {
 		return
 	}
 	if p.opt.Store.IsAllowed(ev.SrcIP) {
 		// Already protected; record that the one-off has happened anyway.
-		_ = p.opt.Store.SetMeta(metaFirstLoginAllowed, ev.SrcIP)
+		_ = p.opt.Store.SetMeta(MetaFirstLoginAllowed, ev.SrcIP)
 		return
 	}
-	if err := p.opt.Store.Allow(ev.SrcIP, "first successful login after start"); err != nil {
+	// A login seen while an old log is read is history: it must not make an
+	// address permanently trusted.
+	if p.now().Sub(ev.Time) > 5*time.Minute {
+		return
+	}
+	res, err := p.dec.Allow(ctx, ev.SrcIP, "first successful login after start", decision.Actor{Origin: decision.FromSystem, Who: "auto_allowlist"})
+	if err != nil {
 		p.log.Error("cannot allowlist the first login", "ip", ev.SrcIP, "error", err)
 		return
 	}
-	if err := p.opt.Store.SetMeta(metaFirstLoginAllowed, ev.SrcIP); err != nil {
+	if err := p.opt.Store.SetMeta(MetaFirstLoginAllowed, ev.SrcIP); err != nil {
 		p.log.Warn("cannot record the first-login allowlisting", "error", err)
 	}
-	p.log.Info("the first successful login was allowlisted", "ip", ev.SrcIP, "user", ev.User)
+	p.log.Info("the first successful login was allowlisted", "ip", res.Key, "user", ev.User)
 
 	if p.planner != nil {
 		if err := p.enqueueNotice(ctx, p.planner.PlanMessage("ui.allow.auto", map[string]string{"ip": ev.SrcIP})); err != nil {
@@ -546,41 +604,6 @@ func (p *Pipeline) autoAllowlist(ctx context.Context, ev model.Event) {
 	}
 	if err := p.opt.Notifier.NotifyMessage(ctx, "ui.allow.auto", map[string]string{"ip": ev.SrcIP}); err != nil {
 		p.log.Warn("cannot report the allowlisting", "error", err)
-	}
-}
-
-// reapplyBans pushes the still-active bans from the store into the firewall.
-// The firewall is rebuilt from scratch at startup, so this is what makes the
-// store the source of truth rather than whatever survived a reboot.
-func (p *Pipeline) reapplyBans(ctx context.Context) {
-	if p.opt.Banner == nil {
-		return
-	}
-	now := p.now()
-	applied, failed := 0, 0
-	for _, b := range p.opt.Store.Bans() {
-		if !b.Active(now) {
-			continue
-		}
-		if p.opt.Store.IsAllowed(b.IP) {
-			continue
-		}
-		err := p.opt.Banner.Ban(ctx, action.Decision{IP: b.IP, Until: b.Until, Reason: b.Reason})
-		if err != nil {
-			failed++
-			if saveErr := p.opt.Store.MarkBanUnapplied(b.IP); saveErr != nil {
-				p.log.Warn("cannot clear the failed ban confirmation", "ip", b.IP, "error", saveErr)
-			}
-			p.log.Warn("cannot reapply a ban", "ip", b.IP, "error", err)
-			continue
-		}
-		applied++
-		if err := p.opt.Store.MarkBanApplied(b.IP); err != nil {
-			p.log.Warn("cannot save the reapplied ban state", "ip", b.IP, "error", err)
-		}
-	}
-	if applied > 0 || failed > 0 {
-		p.log.Info("bans reapplied to the firewall", "applied", applied, "failed", failed)
 	}
 }
 

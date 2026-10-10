@@ -408,3 +408,7 @@ func clip(s string) string {
 	}
 	return s
 }
+
+// Check applies the address policy without changing anything: nil when the
+// address may be blocked.
+func (s *Service) Check(a netip.Addr) *Refusal { return s.check(a.Unmap()) }

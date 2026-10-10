@@ -272,3 +272,22 @@ func TestProtectedRateShare(t *testing.T) {
 		t.Fatal("critical share unavailable")
 	}
 }
+
+// A notice journaled twice (a duty replayed after a crash) is queued once and
+// does not stall recovery.
+func TestImportSkipsAnIntentAlreadyQueued(t *testing.T) {
+	q := openTest(t, testOptions(t))
+	in := intent("dup", Critical)
+	if err := q.Import(pos(0), Plan{Intents: []Intent{in}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Import(pos(1), Plan{Intents: []Intent{in}}); err != nil {
+		t.Fatalf("a replayed notice must not fail recovery: %v", err)
+	}
+	if st := q.Stats(); st.Pending != 1 || st.Queued != 1 {
+		t.Errorf("queued once: %+v", st)
+	}
+	if q.Cursors()["2026-10-10"] != 2 {
+		t.Errorf("the cursor must advance past the duplicate: %v", q.Cursors())
+	}
+}

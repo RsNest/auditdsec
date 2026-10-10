@@ -2,13 +2,13 @@ package detect
 
 import (
 	"fmt"
-	"net"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/model"
+	"github.com/RsNest/auditdsec/internal/netaddr"
 )
 
 // Ladder is how long a ban lasts by how many times the address has been banned
@@ -103,13 +103,14 @@ func (d *BruteForce) Name() string { return "brute-force" }
 // The next live failure still reaches the threshold if five preceded a restart.
 // Journal completion order can differ from audit timestamp order.
 func (d *BruteForce) RestoreFailure(ev model.Event, observedAt time.Time) {
-	if ev.Kind != model.KindSSHLoginFail || !bannable(ev.SrcIP) ||
+	ip, ok := trackable(ev.SrcIP)
+	if ev.Kind != model.KindSSHLoginFail || !ok ||
 		!ev.Time.After(observedAt.Add(-d.opt.Window)) || ev.Time.After(observedAt) {
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	t := d.track(ev.SrcIP, observedAt)
+	t := d.track(ip, observedAt)
 	t.fails = append(t.fails, ev.Time)
 	sort.Slice(t.fails, func(i, j int) bool { return t.fails[i].Before(t.fails[j]) })
 	capacity := max(d.opt.FailThreshold, d.opt.SuccessAfterFailures)
@@ -120,8 +121,8 @@ func (d *BruteForce) RestoreFailure(ev model.Event, observedAt time.Time) {
 
 // Feed consumes one event and reports what it triggered.
 func (d *BruteForce) Feed(ev model.Event) Result {
-	ip := ev.SrcIP
-	if !bannable(ip) {
+	ip, ok := trackable(ev.SrcIP)
+	if !ok {
 		return Result{}
 	}
 
@@ -293,19 +294,22 @@ func prune(ts []time.Time, cutoff time.Time) []time.Time {
 	return keep
 }
 
-// bannable rejects the addresses it would be pointless or dangerous to block:
-// anything that is not an address at all, loopback, link-local, and the private
-// ranges a VPS reaches its own network through.
-func bannable(s string) bool {
-	if s == "" {
-		return false
+// trackable returns the canonical form of an address worth following, and false
+// for text that is not an address, the unspecified address and multicast.
+//
+// Private-network and loopback addresses are followed too: a burst of failures
+// from inside the network is an intrusion signal and the success that follows
+// it matters, whether or not the address may be blocked. Which addresses may
+// be blocked is the decision service's policy, applied when a ban is requested.
+func trackable(s string) (string, bool) {
+	a, err := netaddr.Parse(s)
+	if err != nil {
+		return "", false
 	}
-	ip := net.ParseIP(s)
-	if ip == nil {
-		return false
+	if a.IsUnspecified() || a.IsMulticast() || netaddr.Classify(a) == netaddr.Multicast {
+		return "", false
 	}
-	return !ip.IsLoopback() && !ip.IsUnspecified() &&
-		!ip.IsPrivate() && !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast()
+	return a.String(), true
 }
 
 func humanWindow(d time.Duration) string {

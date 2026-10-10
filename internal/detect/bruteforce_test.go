@@ -151,19 +151,51 @@ func TestBruteForceRespectsTheAllowlist(t *testing.T) {
 	}
 }
 
-// Private and loopback addresses are how a host reaches its own network, and
-// blocking them would cut the agent off from the machine it protects.
-func TestBruteForceIgnoresUnbannableAddresses(t *testing.T) {
+// Text that is not an address, the unspecified address and multicast are not
+// sources of anything.
+func TestBruteForceIgnoresWhatIsNotASource(t *testing.T) {
 	d := NewBruteForce(Options{Window: time.Minute, FailThreshold: 2})
-	for _, ip := range []string{"127.0.0.1", "10.0.0.5", "192.168.1.1", "172.16.0.9", "169.254.1.1", "::1", "", "not-an-ip"} {
+	for _, ip := range []string{"0.0.0.0", "::", "224.0.0.1", "ff02::1", "", "not-an-ip"} {
 		for i := 0; i < 5; i++ {
 			if r := d.Feed(fail(ip, base.Add(time.Duration(i)*time.Second))); !r.Empty() {
-				t.Errorf("address %q should never be banned: %+v", ip, r)
+				t.Errorf("address %q is not a source: %+v", ip, r)
 			}
 		}
 	}
 	if d.Tracked() != 0 {
 		t.Errorf("Tracked = %d, want 0", d.Tracked())
+	}
+}
+
+// An intruder inside the private network is still an intruder: failures from a
+// private or loopback address are followed and a success after them is
+// reported. Whether the address may be blocked is the decision service's
+// policy, not the detector's.
+func TestBruteForceFollowsPrivateNetworks(t *testing.T) {
+	d := NewBruteForce(Options{Window: 10 * time.Minute, FailThreshold: 100, SuccessAfterFailures: 3, Host: "web01"})
+	for _, ip := range []string{"10.0.0.5", "192.168.1.1", "127.0.0.1", "fd00::5"} {
+		for i := 0; i < 3; i++ {
+			d.Feed(fail(ip, base.Add(time.Duration(i)*time.Second)))
+		}
+		r := d.Feed(model.Event{Time: base.Add(5 * time.Second), Kind: model.KindSSHLoginOK, SrcIP: ip, User: "root"})
+		if len(r.Events) != 1 || r.Events[0].Kind != model.KindLoginAfterBruteForce {
+			t.Errorf("%s: a success after failures was not reported: %+v", ip, r)
+		}
+	}
+}
+
+// Another spelling of the same address is the same source.
+func TestBruteForceCountsOneSourceOnce(t *testing.T) {
+	d := NewBruteForce(Options{Window: time.Minute, FailThreshold: 3})
+	d.Feed(fail("2001:db8::1", base))
+	d.Feed(fail("2001:DB8:0:0:0:0:0:1", base.Add(time.Second)))
+	r := d.Feed(fail("::ffff:198.51.100.7", base.Add(2*time.Second)))
+	if len(r.Decisions) != 0 {
+		t.Fatalf("two sources must not add up: %+v", r)
+	}
+	r = d.Feed(fail("2001:db8:0::1", base.Add(3*time.Second)))
+	if len(r.Decisions) != 1 || r.Decisions[0].IP != "2001:db8::1" {
+		t.Errorf("three spellings of one address reach the threshold: %+v", r)
 	}
 }
 

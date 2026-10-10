@@ -435,7 +435,10 @@ func (q *Queue) Import(pos Position, plan Plan) error {
 		}
 		seen[intent.ID] = true
 		if _, ok := q.s.Jobs[intent.ID]; ok {
-			return errors.New("delivery: intent ID reused across journal records")
+			// The same notice journaled twice (a duty replayed after a crash):
+			// it is already queued, so it is not queued again and does not
+			// stall recovery.
+			continue
 		}
 		maxJobs, maxBytes := q.opt.MaxJobs, q.opt.MaxBytes
 		if intent.Priority == Routine {

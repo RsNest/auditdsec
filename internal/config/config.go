@@ -100,10 +100,19 @@ type BanConfig struct {
 	Backend string
 	DryRun  bool
 	Table   string
-	// AutoAllowlist protects the owner's own address. "first_login" adds the
-	// source of the first successful login after the agent starts, which is
-	// almost always the person installing it; "off" disables that.
+	// AutoAllowlist: "first_login" adds the source of the first successful
+	// login after the agent starts to the allowlist; "off" (the default for
+	// a new installation) does not. A successful login does not prove that
+	// the owner made it, so trusting it is a choice. An installation that
+	// already relied on it keeps it unless this is set (see
+	// AutoAllowlistExplicit and cmd/auditdsec).
 	AutoAllowlist string
+	// AutoAllowlistExplicit is true when the file or the environment said.
+	AutoAllowlistExplicit bool
+	// BanPrivate allows banning addresses of private networks. Off by
+	// default: a VPS reaches its own network through them, and a ban there is
+	// more likely a mistake than a defence. Detection does not depend on it.
+	BanPrivate bool
 }
 
 // CrowdSecConfig is the CrowdSec integration, which lands in v0.3.
@@ -184,7 +193,9 @@ type Config struct {
 	badChatID string // a malformed chat id from the environment, reported by validate
 	badDebug  string // a malformed AUDITDSEC_DEBUG value, reported by validate
 	badDryRun string // a malformed AUDITDSEC_BAN_DRY_RUN value
-	badWeb    string // a malformed AUDITDSEC_WEB* switch
+
+	badBanPrivate string // a malformed AUDITDSEC_BAN_PRIVATE value
+	badWeb        string // a malformed AUDITDSEC_WEB* switch
 }
 
 // Defaults returns the preset for a profile. The simple profile is tuned for
@@ -220,7 +231,7 @@ func Defaults(profile string) *Config {
 		Ban: BanConfig{
 			Backend:       BanBackendNone,
 			Table:         "auditdsec",
-			AutoAllowlist: AutoAllowFirstLogin,
+			AutoAllowlist: AutoAllowOff,
 		},
 		CrowdSec: CrowdSecConfig{Enabled: false, Mode: "push", LAPIURL: "http://127.0.0.1:8080"},
 		Web:      WebConfig{Listen: "127.0.0.1:9477", Login: "admin", SessionTTL: 12 * time.Hour},
@@ -344,11 +355,15 @@ func (c *Config) decode(root *node) error {
 	}
 
 	if n := d.section(root, "ban"); n != nil {
-		d.strict(n, "ban", "backend", "dry_run", "table", "auto_allowlist")
+		d.strict(n, "ban", "backend", "dry_run", "table", "auto_allowlist", "ban_private")
 		d.str(n, "backend", &c.Ban.Backend)
 		d.boolean(n, "dry_run", &c.Ban.DryRun)
 		d.str(n, "table", &c.Ban.Table)
 		d.str(n, "auto_allowlist", &c.Ban.AutoAllowlist)
+		if _, ok := n.child("auto_allowlist"); ok {
+			c.Ban.AutoAllowlistExplicit = true
+		}
+		d.boolean(n, "ban_private", &c.Ban.BanPrivate)
 	}
 
 	if n := d.section(root, "crowdsec"); n != nil {
@@ -389,7 +404,20 @@ func (c *Config) applyEnv() {
 	envStr("AUDITDSEC_TG_API_BASE", &c.Telegram.APIBase)
 	envStr("AUDITDSEC_MIN_SEVERITY", &c.Telegram.MinSeverity)
 	envStr("AUDITDSEC_BAN_BACKEND", &c.Ban.Backend)
+	if os.Getenv("AUDITDSEC_AUTO_ALLOWLIST") != "" {
+		c.Ban.AutoAllowlistExplicit = true
+	}
 	envStr("AUDITDSEC_AUTO_ALLOWLIST", &c.Ban.AutoAllowlist)
+	if v := os.Getenv("AUDITDSEC_BAN_PRIVATE"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			c.Ban.BanPrivate = true
+		case "0", "false", "no", "off":
+			c.Ban.BanPrivate = false
+		default:
+			c.badBanPrivate = v
+		}
+	}
 	if v := os.Getenv("AUDITDSEC_BAN_DRY_RUN"); v != "" {
 		switch strings.ToLower(strings.TrimSpace(v)) {
 		case "1", "true", "yes", "on":
@@ -496,6 +524,9 @@ func (c *Config) validate() error {
 	}
 	if c.badDebug != "" {
 		add("AUDITDSEC_DEBUG: %q is not a yes/no value (use 1 or 0)", c.badDebug)
+	}
+	if c.badBanPrivate != "" {
+		add("AUDITDSEC_BAN_PRIVATE: %q is not a yes/no value (use 1 or 0)", c.badBanPrivate)
 	}
 	if c.badDryRun != "" {
 		add("AUDITDSEC_BAN_DRY_RUN: %q is not a yes/no value (use 1 or 0)", c.badDryRun)
