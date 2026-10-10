@@ -15,6 +15,7 @@ var catalogRU = map[string]string{
 	"event.log_tamper":             "Вмешательство в журналы или правила аудита: {detail}, пользователь {user}",
 	"event.suspicious_exec":        "Запуск программы из временного каталога: {path}, пользователь {user}",
 	"event.auditd_stopped":         "Служба аудита недоступна: {detail}",
+	"event.panel_cert":             "Сертификат панели: {detail}",
 	"event.unknown":                "Событие {kind}",
 
 	// Severity labels.
@@ -58,6 +59,9 @@ var catalogRU = map[string]string{
 	"explain.auditd_stopped": "Что это: служба аудита не пишет события или остановлена.\n" +
 		"Опасность: высокая. Пока аудит выключен, вы не видите, что происходит на сервере.\n" +
 		"Что делать: проверьте systemctl status auditd и запустите службу. Если вы её не останавливали, ищите причину.",
+	"explain.panel_cert": "Что это: сертификат, который панель отдаёт на своём порту, скоро истекает или не проходит проверку.\n" +
+		"Опасность: средняя. Когда он истечёт, браузер откажется открывать панель, а предупреждение будет неотличимо от атаки.\n" +
+		"Что делать: docker compose logs caddy certbot; проверьте, что порт 80 открыт снаружи, и запустите ./install.sh ещё раз.",
 
 	// Bot UI.
 	"ui.btn.ban":        "🚫 Забанить {ip}",
@@ -131,6 +135,7 @@ var catalogRU = map[string]string{
 	"ui.diag.detector":   "Детектор",
 	"ui.diag.banner":     "Блокировки применяет",
 	"ui.diag.bans":       "Решений о блокировке",
+	"ui.diag.panel_cert": "Сертификат панели",
 	"ui.never":           "нет",
 	"val.unknown":        "неизвестно",
 	"ui.muted_until":     "заглушены до {until}",

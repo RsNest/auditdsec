@@ -128,6 +128,10 @@ type WebConfig struct {
 	PasswordHash string
 	Password     string
 	SessionTTL   time.Duration
+	// CertCheck says what the agent watches in the certificate the proxy
+	// serves at PublicURL: "verify" (chain and expiry, the default), "expiry"
+	// (for staging, self-signed or a private CA the agent does not know) or "off".
+	CertCheck string
 	// PublicHTTPSPort is the port the proxy serves the panel on, as the
 	// internet sees it. It is NOT Listen: that is the agent's own plain-HTTP
 	// upstream on loopback. 0 means the proxy's default, 443.
@@ -357,7 +361,8 @@ func (c *Config) decode(root *node) error {
 	}
 
 	if n := d.section(root, "web"); n != nil {
-		d.strict(n, "web", "enabled", "listen", "upstream_listen", "login", "password_hash", "public_url", "public_https_port", "session_ttl", "trusted_proxies")
+		d.strict(n, "web", "enabled", "listen", "upstream_listen", "login", "password_hash", "public_url", "public_https_port", "session_ttl", "trusted_proxies", "cert_check")
+		d.str(n, "cert_check", &c.Web.CertCheck)
 		d.boolean(n, "enabled", &c.Web.Enabled)
 		d.str(n, "listen", &c.Web.Listen)
 		d.str(n, "upstream_listen", &c.Web.Listen) // the clearer name for the same setting
@@ -435,6 +440,7 @@ func (c *Config) applyEnv() {
 		c.Web.PublicHTTPSPort = n
 	}
 	envStr("AUDITDSEC_WEB_LOGIN", &c.Web.Login)
+	envStr("AUDITDSEC_WEB_CERT_CHECK", &c.Web.CertCheck)
 	envStr("AUDITDSEC_WEB_PASSWORD_HASH", &c.Web.PasswordHash)
 	envStr("AUDITDSEC_WEB_PASSWORD", &c.Web.Password)
 	envStr("AUDITDSEC_WEB_PUBLIC_URL", &c.Web.PublicURL)
@@ -637,6 +643,11 @@ func (c *Config) validateWeb(add func(string, ...any)) {
 		add("web.listen: %q would put the panel on a public interface, and it speaks plain HTTP: the "+
 			"password would cross the network readable by anyone in the way.\n    Listen on 127.0.0.1 and let "+
 			"./install.sh set up the way in: an SSH tunnel, or a domain / public address with a proxy that adds TLS", host)
+	}
+	switch w.CertCheck {
+	case "", "verify", "expiry", "off":
+	default:
+		add("web.cert_check: %q must be verify, expiry or off", w.CertCheck)
 	}
 	if w.PublicHTTPSPort < 0 || w.PublicHTTPSPort > 65535 {
 		add("web.public_https_port: %d is not a port (1-65535, or 0 for the default 443)", w.PublicHTTPSPort)

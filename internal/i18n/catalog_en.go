@@ -14,6 +14,7 @@ var catalogEN = map[string]string{
 	"event.log_tamper":             "Logs or audit rules tampered with: {detail}, user {user}",
 	"event.suspicious_exec":        "Program executed from a temporary directory: {path}, user {user}",
 	"event.auditd_stopped":         "Audit service unavailable: {detail}",
+	"event.panel_cert":             "Panel certificate: {detail}",
 	"event.unknown":                "Event {kind}",
 
 	// Severity labels.
@@ -57,6 +58,9 @@ var catalogEN = map[string]string{
 	"explain.auditd_stopped": "What it is: the audit service is not writing events, or has stopped.\n" +
 		"Risk: high. While auditing is off you cannot see what happens on the server.\n" +
 		"What to do: check systemctl status auditd and start the service. If you did not stop it, find out who did.",
+	"explain.panel_cert": "What it is: the certificate the panel serves on its port is about to expire or does not verify.\n" +
+		"Risk: medium. Once it expires browsers refuse the panel, and their warning looks exactly like an attack.\n" +
+		"What to do: docker compose logs caddy certbot; make sure port 80 is open from outside, and run ./install.sh again.",
 
 	// Bot UI.
 	"ui.btn.ban":        "🚫 Ban {ip}",
@@ -130,6 +134,7 @@ var catalogEN = map[string]string{
 	"ui.diag.detector":    "Detector",
 	"ui.diag.banner":      "Bans applied by",
 	"ui.diag.bans":        "Ban decisions",
+	"ui.diag.panel_cert":  "Panel certificate",
 	"ui.never":            "none",
 	"val.unknown":         "unknown",
 	"ui.muted_until":      "muted until {until}",

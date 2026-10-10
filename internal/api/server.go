@@ -710,6 +710,8 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 				out["detector"] = it.Value
 			case "ui.diag.banner":
 				out["banner"] = it.Value
+			case "ui.diag.panel_cert":
+				out["panel_cert"] = it.Value
 			}
 		}
 	}

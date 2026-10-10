@@ -29,6 +29,9 @@ services:
       # What a person types: written by ./install.sh with the real public port.
       AUDITDSEC_WEB_PUBLIC_URL: ${PANEL_PUBLIC_URL:-https://${PANEL_SITE:-${PANEL_DOMAIN:?set PANEL_SITE in .env, or run ./install.sh}}}
       AUDITDSEC_WEB_PUBLIC_HTTPS_PORT: ${PANEL_HTTPS_PORT:-443}
+      # What the agent watches in the certificate served at that link: verify
+      # (chain and expiry), expiry (staging, self-signed, a private CA) or off.
+      AUDITDSEC_WEB_CERT_CHECK: ${PANEL_CERT_CHECK:-verify}
       # Only Caddy, on loopback, may state the client's address.
       AUDITDSEC_WEB_TRUSTED_PROXIES: 127.0.0.1,::1
 

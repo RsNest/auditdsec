@@ -510,6 +510,8 @@ func cmdRun(args []string) error {
 		Detector:                detector,
 		Banner:                  banner,
 		AutoAllowlistFirstLogin: cfg.Ban.AutoAllowlist == config.AutoAllowFirstLogin,
+		PanelURL:                panelCertURL(cfg),
+		PanelCertTrust:          cfg.Web.CertCheck != "expiry",
 		Store:                   st,
 		Notifier:                bot,
 		Logger:                  log,
@@ -631,4 +633,16 @@ func cmdRun(args []string) error {
 	default:
 	}
 	return nil
+}
+
+// panelCertURL is the link whose served certificate the agent watches: the
+// public https URL of an enabled panel, unless the check is switched off.
+func panelCertURL(cfg *config.Config) string {
+	if !cfg.Web.Enabled || cfg.Web.CertCheck == "off" {
+		return ""
+	}
+	if u := cfg.PanelURL(); strings.HasPrefix(u, "https://") {
+		return u
+	}
+	return ""
 }
