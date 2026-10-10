@@ -1,6 +1,7 @@
 # Sourced by scenarios.sh and interactive.py: the stand's environment and a
 # clean start. See lab.sh.
 # shellcheck shell=bash
+# shellcheck disable=SC2034  # VPS, PROBE, TOKEN are for the scripts that source this
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
 LAB="${LAB:-/lab}"
