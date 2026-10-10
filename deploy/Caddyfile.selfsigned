@@ -14,6 +14,10 @@
 
 {
 	admin 127.0.0.1:2019
+	# A browser sends no server name when the URL is an IP address, and Caddy
+	# would then pick the certificate by the address the client connected to,
+	# which is wrong behind NAT and when probing 127.0.0.1. Name it explicitly.
+	default_sni {$PANEL_SITE}
 }
 
 https://{$PANEL_SITE} {

@@ -30,7 +30,7 @@
 	header {
 		# Served over TLS from here on, so the browser should never try plain
 		# HTTP for this name again.
-		Strict-Transport-Security "{$PANEL_HSTS:max-age=31536000; includeSubDomains}"
+		Strict-Transport-Security "{$PANEL_HSTS:max-age=31536000}"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"

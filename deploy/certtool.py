@@ -61,7 +61,8 @@ def log(msg, err=False):
 
 
 def leaf_of(path):
-    data = open(path, "rb").read()
+    with open(path, "rb") as fh:
+        data = fh.read()
     blocks = PEM_RE.findall(data)
     if not blocks:
         raise ValueError(f"{path} holds no certificate")
@@ -113,7 +114,8 @@ def san_of(cert):
 
 def key_matches(cert, key_path):
     try:
-        key = serialization.load_pem_private_key(open(key_path, "rb").read(), password=None)
+        with open(key_path, "rb") as fh:
+            key = serialization.load_pem_private_key(fh.read(), password=None)
     except (OSError, ValueError, TypeError):
         return None
     pub = serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
@@ -122,7 +124,8 @@ def key_matches(cert, key_path):
 
 def read_json(path):
     try:
-        return json.load(open(path))
+        with open(path) as fh:
+            return json.load(fh)
     except (OSError, ValueError):
         return {}
 
@@ -258,7 +261,8 @@ def copy_lineage():
 def post_reload():
     """Ask Caddy to load its configuration again. Returns an error string or None."""
     try:
-        body = open(CADDYFILE, "rb").read()
+        with open(CADDYFILE, "rb") as fh:
+            body = fh.read()
     except OSError as err:
         return f"cannot read {CADDYFILE}: {err}"
     req = urllib.request.Request(

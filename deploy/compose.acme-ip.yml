@@ -49,6 +49,9 @@ services:
       PANEL_ACME_URL: ${PANEL_ACME_URL:-https://acme-v02.api.letsencrypt.org/directory}
       # Only for a private ACME server; empty means the normal trust store.
       REQUESTS_CA_BUNDLE: ${PANEL_ACME_CA_ROOT:+/acme-ca.pem}
+      # How often the loop compares disk and port 443 (seconds). The default is
+      # right for real use; the tests shorten it.
+      TICK: ${PANEL_RECONCILE_SECONDS:-60}
     volumes:
       - letsencrypt${PANEL_ACME_SUFFIX:-}:/etc/letsencrypt
       - letsencrypt-lib${PANEL_ACME_SUFFIX:-}:/var/lib/letsencrypt

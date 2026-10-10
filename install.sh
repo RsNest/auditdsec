@@ -808,6 +808,11 @@ RENEW_STATE=""
 TLS_UNTRUSTED=no
 TLS_TRUSTED=no
 RELOAD_PROBLEM=no
+# ROUTE is empty unless this server cannot reach its own public address (some
+# clouds do not loop it back). Then every check is sent to the loopback
+# address instead, with the same name in the URL, so the certificate and its
+# name are still verified exactly as before.
+ROUTE=()
 CA_TMP=""
 
 cleanup() { [ -z "$CA_TMP" ] || rm -f "$CA_TMP"; }
@@ -835,11 +840,11 @@ compose_prefix() {
 # certificate verification (-k) so that "the proxy is up but its certificate
 # is wrong" can be told from "nothing answers".
 wait_for_page() {
-    local url="$1" code tries=0 k=()
+    local url="$1" max="${2:-45}" code tries=0 k=()
     case "$url" in https://*) k=(-k) ;; esac
-    while [ "$tries" -lt 45 ]; do
+    while [ "$tries" -lt "$max" ]; do
         tries=$((tries + 1))
-        code="$(curl -sS --noproxy '*' "${k[@]}" -o /dev/null -w '%{http_code}' --max-time 4 "$url/" 2>/dev/null || true)"
+        code="$(curl -sS --noproxy '*' ${ROUTE[@]+"${ROUTE[@]}"} "${k[@]}" -o /dev/null -w '%{http_code}' --max-time 4 "$url/" 2>/dev/null || true)"
         [ "$code" = 200 ] && return 0
         sleep 2
     done
@@ -896,7 +901,19 @@ verify_stack() {
     local url="$PANEL_URL" local_url="http://127.0.0.1:$PORT" soft=0
     local trust=()      # curl arguments naming the CA to verify against
 
-    if ! wait_for_page "$url"; then
+    ROUTE=()
+    local reached=no routed=no
+    if wait_for_page "$url" 12; then
+        reached=yes
+    else
+        case "$MODE" in
+            domain|ip|selfsigned)
+                ROUTE=(--connect-to "::127.0.0.1:")
+                if wait_for_page "$url" 33; then reached=yes; routed=yes; else ROUTE=(); fi ;;
+            *) if wait_for_page "$url" 33; then reached=yes; fi ;;
+        esac
+    fi
+    if [ "$reached" = no ]; then
         PAGE_STATE="NOT ANSWERING"
         FAIL_REASON="the sign-in page at $url did not answer within 90 seconds"
         warn "$FAIL_REASON."
@@ -905,6 +922,12 @@ verify_stack() {
         return 1
     fi
     PAGE_STATE="answers"
+    if [ "$routed" = yes ]; then
+        PAGE_STATE="answers, but only through this server's loopback: it cannot reach its own address"
+        warn "$url does not answer from this server itself (some clouds do not loop their own"
+        warn "public address back). The checks below went to the loopback address instead; they say"
+        warn "nothing about whether the outside can reach it."
+    fi
     ok "the sign-in page answers at $url"
 
     # Trust: curl WITHOUT -k, against the system store, or against the one CA
@@ -916,7 +939,7 @@ verify_stack() {
             local ca="$CACERT" verify
             if [ -z "$ca" ] && [ "$MODE" = selfsigned ]; then ca="$(fetch_internal_ca || true)"; fi
             [ -z "$ca" ] || trust=(--cacert "$ca")
-            verify="$(curl -sS --noproxy '*' "${trust[@]}" -o /dev/null -w '%{ssl_verify_result}' --max-time 6 "$url/" 2>/dev/null || true)"
+            verify="$(curl -sS --noproxy '*' ${ROUTE[@]+"${ROUTE[@]}"} "${trust[@]}" -o /dev/null -w '%{ssl_verify_result}' --max-time 6 "$url/" 2>/dev/null || true)"
             verify="${verify:-99}"
             if [ "$verify" = 0 ]; then
                 TLS_TRUSTED=yes
@@ -945,7 +968,9 @@ verify_stack() {
 
     if [ "$MODE" != tunnel ] && command -v openssl >/dev/null 2>&1; then
         local expiry
-        expiry="$(printf '' | openssl s_client -connect "$(hostport "$SITE" 443)" -servername "$SITE" 2>/dev/null \
+        local peer; peer="$(hostport "$SITE" 443)"
+        [ ${#ROUTE[@]} -eq 0 ] || peer="127.0.0.1:443"
+        expiry="$(printf '' | openssl s_client -connect "$peer" -servername "$SITE" 2>/dev/null \
             | openssl x509 -noout -enddate 2>/dev/null | sed 's/^notAfter=//' || true)"
         if [ -n "$expiry" ]; then TLS_STATE="$TLS_STATE; ends $expiry"; fi
     fi
@@ -970,7 +995,7 @@ verify_stack() {
                     LOGIN_ROUTE="on this server's loopback address ONLY: the certificate at $url could not be verified, so the password was not sent there"
                 fi ;;
         esac
-        reply="$(post_login "$target" "${trust[@]}")"
+        reply="$(post_login "$target" ${ROUTE[@]+"${ROUTE[@]}"} "${trust[@]}")"
         case "$reply" in
             *'"token"'*) LOGIN_STATE="signed in with the chosen password"; ok "$LOGIN_STATE, $LOGIN_ROUTE" ;;
             *)
@@ -1094,7 +1119,12 @@ summary() {
         printf '  When ready, switch with:  ./install.sh --production\n'
         printf '  Nothing is deleted: the staging account, certificates and volumes stay where they are.\n'
     elif [ "$ACME" = production ] && [ "$TLS_TRUSTED" = yes ] && [ "$RESTORED" != yes ]; then
-        printf '\n  Production certificate: issued by the real CA and verified from this server.\n'
+        if [ -n "$CACERT" ]; then
+            printf '\n  Production CA, verified against the CA file you gave. That shows the chain is\n'
+            printf '  consistent; whether browsers trust that CA is a separate question.\n'
+        else
+            printf '\n  Production certificate, verified from this server against its system CA store.\n'
+        fi
     fi
 
     if [ "$DO_START" = yes ] && [ "$PAGE_STATE" = answers ]; then

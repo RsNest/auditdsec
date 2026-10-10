@@ -16,8 +16,12 @@ next=0
 while :; do
     now=$(date +%s)
     if [ "$now" -ge "$next" ]; then
+        # --no-random-sleep-on-renew: without a terminal certbot waits a random
+        # time up to eight minutes before renewing, which is pointless here (the
+        # loop's own start time is already arbitrary) and long for a six-day
+        # certificate.
         if certbot renew --cert-name panel --standalone --non-interactive \
-                --deploy-hook /hooks/deploy.sh; then
+                --no-random-sleep-on-renew --deploy-hook /hooks/deploy.sh; then
             next=$((now + RENEW_EVERY))
         else
             echo "certbot renew FAILED; trying again in ${RETRY_AFTER}s" >&2
