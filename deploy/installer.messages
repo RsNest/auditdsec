@@ -359,3 +359,7 @@ the provider did not give an answer	RemoteProbe не ответил
 the provider did not answer	RemoteProbe не ответил
 admin / admin while setup is pending	admin / admin до завершения настройки
 the password that was just set	только что заданный пароль
+Telegram is optional. You can configure it later in the panel, under Alerts.	Telegram необязателен. Его можно настроить позже в панели, в разделе «Оповещения».
+To configure it now, make a bot with @BotFather, send /start to your bot,	Для настройки сейчас создайте бота через @BotFather, отправьте ему /start,
+then read your chat id from	затем узнайте свой chat id по адресу
+Configure Telegram now? (y/N)	Настроить Telegram сейчас? (д/Н)

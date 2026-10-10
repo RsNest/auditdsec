@@ -357,7 +357,8 @@
 
     /* alerts */
     R.alerts = el("div", { class: "tbl-wrap rv" });
-    R.alertSec = section("alerts", "sec", [head(t("alerts.label"), t("alerts.title")), R.alerts]);
+    R.telegram = el("div", { class: "tbl-wrap rv" });
+    R.alertSec = section("alerts", "sec", [head(t("alerts.label"), t("alerts.title")), R.telegram, R.alerts]);
 
     /* system */
     R.sysKv = el("div", { class: "kvs" });
@@ -764,7 +765,7 @@
     clear(R.checks);
     add(R.checks, [
       checkRow(!(s.auditd && s.auditd.healthy === false), "auditd"),
-      checkRow(!!(tg.token && tg.chat_ids && tg.chat_ids.length), "telegram"),
+      checkRow(!!(model.telegram && model.telegram.status === "connected"), "telegram"),
       checkRow(s.rules_loaded !== undefined ? !!s.rules_loaded : !!(s.counters && s.counters.events_24h > 0), "rules"),
       checkRow(!!(s.ban && s.ban.enforcing), "bans")
     ]);
@@ -793,6 +794,7 @@
 
   function paintAll() {
     model.status = S.status;
+    if (R.telegram) { A.Telegram.paint(R.telegram, model.telegram); }
     paintHero(); paintFold(); paintRoster(); paintBans(); paintAllow(); paintAlerts(); paintSystem(); paintClose();
     paintDeck(false);
   }
@@ -807,6 +809,7 @@
         A.api.bans().then(function (v) { model.bans = v || []; }, function () { }),
         A.api.allowlist().then(function (v) { model.allow = v || []; }, function () { }),
         A.api.config().then(function (v) { model.cfg = v; }, function () { }),
+        A.api.telegram().then(function (v) { model.telegram = v; }, function () { }),
         A.api.diagnostics().then(function (v) { model.diag = v; }, function () { })
       ]);
     }).then(paintAll);
@@ -916,6 +919,7 @@
   /* ---------------- lifecycle ---------------- */
 
   function stopAll() {
+    A.Telegram.close();
     stopPoll(); stopEngine();
     if (observer) { observer.disconnect(); observer = null; }
     document.documentElement.classList.remove("reveal-on");

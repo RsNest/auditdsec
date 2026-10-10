@@ -44,10 +44,11 @@ log:
   stdout: true
 
 telegram:
-  # Better set through AUDITDSEC_TG_TOKEN.
+  # Optional. Configure in the panel under Alerts, or seed via env.
+  # Saved state/telegram-settings.json overrides these initial values.
   token: ""
-  # Chats allowed to use the bot. The bot answers nobody else, and refuses to
-  # start when this list is empty.
+  # Chats allowed to use the bot. The bot answers nobody else. Without a token
+  # and recipients, Telegram stays inactive; event collection still works.
   chat_ids: []
   api_base: https://api.telegram.org
   # Alert from this severity up: info, warn or critical. Events below it are

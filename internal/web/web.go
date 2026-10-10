@@ -23,7 +23,7 @@ import (
 	"time"
 )
 
-//go:embed assets/index.html assets/app.css assets/core.js assets/feed.js assets/views.js assets/i18n.js assets/fonts/*.woff2
+//go:embed assets/index.html assets/app.css assets/core.js assets/feed.js assets/views.js assets/i18n.js assets/telegram.js assets/fonts/*.woff2
 var embedded embed.FS
 
 // contentSecurityPolicy allows exactly what the panel uses: its own scripts,

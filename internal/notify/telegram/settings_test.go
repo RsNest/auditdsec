@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/model"
+	"github.com/RsNest/auditdsec/internal/store"
 )
 
 func TestManagedPersistenceAndSecret(t *testing.T) {
@@ -112,5 +114,76 @@ func TestManagedCorruptSettingsFailClosed(t *testing.T) {
 	}
 	if err := m.Notify(context.Background(), model.Event{Kind: model.KindSudo}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestManagedReloadStopsPollingAndDisablesDelivery(t *testing.T) {
+	var clock atomic.Int64
+	clock.Store(time.Now().UnixNano())
+	var polls, sends atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getUpdates") {
+			io.Copy(io.Discard, r.Body)
+			polls.Add(1)
+			select {
+			case <-r.Context().Done():
+			case <-time.After(3 * time.Second):
+			}
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			sends.Add(1)
+		}
+		w.Write([]byte(`{"ok":true,"result":{"is_bot":true,"username":"live_bot"}}`))
+	}))
+	defer ts.Close()
+	dir := t.TempDir()
+	st, err := store.Open(store.Options{Dir: dir, MaxRecent: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m, err := NewManaged(Options{APIBase: ts.URL, Store: st, QuietFrom: -1, QuietTo: -1, Now: func() time.Time { return time.Unix(0, clock.Load()) }}, dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := Settings{Enabled: true, Token: "123:first", ChatIDs: []int64{42}, Kinds: []model.Kind{model.KindSudo}, MinSeverity: "warn", RatePerMinute: 20}
+	if _, err := m.Apply(context.Background(), s, "save"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { m.Run(ctx); close(done) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for polls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if polls.Load() == 0 {
+		t.Fatal("bot did not start polling")
+	}
+	clock.Add(int64(4 * time.Second))
+	s.Enabled = false
+	changed := make(chan error, 1)
+	go func() { _, err := m.Apply(context.Background(), s, "save"); changed <- err }()
+	select {
+	case err := <-changed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload did not cancel and drain the old poll")
+	}
+	if err := m.Notify(context.Background(), model.Event{Kind: model.KindSudo, Severity: model.SevCritical}); err != nil || sends.Load() != 0 {
+		t.Fatal("disabled bot delivered an event", err)
+	}
+	if m.View().Status != "disabled" {
+		t.Fatal(m.View())
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("manager did not stop")
 	}
 }

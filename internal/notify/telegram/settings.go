@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -273,9 +274,11 @@ func (m *Managed) Apply(ctx context.Context, s Settings, operation string) (Sett
 			}
 			for _, id := range s.ChatIDs {
 				if err := c.SendTo(ctx, id, "auditdsec: test notification / тестовое уведомление", nil); err != nil {
+					m.recordTest(s, err)
 					return m.View(), err
 				}
 			}
+			m.recordTest(s, nil)
 		}
 	}
 	if operation != "save" {
@@ -297,11 +300,33 @@ func (m *Managed) Apply(ctx context.Context, s Settings, operation string) (Sett
 	}
 	m.mu.Lock()
 	m.stopLocked()
+	if client != nil && m.client != nil && s.Token == m.settings.Token && slices.Equal(s.ChatIDs, m.settings.ChatIDs) {
+		m.client.mu.Lock()
+		client.lastDelivery, client.lastError = m.client.lastDelivery, m.client.lastError
+		m.client.mu.Unlock()
+	}
 	m.settings, m.client, m.username, m.lastError = s, client, username, ""
 	m.last = time.Time{}
 	m.startLocked(false)
 	m.mu.Unlock()
 	return m.View(), nil
+}
+
+func (m *Managed) recordTest(s Settings, err error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	// Testing an unsaved bot or different recipient list is not proof that
+	// the configured delivery path works.
+	if m.client == nil || s.Token != m.settings.Token || !slices.Equal(s.ChatIDs, m.settings.ChatIDs) {
+		return
+	}
+	m.client.mu.Lock()
+	defer m.client.mu.Unlock()
+	if err == nil {
+		m.client.lastDelivery, m.client.lastError = m.base.Now(), ""
+	} else {
+		m.client.lastError = "delivery_failed"
+	}
 }
 
 func writeSettings(path string, s Settings) error {

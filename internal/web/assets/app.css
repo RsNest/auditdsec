@@ -473,6 +473,12 @@ dialog::backdrop { background: rgba(5, 6, 8, .72); }
 .dlg { padding: 26px; display: grid; gap: 22px; }
 .dlg p { font-size: 16px; }
 .dlg .btns { justify-content: flex-end; margin: 0; }
+.tg-dialog { width: min(740px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); }
+.tg-check { display: flex; align-items: center; gap: 12px; font-size: 14px; }
+.tg-check input { flex: none; accent-color: var(--amber); width: 18px; height: 18px; }
+.tg-kinds { border: 1px solid var(--line); padding: 16px; display: grid; gap: 12px; }
+.tg-controls { border: 0; padding: 0; display: grid; gap: 16px; min-width: 0; }
+.tg-dialog .form-row > .fld { min-width: 0; flex: 1 1 180px; }
 .toasts { position: fixed; inset: auto 16px 16px; z-index: 80; display: grid; gap: 8px; justify-items: center; pointer-events: none; }
 .toast { max-width: 440px; padding: 11px 18px; background: var(--bg2); border: 1px solid var(--line); border-radius: 999px; font-size: 13px; }
 .toast[data-tone="err"] { border-color: var(--red); }

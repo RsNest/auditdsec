@@ -1142,15 +1142,18 @@ ask_telegram() {
     installer_lines <<EOF
 
 Telegram
-The agent needs a bot before it will start: that is where the alerts go, and
-the panel is an addition to it, not a replacement. Make one with @BotFather,
-then write to your bot and read the chat id from
+Telegram is optional. You can configure it later in the panel, under Alerts.
+To configure it now, make a bot with @BotFather, send /start to your bot,
+then read your chat id from
 https://api.telegram.org/bot<TOKEN>/getUpdates
 
 EOF
     if ! interactive; then
-        die "AUDITDSEC_TG_TOKEN and AUDITDSEC_TG_CHAT_ID must be in $ENV_FILE"
+        return 0
     fi
+    local choice
+    choice="$(ask 'Configure Telegram now? (y/N)' 'n')"
+    case "$choice" in y|Y|д|Д) ;; *) return 0 ;; esac
     [ -n "$token" ] || token="$(ask_secret 'Telegram bot token (not shown)')"
     [ -n "$token" ] || die "the token is required"
     [ -n "$chat" ] || chat="$(ask 'Your chat id' '')"

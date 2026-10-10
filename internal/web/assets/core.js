@@ -292,6 +292,8 @@
     mute: function (hours) { return request("POST", "/mute", { hours: hours }); },
     unmute: function () { return request("DELETE", "/mute"); },
     config: function () { return request("GET", "/config"); },
+    telegram: function () { return request("GET", "/settings/telegram"); },
+    telegramAction: function (operation, draft) { return request(operation === "save" ? "PUT" : "POST", "/settings/telegram" + (operation === "save" ? "" : "/" + operation), draft); },
     diagnostics: function () { return request("GET", "/diagnostics"); }
   };
 
