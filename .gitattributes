@@ -1,0 +1,3 @@
+# GitHub fills this in when it builds a source archive (zip / tar.gz), so an
+# installer run from a download knows which commit it is, and so which image.
+deploy/source-commit export-subst

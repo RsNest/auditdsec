@@ -21,6 +21,8 @@
 # logged with the exact nft command and nothing is blocked.
 services:
   auditdsec:
+    # The enforcing image of the same commit (see docker-compose.yml).
+    image: ${AUDITDSEC_ENFORCE_IMAGE:-auditdsec-enforce:local}
     build:
       target: enforce
     network_mode: host

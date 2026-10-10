@@ -1,0 +1,139 @@
+# Checks every change, and publishes the images ./install.sh downloads.
+#
+#   pull request        tests, then a build of every image for both platforms,
+#                       nothing published
+#   push to main        tests, then the images are built and published to
+#                       ghcr.io/rsnest/{auditdsec,auditdsec-enforce,auditdsec-probe}
+#                       with the tags sha-<full commit> and main
+#   tag vX.Y.Z          the same, tagged sha-<commit>, X.Y.Z and X.Y
+#
+# The installer always asks for sha-<commit of the code it was run from>, so
+# the image is exactly the code next to it. After publishing, the last job
+# pulls the image WITHOUT credentials: if the package is not public, the
+# workflow fails instead of leaving users with "denied".
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: rsnest
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: go vet
+        run: go vet ./...
+      - name: go test (race)
+        run: go test -race -count=1 ./...
+      - name: certtool tests
+        run: |
+          python3 -m pip install --quiet "cryptography==44.0.2"
+          python3 -B -m unittest deploy/test_certtool.py
+      - name: shellcheck
+        run: shellcheck -S warning install.sh deploy/*.sh scripts/e2e/stage0/*.sh
+
+  images:
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: auditdsec
+            target: minimal
+          - name: auditdsec-enforce
+            target: enforce
+          - name: auditdsec-probe
+            target: probe
+    steps:
+      - uses: actions/checkout@v4
+      - name: version
+        id: v
+        run: |
+          base="$(cat VERSION)"
+          case "$GITHUB_REF" in
+            refs/tags/v*) version="${GITHUB_REF#refs/tags/v}" ;;
+            *)            version="${base}-dev+${GITHUB_SHA::12}" ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.name }}
+          tags: |
+            type=sha,prefix=sha-,format=long
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.v.outputs.version }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ steps.v.outputs.date }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  # What a user of the installer will do: pull without any login, on both
+  # platforms, and find the very commit inside.
+  anonymous-pull:
+    needs: images
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - name: pull without credentials and check the commit
+        run: |
+          docker logout ghcr.io || true
+          for name in auditdsec auditdsec-enforce auditdsec-probe; do
+            ref="ghcr.io/${OWNER}/${name}:sha-${GITHUB_SHA}"
+            docker manifest inspect "$ref" > /dev/null || {
+              echo "::error::$ref cannot be read anonymously. Make the package public: https://github.com/users/RsNest/packages/container/${name}/settings"
+              exit 1
+            }
+            for platform in linux/amd64 linux/arm64; do
+              docker pull --quiet --platform "$platform" "$ref"
+              rev="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$ref")"
+              [ "$rev" = "$GITHUB_SHA" ] || { echo "::error::$ref ($platform) says revision $rev"; exit 1; }
+            done
+          done
+          docker run --rm --platform linux/arm64 "ghcr.io/${OWNER}/auditdsec:sha-${GITHUB_SHA}" version
+          docker run --rm "ghcr.io/${OWNER}/auditdsec:sha-${GITHUB_SHA}" version | grep -q "commit ${GITHUB_SHA}"

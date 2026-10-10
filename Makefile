@@ -8,7 +8,7 @@
 #   make preview    fold the panel assets into one file for design review
 
 BINARY  := auditdsec
-VERSION ?= 0.1.0
+VERSION ?= $(shell cat VERSION)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
@@ -52,7 +52,7 @@ check: fmt-check vet test test-py
 docker:
 	docker build -f deploy/Dockerfile \
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) \
-		-t $(BINARY):$(VERSION) -t $(BINARY):latest .
+		-t $(BINARY):local .
 
 # One self-contained page with demo data, for looking at the panel without
 # running the agent. Not shipped and not embedded.
