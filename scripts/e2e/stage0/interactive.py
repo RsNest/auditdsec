@@ -3,8 +3,8 @@
 
     scripts/e2e/stage0/interactive.py
 
-Run 1: a new installation. The first question must be "where should the
-panel open"; then the address, the RemoteProbe provider, the port (automatic).
+Run 1: a new installation. Language comes first, then "where should the
+panel open", the address, the RemoteProbe provider, the port (automatic).
 Run 2: the same installation again, moving the panel to a port typed by hand.
 Needs the stand (lab.sh up) and is run on the same disposable machine.
 """
@@ -73,6 +73,7 @@ def check(desc, cond):
 
 print("== interactive: new installation")
 first = [
+    ("Ваш выбор / Your choice", "2"),
     ("Choose 1 or 2", "2"),
     ("Type this server's public address", VPS),
     ("RemoteProbe URL", "https://127.0.0.1:8443"),
@@ -81,7 +82,8 @@ first = [
     ("E-mail for certificate expiry warnings", ""),
 ]
 text, rc, order, answered = drive(first, "interactive-1.log")
-check("the first question is where the panel opens", order[:1] == ["Choose 1 or 2"])
+check("the first question is the language", order[:1] == ["Ваш выбор / Your choice"])
+check("the next question is where the panel opens", order[1:2] == ["Choose 1 or 2"])
 check("the menu offers a domain and a public IP, no tunnel", "On a domain" in text and "public IP address" in text and "SSH tunnel" not in text)
 check("the address came before the port, the port before the e-mail",
       order.index("Type this server's public address") < order.index("Port: 1 automatic, 2 given by you") < order.index("E-mail for certificate expiry warnings"))
@@ -100,6 +102,7 @@ second = [
     ("E-mail for certificate expiry warnings", ""),
 ]
 text, rc, order, answered = drive(second, "interactive-2.log")
+check("the saved language is used without asking", "Ваш выбор / Your choice" not in text)
 check("no RemoteProbe question: the saved provider is used", "RemoteProbe URL" not in text)
 check("the port typed by hand is used", f"Link: https://{VPS}:27431" in text)
 check("published", "The panel is published" in text)

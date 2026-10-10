@@ -24,7 +24,7 @@ expect()         { local d="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$d";
 LABEL=""
 inst() { # LABEL ARGS... — run the installer in the work copy, keep the output
     LABEL="$1"; shift
-    OUT="$(cd "$WORK" && ./install.sh --yes "$@" 2>&1)"; RC=$?
+    OUT="$(cd "$WORK" && ./install.sh --lang en --yes "$@" 2>&1)"; RC=$?
     printf '%s\n' "$OUT" > "$OUTDIR/$LABEL.log"
 }
 last_link() { grep -E '^  Link' <<<"$OUT" | tail -n 1; }

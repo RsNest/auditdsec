@@ -6,9 +6,10 @@
 #
 # The order is fixed:
 #
+#   0. installer language (Russian or English; saved for subsequent runs).
 #   1. preflight: Linux, a supported CPU, Docker with Compose, curl; what an
-#      earlier installation left (it is kept). The agent image is built here,
-#      because the checks below run inside it.
+#      earlier installation left (it is kept). Download the published image
+#      of this commit; the checks below run inside it.
 #   2. where the panel opens: on a domain or on this server's public IP
 #   3. the domain's public DNS (or the address) is checked against this server
 #   4. the public HTTPS port: picked automatically (443 first, then up to 16
@@ -88,14 +89,20 @@ else
     B=""; R=""; G=""; Y=""; N=""
 fi
 
-say()  { printf '%s\n' "$*"; }
-step() { printf '\n%s==>%s %s\n' "$B" "$N" "$*"; }
-warn() { printf '%s!%s  %s\n' "$Y" "$N" "$*" >&2; }
-die()  { printf '%serror:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
-ok()   { printf '%s/%s  %s\n' "$G" "$N" "$*"; }
+# shellcheck source=deploy/installer-i18n.sh
+source deploy/installer-i18n.sh
+INSTALLER_LANG=ru
+installer_choose_language "$@"
+installer_load_messages
+
+say()  { printf '%s\n' "$(installer_text "$*")"; }
+step() { printf '\n%s==>%s %s\n' "$B" "$N" "$(installer_text "$*")"; }
+warn() { printf '%s!%s  %s\n' "$Y" "$N" "$(installer_text "$*")" >&2; }
+die()  { printf '%s%s:%s %s\n' "$R" "$(installer_text 'error')" "$N" "$(installer_text "$*")" >&2; exit 1; }
+ok()   { printf '%s/%s  %s\n' "$G" "$N" "$(installer_text "$*")"; }
 
 usage() {
-    cat <<'EOF'
+    installer_lines <<'EOF'
 Usage: ./install.sh [options]
 
 With no options it asks what it needs, in this order: domain or IP, the
@@ -122,6 +129,7 @@ The check from outside
                                        reported as published.
 
 Other settings
+  --lang ru|en                        installer language; saved independently of UI/Telegram
   --upstream-port N                    the agent's own port on loopback (default 9477;
                                        never published)
   --port N                             old name of --upstream-port. It was always the
@@ -167,6 +175,7 @@ EOF
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --lang) shift 2 ;;  # already validated before the first output
         --mode) MODE="${2:-}"; shift 2 ;;
         --site) SITE="${2:-}"; shift 2 ;;
         --email) EMAIL="${2:-}"; shift 2 ;;
@@ -201,6 +210,7 @@ interactive() { [ -t 0 ] && [ "$ASSUME_YES" = no ]; }
 # ask PROMPT DEFAULT -> answer on stdout
 ask() {
     local prompt="$1" default="${2:-}" reply=""
+    prompt="$(installer_text "$prompt")"
     if ! interactive; then
         printf '%s' "$default"
         return
@@ -216,6 +226,7 @@ ask() {
 # ask_secret PROMPT -> answer on stdout, never echoed
 ask_secret() {
     local prompt="$1" reply=""
+    prompt="$(installer_text "$prompt")"
     read -r -s -p "$prompt: " reply </dev/tty || true
     printf '\n' >&2
     printf '%s' "$reply"
@@ -224,8 +235,11 @@ ask_secret() {
 confirm() {
     local prompt="$1" reply=""
     interactive || return 0
-    read -r -p "$prompt [Y/n]: " reply </dev/tty || true
-    case "$reply" in [nN]*) return 1 ;; *) return 0 ;; esac
+    prompt="$(installer_text "$prompt")"
+    local choices='Y/n'
+    [ "$INSTALLER_LANG" != ru ] || choices='Д/н'
+    read -r -p "$prompt [$choices]: " reply </dev/tty || true
+    case "$reply" in [nNнН]*) return 1 ;; *) return 0 ;; esac
 }
 
 # ------------------------------------------------------------------ errors --
@@ -266,14 +280,14 @@ retry_command() {
 report() {
     local code="$1" endpoint="$2" check="$3" cause="$4" fix="$5"
     [ -n "$FAIL_CODE" ] || FAIL_CODE="$code"
-    [ -n "$FAIL_REASON" ] || FAIL_REASON="$code: $cause"
+    [ -n "$FAIL_REASON" ] || FAIL_REASON="$code: $(installer_text "$cause")"
     {
-        printf '\n%sFAILED: %s%s\n' "$R$B" "$code" "$N"
-        printf '  endpoint: %s\n' "$endpoint"
-        printf '  check:    %s\n' "$check"
-        printf '  result:   %s\n' "$cause"
-        printf '  fix:      %s\n' "$fix"
-        printf '  retry:    %s\n' "$(retry_command)"
+        installer_printf '\n%sFAILED: %s%s\n' "$R$B" "$code" "$N"
+        installer_printf '  endpoint: %s\n' "$endpoint"
+        installer_printf '  check:    %s\n' "$(installer_text "$check")"
+        installer_printf '  result:   %s\n' "$(installer_text "$cause")"
+        installer_printf '  fix:      %s\n' "$(installer_text "$fix")"
+        installer_printf '  retry:    %s\n' "$(retry_command)"
     } >&2
 }
 
@@ -281,7 +295,7 @@ report() {
 # (the EXIT trap) and stop with the code's status.
 abort() {
     report "$@"
-    printf '\n%sThe panel was NOT published.%s Nothing that was working before was removed.\n' "$R$B" "$N" >&2
+    installer_printf '\n%sThe panel was NOT published.%s Nothing that was working before was removed.\n' "$R$B" "$N" >&2
     exit "$(code_status "$1")"
 }
 
@@ -608,9 +622,9 @@ choose_mode() {
     if [ "$previous" = tunnel ] || [ "$previous" = selfsigned ]; then
         if confirm "This installation uses --mode $previous. Keep it?"; then MODE="$previous"; return 0; fi
     fi
-    cat <<EOF
+    installer_lines <<EOF
 
-${B}Where should the panel open?${N}
+Where should the panel open?
 
   1) On a domain        https://panel.example.com
      A domain whose A/AAAA records point at this server.
@@ -746,9 +760,9 @@ setup_probe() {
         return 0
     fi
     if [ -z "$PROBE_URL" ] && interactive; then
-        cat <<EOF
+        installer_lines <<EOF
 
-${B}Check from outside${N}
+Check from outside
 A check made from this server proves nothing about the internet: a cloud
 firewall, NAT or the provider's security group are only seen from outside.
 The installer asks a RemoteProbe provider to connect here: cmd/auditdsec-probe,
@@ -936,9 +950,9 @@ select_port() {
     fi
     if [ -z "$HTTPS_PORT" ]; then
         if interactive; then
-            cat <<EOF
+            installer_lines <<EOF
 
-${B}Panel port${N}
+Panel port
 This is the public HTTPS port in the link. 443 lets the link go without a
 port; another port works just as well, and the certificate is the same.
 
@@ -1125,9 +1139,9 @@ ask_telegram() {
     if [ -n "$token" ] && [ -n "$chat" ]; then
         return 0
     fi
-    cat <<EOF
+    installer_lines <<EOF
 
-${B}Telegram${N}
+Telegram
 The agent needs a bot before it will start: that is where the alerts go, and
 the panel is an addition to it, not a replacement. Make one with @BotFather,
 then write to your bot and read the chat id from
@@ -1203,6 +1217,7 @@ write_config() {
     [ "$PORT_DEPRECATED" = no ] || warn "--port is the old name of --upstream-port: the agent's loopback port, not the public one."
 
     env_set PANEL_MODE "$MODE"
+    env_set PANEL_INSTALLER_LANG "$INSTALLER_LANG"
     env_set PANEL_ENFORCE "$ENFORCE"
     env_set PANEL_UPSTREAM_PORT "$PORT"
     env_unset PANEL_PORT
@@ -1486,7 +1501,7 @@ cleanup() {
     # then failed before starting anything: put it back as it was.
     if [ "$STACK_STARTED" = no ] && [ ${#STOPPED_OWN[@]} -gt 0 ]; then
         $DOCKER start "${STOPPED_OWN[@]}" >/dev/null 2>&1 \
-            && printf 'The previous proxy (%s) was started again.\n' "${STOPPED_OWN[*]}" >&2 || true
+            && installer_printf 'The previous proxy (%s) was started again.\n' "${STOPPED_OWN[*]}" >&2 || true
     fi
 }
 trap cleanup EXIT
@@ -1697,7 +1712,7 @@ verify_stack() {
             *'"setup":true'*)
                 LOGIN_STATE="first-time setup is waiting: admin / admin opens only the screen where the owner chooses a login and password"
                 ok "admin / admin leads to first-time setup only" ;;
-            *'"token"'*) LOGIN_STATE="signed in with the password from --password-file"; ok "$LOGIN_STATE, $LOGIN_ROUTE" ;;
+            *'"token"'*) LOGIN_STATE="signed in with the password from --password-file"; ok "$(installer_text "$LOGIN_STATE"), $(installer_text "$LOGIN_ROUTE")" ;;
             *)
                 LOGIN_STATE="SIGN-IN FAILED"
                 report bootstrap_persistence_failed "$target/api/v1/login" "signing in $LOGIN_ROUTE" \
@@ -1837,102 +1852,102 @@ decide_published() {
 summary() {
     local line
     decide_published
-    line="$(printf '%*s' 70 '' | tr ' ' '-')"
-    printf '\n%s\n' "$line"
+    line="$(installer_printf '%*s' 70 '' | tr ' ' '-')"
+    installer_printf '\n%s\n' "$line"
     if [ "$RESTORED" = yes ] && [ "$RESTORE" = yes ]; then
-        printf '%sThe last verified configuration is running again.%s\n' "$B" "$N"
+        installer_printf '%sThe last verified configuration is running again.%s\n' "$B" "$N"
     elif [ "$RESTORED" = yes ]; then
-        printf '%sThe new settings did not work; the previous ones are running again.%s\n' "$R$B" "$N"
+        installer_printf '%sThe new settings did not work; the previous ones are running again.%s\n' "$R$B" "$N"
     elif [ "$PUBLISHED" = yes ] && [ "$SETUP_STATE" = bootstrap ]; then
-        printf '%sThe panel is published and waits for first-time setup.%s\n' "$G$B" "$N"
+        installer_printf '%sThe panel is published and waits for first-time setup.%s\n' "$G$B" "$N"
     elif [ "$PUBLISHED" = yes ]; then
-        printf '%sThe panel is published.%s\n' "$G$B" "$N"
+        installer_printf '%sThe panel is published.%s\n' "$G$B" "$N"
     elif [ -n "$FAIL_CODE" ]; then
-        printf '%sNOT published: %s%s\n' "$R$B" "$FAIL_CODE" "$N"
+        installer_printf '%sNOT published: %s%s\n' "$R$B" "$FAIL_CODE" "$N"
     elif [ "$DO_START" != yes ]; then
-        printf '%sConfigured, not started (--no-start). Not published.%s\n' "$B" "$N"
+        installer_printf '%sConfigured, not started (--no-start). Not published.%s\n' "$B" "$N"
     elif [ "$DO_VERIFY" != yes ]; then
-        printf '%sStarted, not checked (--no-verify). Not reported as published.%s\n' "$Y$B" "$N"
+        installer_printf '%sStarted, not checked (--no-verify). Not reported as published.%s\n' "$Y$B" "$N"
     elif [ "$MODE" = tunnel ]; then
-        printf '%sThe panel is up on this server'"'"'s loopback (SSH tunnel mode).%s\n' "$G$B" "$N"
+        installer_printf '%sThe panel is up on this server'"'"'s loopback (SSH tunnel mode).%s\n' "$G$B" "$N"
     elif [ "$ACME" = staging ]; then
-        printf '%sStarted on the Let'"'"'s Encrypt STAGING CA: a dry run, not published.%s\n' "$Y$B" "$N"
+        installer_printf '%sStarted on the Let'"'"'s Encrypt STAGING CA: a dry run, not published.%s\n' "$Y$B" "$N"
     elif [ "$MODE" = selfsigned ]; then
-        printf '%sStarted with a self-signed certificate: every browser warns. Not published.%s\n' "$Y$B" "$N"
+        installer_printf '%sStarted with a self-signed certificate: every browser warns. Not published.%s\n' "$Y$B" "$N"
     elif [ "$NO_EXTERNAL" = yes ]; then
-        printf '%sStarted, but NOT verified from outside (--no-external-check). Not published.%s\n' "$Y$B" "$N"
+        installer_printf '%sStarted, but NOT verified from outside (--no-external-check). Not published.%s\n' "$Y$B" "$N"
     else
-        printf '%sStarted, but not published.%s\n' "$Y$B" "$N"
+        installer_printf '%sStarted, but not published.%s\n' "$Y$B" "$N"
     fi
-    printf '%s\n\n' "$line"
+    installer_printf '%s\n\n' "$line"
 
     if [ -n "$FAIL_REASON" ]; then
-        printf '  What went wrong: %s\n' "$FAIL_REASON"
-        [ "$RESTORED" != yes ] || printf '  The failed settings are in %s.failed (same permissions as %s).\n' "$ENV_FILE" "$ENV_FILE"
-        printf '  Run again after fixing it: %s\n\n' "$(retry_command)"
+        installer_printf '  What went wrong: %s\n' "$FAIL_REASON"
+        [ "$RESTORED" != yes ] || installer_printf '  The failed settings are in %s.failed (same permissions as %s).\n' "$ENV_FILE" "$ENV_FILE"
+        installer_printf '  Run again after fixing it: %s\n\n' "$(retry_command)"
     fi
 
-    printf '  Page:      %s\n' "${PAGE_STATE:-not checked}"
-    printf '  Sign-in:   %s\n' "${LOGIN_STATE:-not checked}"
-    [ -z "$LOGIN_ROUTE" ] || printf '             sent %s\n' "$LOGIN_ROUTE"
+    installer_printf '  Page:      %s\n' "$(installer_text "${PAGE_STATE:-not checked}")"
+    installer_printf '  Sign-in:   %s\n' "$(installer_text "${LOGIN_STATE:-not checked}")"
+    [ -z "$LOGIN_ROUTE" ] || installer_printf '             sent %s\n' "$(installer_text "$LOGIN_ROUTE")"
     if [ "$MODE" != tunnel ]; then
-        printf '  Port:      %s (%s)\n' "$HTTPS_PORT" "$([ "$HTTPS_SOURCE" = manual ] && echo 'given by you' || { [ "$HTTPS_SOURCE" = auto ] && echo 'picked automatically' || echo 'kept'; })"
-        printf '  Outside:   port %s; panel %s\n' "${EXT_PORT_STATE:-not checked}" "${EXT_TLS_STATE:-not checked}"
-        [ -z "$ACME_PORT_STATE" ] || printf '  Challenge: %s\n' "$ACME_PORT_STATE"
-        printf '  TLS:       %s\n' "${TLS_STATE:-not checked}"
-        [ -z "$NOT_AFTER" ] || printf '  Expires:   %s\n' "$NOT_AFTER"
+        installer_printf '  Port:      %s (%s)\n' "$HTTPS_PORT" "$([ "$HTTPS_SOURCE" = manual ] && installer_text 'given by you' || { [ "$HTTPS_SOURCE" = auto ] && installer_text 'picked automatically' || installer_text 'kept'; })"
+        installer_printf '  Outside:   port %s; panel %s\n' "$(installer_text "${EXT_PORT_STATE:-not checked}")" "$(installer_text "${EXT_TLS_STATE:-not checked}")"
+        [ -z "$ACME_PORT_STATE" ] || installer_printf '  Challenge: %s\n' "$(installer_text "$ACME_PORT_STATE")"
+        installer_printf '  TLS:       %s\n' "$(installer_text "${TLS_STATE:-not checked}")"
+        [ -z "$NOT_AFTER" ] || installer_printf '  Expires:   %s\n' "$NOT_AFTER"
     fi
-    [ -z "$RENEW_STATE" ] || printf '  Renewal:   %s\n' "$RENEW_STATE"
+    [ -z "$RENEW_STATE" ] || installer_printf '  Renewal:   %s\n' "$(installer_text "$RENEW_STATE")"
     case "$MODE" in
-        domain) printf '             Caddy renews the certificate itself, about 30 days before it ends.\n' ;;
-        ip)     printf '             Address certificates last about 6 days; the certbot container renews them\n'
-                printf '             and checks every minute that port %s serves the file on disk. Port 80\n' "$HTTPS_PORT"
-                printf '             must stay open and unused for the renewals.\n' ;;
+        domain) installer_printf '             Caddy renews the certificate itself, about 30 days before it ends.\n' ;;
+        ip)     installer_printf '             Address certificates last about 6 days; the certbot container renews them\n'
+                installer_printf '             and checks every minute that port %s serves the file on disk. Port 80\n' "$HTTPS_PORT"
+                installer_printf '             must stay open and unused for the renewals.\n' ;;
         selfsigned)
-                printf '  Trust:     each browser warns. Compare the fingerprint it shows with:\n'
-                printf '               printf "" | openssl s_client -connect %s 2>/dev/null | openssl x509 -noout -fingerprint -sha256\n' "$(hostport "$SITE" "$HTTPS_PORT")" ;;
+                installer_printf '  Trust:     each browser warns. Compare the fingerprint it shows with:\n'
+                installer_printf '               printf "" | openssl s_client -connect %s 2>/dev/null | openssl x509 -noout -fingerprint -sha256\n' "$(hostport "$SITE" "$HTTPS_PORT")" ;;
     esac
     if [ "$ACME" = staging ] && [ "$RESTORED" != yes ]; then
-        printf '\n  %sSTAGING.%s Browsers do not trust this certificate, on purpose. Switch with:\n' "$Y$B" "$N"
-        printf '    ./install.sh --production     (nothing is deleted)\n'
+        installer_printf '\n  %sSTAGING.%s Browsers do not trust this certificate, on purpose. Switch with:\n' "$Y$B" "$N"
+        installer_printf '    ./install.sh --production     (nothing is deleted)\n'
     fi
 
-    printf '\n  Diagnostics:\n'
-    printf '    %s ps\n' "$(compose_prefix)"
-    printf '    %s logs --tail 80 auditdsec\n' "$(compose_prefix)"
-    case "$MODE" in domain|ip|selfsigned) printf '    %s logs --tail 40 caddy\n' "$(compose_prefix)" ;; esac
-    [ "$MODE" != ip ] || printf '    %s exec certbot python3 /hooks/certtool.py status\n' "$(compose_prefix)"
+    installer_printf '\n  Diagnostics:\n'
+    installer_printf '    %s ps\n' "$(compose_prefix)"
+    installer_printf '    %s logs --tail 80 auditdsec\n' "$(compose_prefix)"
+    case "$MODE" in domain|ip|selfsigned) installer_printf '    %s logs --tail 40 caddy\n' "$(compose_prefix)" ;; esac
+    [ "$MODE" != ip ] || installer_printf '    %s exec certbot python3 /hooks/certtool.py status\n' "$(compose_prefix)"
     local img facts
     img="${IMAGE:-$(env_get AUDITDSEC_IMAGE)}"
     if [ -n "$img" ]; then
         facts="$(image_facts "$img")"
-        printf '  Image:     %s\n' "$img"
-        printf '             version %s, commit %s\n' "${facts%%|*}" "$(printf '%s' "$facts" | cut -d'|' -f2)"
-        printf '             digest %s\n' "${facts##*|}"
-        [ -z "$(env_get PANEL_IMAGE_PREVIOUS)" ] || printf '             previous image (for going back): %s\n' "$(env_get PANEL_IMAGE_PREVIOUS)"
+        installer_printf '  Image:     %s\n' "$img"
+        installer_printf '             version %s, commit %s\n' "${facts%%|*}" "$(installer_printf '%s' "$facts" | cut -d'|' -f2)"
+        installer_printf '             digest %s\n' "${facts##*|}"
+        [ -z "$(env_get PANEL_IMAGE_PREVIOUS)" ] || installer_printf '             previous image (for going back): %s\n' "$(env_get PANEL_IMAGE_PREVIOUS)"
     fi
-    printf '  Run ./install.sh again to change anything: data, certificates and credentials are kept.\n'
-    [ ! -s "$LAST_GOOD" ] || printf '  Back to the last verified configuration: ./install.sh --restore\n'
+    installer_printf '  Run ./install.sh again to change anything: data, certificates and credentials are kept.\n'
+    [ ! -s "$LAST_GOOD" ] || installer_printf '  Back to the last verified configuration: ./install.sh --restore\n'
 
     # The sign-in and the link come last, so they are what stays on screen.
-    printf '\n'
+    installer_printf '\n'
     if [ "$SETUP_STATE" = bootstrap ] && [ "$RESTORED" != yes ] && [ "$DO_START" = yes ]; then
-        printf '  First login:  %sadmin%s / %sadmin%s\n' "$B" "$N" "$B" "$N"
-        printf '                It opens only the mandatory setup screen: choose your login (or tick\n'
-        printf '                "keep admin") and a password of 8+ characters with a lower-case and an\n'
-        printf '                upper-case letter. Do it now: whoever signs in first can choose them.\n'
+        installer_printf '  First login:  %sadmin%s / %sadmin%s\n' "$B" "$N" "$B" "$N"
+        installer_printf '                It opens only the mandatory setup screen: choose your login (or tick\n'
+        installer_printf '                "keep admin") and a password of 8+ characters with a lower-case and an\n'
+        installer_printf '                upper-case letter. Do it now: whoever signs in first can choose them.\n'
     elif [ "$SETUP_STATE" = ready ] || [ -n "$(env_get AUDITDSEC_WEB_PASSWORD_HASH)" ]; then
-        printf '  Sign in with the login and password you chose (admin / admin no longer works).\n'
+        installer_printf '  Sign in with the login and password you chose (admin / admin no longer works).\n'
     fi
     if [ "$MODE" = tunnel ]; then
-        printf '  On your computer, run and leave open:  %s\n' "$(ssh_command)"
+        installer_printf '  On your computer, run and leave open:  %s\n' "$(ssh_command)"
     fi
     if [ "$PUBLISHED" = yes ] || [ "$MODE" = tunnel ] || [ "$RESTORED" = yes ]; then
-        printf '  Link: %s%s%s\n' "$B" "$PANEL_URL" "$N"
+        installer_printf '  Link: %s%s%s\n' "$B" "$PANEL_URL" "$N"
     else
-        printf '  Link (NOT published): %s\n' "$PANEL_URL"
+        installer_printf '  Link (NOT published): %s\n' "$PANEL_URL"
     fi
-    printf '%s\n' "$line"
+    installer_printf '%s\n' "$line"
 }
 
 # -------------------------------------------------------------------- main ---

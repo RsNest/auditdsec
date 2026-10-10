@@ -50,6 +50,8 @@ jobs:
           python3 -B -m unittest deploy/test_certtool.py
       - name: shellcheck
         run: shellcheck -S warning install.sh deploy/*.sh scripts/e2e/stage0/*.sh
+      - name: installer language
+        run: bash scripts/check-installer-language.sh
 
   images:
     needs: test

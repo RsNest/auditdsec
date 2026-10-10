@@ -1,0 +1,361 @@
+# English message or printf template<TAB>Russian translation.
+# %s captures dynamic data; preserve their number and order in translations.
+error	ошибка
+Usage: ./install.sh [options]	Использование: ./install.sh [параметры]
+With no options it asks what it needs, in this order: domain or IP, the	Без параметров задаёт вопросы: сначала язык, затем домен или IP,
+address, the HTTPS port, then what the certificate needs.	адрес, HTTPS-порт и условия выпуска сертификата.
+Where the panel opens	Публикация панели
+  --mode domain|ip                     on a domain, or on this server's public IP	  --mode domain|ip                     на домене или публичном IP сервера
+  --site NAME|ADDRESS                  the domain, or the public address	  --site NAME|ADDRESS                  домен или публичный IP
+  --public-ip ADDRESS[,ADDRESS]        this server's public address(es), when they	  --public-ip ADDRESS[,ADDRESS]        публичные адреса этого сервера, если они
+                                       cannot be found (NAT, a floating address)	                                       не определяются (NAT, плавающий IP)
+  --https-port N|auto                  the PUBLIC HTTPS port of the panel. auto (the	  --https-port N|auto                  ПУБЛИЧНЫЙ HTTPS-порт панели. auto
+                                       default on a new setup) tries 443, then up to 16	                                       (по умолчанию) проверяет 443, затем до 16
+                                       random high ports. A port you give is never	                                       случайных высоких портов. Указанный порт
+                                       replaced: if it does not work, the run stops.	                                       не подменяется: при ошибке установка останавливается.
+  --email ADDRESS                      where Let's Encrypt sends expiry warnings	  --email ADDRESS                      e-mail для уведомлений Let's Encrypt
+The check from outside	Внешняя проверка
+  --probe-url URL                      a RemoteProbe provider: cmd/auditdsec-probe running	  --probe-url URL                      RemoteProbe: cmd/auditdsec-probe, работающий
+                                       on ANOTHER machine. It connects to this server's	                                       на ДРУГОЙ машине. Подключается к адресу
+                                       address and port and reports what it saw.	                                       и порту сервера и сообщает результат.
+  --probe-token-file PATH              file with that provider's token	  --probe-token-file PATH              файл с токеном RemoteProbe
+  --probe-cacert FILE                  CA file for the provider's own certificate	  --probe-cacert FILE                  CA для сертификата самого RemoteProbe
+  --no-external-check                  skip it. A technical mode: the panel is then never	  --no-external-check                  пропустить внешнюю проверку; подтверждённая
+                                       reported as published.	                                       публикация панели не заявляется.
+Other settings	Другие настройки
+  --lang ru|en                        installer language; saved independently of UI/Telegram	  --lang ru|en                        язык установщика; сохраняется отдельно от UI/Telegram
+  --upstream-port N                    the agent's own port on loopback (default 9477;	  --upstream-port N                    внутренний порт агента на loopback (9477;
+                                       never published)	                                       не публикуется наружу)
+  --port N                             old name of --upstream-port. It was always the	  --port N                             старое имя --upstream-port: внутренний
+                                       agent's loopback port, not the public one.	                                       порт агента, а не публичный порт панели.
+  --login NAME / --password-file PATH  install your own login and password instead of the	  --login NAME / --password-file PATH  задать свой логин и пароль вместо
+                                       first-time setup in the browser	                                       первоначальной настройки в браузере
+  --enforce / --no-enforce             apply bans with nftables, or only record them	  --enforce / --no-enforce             применять баны через nftables или только записывать
+                                       (default: only record)	                                       (по умолчанию: только записывать)
+Technical modes (never reported as "published and ready")	Технические режимы (публикация не подтверждается)
+  --staging                            Let's Encrypt staging CA: its certificates are not	  --staging                            тестовый CA Let's Encrypt: браузеры
+                                       trusted by browsers. --production moves back.	                                       не доверяют сертификатам. Возврат: --production.
+  --production                         the real Let's Encrypt CA	  --production                         настоящий CA Let's Encrypt
+  --cacert FILE                        verify the panel's certificate against this CA	  --cacert FILE                        проверять сертификат панели по этому CA
+  --mode tunnel                        no public port; reach the panel over ssh -L	  --mode tunnel                        без публичного порта; доступ через ssh -L
+  --mode selfsigned                    a certificate the proxy signs itself; every	  --mode selfsigned                    самоподписанный сертификат прокси;
+                                       browser warns	                                       браузеры выдают предупреждение
+  --no-start                           write the configuration and stop	  --no-start                           сохранить конфигурацию без запуска
+  --no-verify                          start, but do not check the panel answers	  --no-verify                          запустить без проверки ответа панели
+  --no-build                           use the image already here; download nothing	  --no-build                           использовать имеющийся образ без скачивания
+  --build-local                        DEVELOPERS: build the images from this tree on this	  --build-local                        ДЛЯ РАЗРАБОТЧИКОВ: собрать образы из исходников
+                                       machine instead of downloading the published ones	                                       на этом сервере вместо скачивания готовых
+  --restore                            put back the last configuration that was verified	  --restore                            восстановить последнюю проверенную конфигурацию
+  --yes                                ask nothing that already has an answer	  --yes                                запуск без интерактивных вопросов
+  -h, --help                           this text	  -h, --help                           эта справка
+Exit status: 0 when every check that ran passed; otherwise the code of the	Код выхода: 0, если все выполненные проверки прошли; иначе код
+first failure:	первой ошибки:
+  10 port_in_use                 the port cannot be bound on this server	  10 port_in_use                 порт невозможно занять на сервере
+  11 external_port_unreachable   bound here, but not reached from outside	  11 external_port_unreachable   порт свободен, но недоступен снаружи
+  12 external_check_unavailable  no RemoteProbe provider, or it did not answer	  12 external_check_unavailable  RemoteProbe отсутствует или не отвечает
+  13 dns_mismatch                public DNS does not lead (only) to this server	  13 dns_mismatch                DNS ведёт не только на этот сервер
+  14 acme_challenge_unreachable  port 80 (or 443) cannot be used for the challenge	  14 acme_challenge_unreachable  80 (или 443) недоступен для подтверждения
+  15 certificate_issuance_failed the CA did not issue the certificate	  15 certificate_issuance_failed CA не выдал сертификат
+  16 tls_validation_failed       the panel's certificate does not verify	  16 tls_validation_failed       сертификат панели не прошёл проверку
+  17 service_start_failed        the containers did not start or the page is silent	  17 service_start_failed        контейнеры не запустились или панель не отвечает
+  18 bootstrap_persistence_failed the panel cannot save its credentials	  18 bootstrap_persistence_failed невозможно сохранить учётные данные
+  19 image_unavailable           the image for this commit cannot be downloaded	  19 image_unavailable           невозможно скачать образ этого коммита
+   1 anything else (bad input, Docker missing, ...)	   1 прочие ошибки (неверный ввод, отсутствие Docker и т. д.)
+Preflight	Проверка перед установкой
+Where should the panel open?	Где открыть панель?
+Choose 1 or 2	Выберите 1 или 2
+pick 1 or 2	выберите 1 или 2
+no such choice	такого варианта нет
+  1) On a domain        https://panel.example.com	  1) На домене          https://panel.example.com
+     A domain whose A/AAAA records point at this server.	     Домен, чьи записи A/AAAA указывают на этот сервер.
+  2) On this server's public IP address	  2) На публичном IP-адресе этого сервера
+     Let's Encrypt certifies public addresses too (6-day certificates,	     Let's Encrypt выдаёт сертификаты и для IP (срок около 6 дней,
+     renewed automatically).	     продлеваются автоматически).
+Both get a certificate every browser trusts, and both are checked from	В обоих случаях выдаётся доверенный сертификат, а доступность снаружи
+outside before the link is shown.	проверяется перед выводом ссылки (кроме --no-external-check).
+Domain name for the panel (e.g. panel.example.com)	Домен панели (например, panel.example.com)
+Public DNS for %s	Публичный DNS для %s
+This server's public address	Публичный адрес этого сервера
+The panel's address	Адрес панели
+Which one should the panel use (number or address)	Какой адрес использовать для панели (номер или адрес)
+No public address was found. Type this server's public address	Публичный адрес не найден. Введите публичный IP этого сервера
+More than one public address was found:	Найдено несколько публичных адресов:
+The address seen from outside is not on any interface here (NAT or a floating address).	Адрес, видимый снаружи, отсутствует на интерфейсах сервера (NAT или плавающий IP).
+%s (found on this server or as its outgoing address)	%s (найден на сервере или как его внешний адрес)
+%s was not seen on this server's interfaces nor as its outgoing address; the outside check decides whether it leads here.	%s не найден на интерфейсах или как внешний адрес; внешняя проверка определит, ведёт ли он сюда.
+%s -> %s- every A/AAAA record leads to this server	%s -> %s- каждая запись A/AAAA ведёт на этот сервер
+Check from outside	Проверка снаружи
+A check made from this server proves nothing about the internet: a cloud	Проверка с самого сервера не подтверждает доступность из интернета:
+firewall, NAT or the provider's security group are only seen from outside.	файрвол провайдера, NAT и security group проверяются только снаружи.
+The installer asks a RemoteProbe provider to connect here: cmd/auditdsec-probe,	Установщик обращается к RemoteProbe: cmd/auditdsec-probe,
+running on ANOTHER machine you control (see docs/PANEL.md). No public service	работающему на ДРУГОЙ вашей машине (см. docs/PANEL.md). Готовый публичный
+is assumed and no secret is sent anywhere else.	сервис не предполагается, секреты посторонним сервисам не отправляются.
+RemoteProbe URL (https://..., empty if you have none)	URL RemoteProbe (https://..., пусто, если его нет)
+File with its token (kept here, only its path is saved)	Файл с токеном RemoteProbe (сохраняется только путь)
+--no-external-check: whether the internet reaches the panel will NOT be known; it is not reported as published.	--no-external-check: доступность панели из интернета НЕ проверяется; подтверждённая публикация не заявляется.
+Panel port	Порт панели
+This is the public HTTPS port in the link. 443 lets the link go without a	Это публичный HTTPS-порт в ссылке. Для 443 номер в ссылке не нужен;
+port; another port works just as well, and the certificate is the same.	другой порт также подходит, сертификат от номера порта не зависит.
+  1) Pick automatically: 443 if it is free and reachable, else a random high port	  1) Подобрать автоматически: 443, если доступен, иначе случайный высокий порт
+  2) I will give the port	  2) Указать порт вручную
+Port: 1 automatic, 2 given by you	Порт: 1 — автоматический подбор, 2 — указать вручную
+Port (1-65535)	Порт (1-65535)
+Keep the panel on port %s?	Оставить панель на порту %s?
+Choosing the panel's public port	Выбор публичного порта панели
+port %s can be bound here (reachability from outside NOT checked)	порт %s свободен на сервере (доступность снаружи НЕ проверена)
+port %s: free here and reached from outside on %s	порт %s: свободен на сервере и доступен снаружи по адресам %s
+Stopping this installation's own proxy while ports are checked (it is started again).	Прокси этой установки временно остановлен для проверки портов (после проверки будет запущен).
+What the certificate needs	Условия выпуска сертификата
+E-mail for certificate expiry warnings (optional for an address)	E-mail для уведомлений о сертификате (необязателен для IP)
+port 80 free here; reachability from outside NOT checked	порт 80 свободен на сервере; доступность снаружи НЕ проверена
+port 80 reached from outside (HTTP-01)	порт 80 доступен снаружи (HTTP-01)
+port 80 NOT reached from outside; Caddy uses TLS-ALPN-01 on 443 instead	порт 80 НЕ доступен снаружи; Caddy использует TLS-ALPN-01 на 443
+port 80 NOT reached from outside; Caddy uses TLS-ALPN-01 on 443 instead (%s). http:// links will not redirect.	порт 80 НЕ доступен снаружи; Caddy использует TLS-ALPN-01 на 443 (%s). Перенаправление с http:// не работает.
+Switching from %s to %s. The %s certificates, account and	Переход с %s на %s. Сертификаты, учётная запись и состояние %s
+settings stay in their own volumes; nothing is deleted.	остаются в отдельных томах; ничего не удаляется.
+Let's Encrypt STAGING: browsers will not trust the certificate; the panel is not reported as published.	Let's Encrypt STAGING: браузеры не доверяют сертификату; подтверждённая публикация не заявляется.
+The agent needs a bot before it will start: that is where the alerts go, and	Для запуска агента нужен бот: в него отправляются оповещения.
+the panel is an addition to it, not a replacement. Make one with @BotFather,	Панель дополняет бота. Создайте бота через @BotFather,
+then write to your bot and read the chat id from	напишите ему сообщение и получите chat ID через
+Telegram bot token (not shown)	Токен Telegram-бота (ввод скрыт)
+Your chat id	Ваш user ID / chat ID
+Writing %s	Сохранение %s
+saved; existing settings and the Telegram credentials were kept	сохранено; прежние настройки и данные Telegram сохранены
+Hashing the password	Хеширование пароля
+stored as a hash; the password itself is not written anywhere	сохранён хеш; сам пароль нигде не записывается
+Certificate for %s (Let's Encrypt %s)	Сертификат для %s (Let's Encrypt %s)
+No certificate yet.	Сертификата пока нет.
+The certificate that is there cannot be reused:	Имеющийся сертификат нельзя использовать повторно:
+the certificate already in place fits: this address, still valid, issued by this CA, key matches	имеющийся сертификат подходит: адрес верный, срок не истёк, CA и ключ соответствуют
+certbot already held a fitting certificate; copied it into place	certbot уже хранит подходящий сертификат; он скопирован на место
+Let's Encrypt (%s) connects to port 80 on %s now.	Let's Encrypt (%s) сейчас подключается к порту 80 на %s.
+certificate issued and checked: this address, valid, key matches	сертификат выпущен и проверен: адрес верный, срок не истёк, ключ соответствует
+Starting	Запуск
+(--no-start: not starting)	(--no-start: запуск пропущен)
+Restoring the last configuration that was verified working	Восстановление последней проверенной рабочей конфигурации
+started again: mode %s	повторно запущено: режим %s
+could not start the previous configuration either	предыдущую конфигурацию также не удалось запустить
+The previous proxy (%s) was started again.\n	Предыдущий прокси (%s) запущен снова.\n
+Checking that the panel actually answers	Проверка ответа панели
+the sign-in page answers at %s	страница входа отвечает по адресу %s
+the certificate verifies	сертификат прошёл проверку
+the certificate did not verify from here (curl code %s).	сертификат не прошёл проверку с этого сервера (код curl %s).
+admin / admin leads to first-time setup only	admin / admin открывает только первоначальную настройку
+the certificate on disk is the one port %s serves; the renewal loop is healthy	порт %s отдаёт сертификат с диска; процесс продления исправен
+the renewal loop reports: %s	процесс продления сообщает: %s
+Checking the panel from outside	Проверка панели снаружи
+%s: reached from outside, certificate verified (valid until %s)	%s: доступен снаружи, сертификат проверен (действует до %s)
+%s: reached from outside; the certificate is not publicly trusted, as expected for %s	%s: доступен снаружи; сертификат не является публично доверенным, что ожидаемо для %s
+not checked	не проверено
+not tested	не проверено
+answers	отвечает
+NOT ANSWERING	НЕ ОТВЕЧАЕТ
+answers (from this server only through its loopback: it cannot reach its own public address)	отвечает (с сервера только через loopback: собственный публичный адрес недоступен)
+encrypted, verified against this server's own CA (browsers do not know it, so they warn)	зашифровано, проверено по собственному CA сервера (браузеры ему не доверяют)
+valid, verified against the CA file you gave	действителен, проверен по указанному файлу CA
+valid and trusted (checked from this server against its CA store)	действителен и доверенный (проверен по хранилищу CA этого сервера)
+encrypted, but this installer could not verify it (curl code %s)	зашифровано, но установщик не смог проверить сертификат (код curl %s)
+STAGING certificate: not trusted, as expected (curl code %s)	сертификат STAGING: недоверенный, как и ожидается (код curl %s)
+NOT trusted (curl code %s)	НЕ доверенный (код curl %s)
+none needed: the connection runs inside the SSH tunnel	не требуется: соединение проходит через SSH-туннель
+first-time setup is waiting: admin / admin opens only the screen where the owner chooses a login and password	ожидается первоначальная настройка: admin / admin открывает только выбор логина и пароля
+signed in with the password from --password-file	вход выполнен с паролем из --password-file
+SIGN-IN FAILED	ОШИБКА ВХОДА
+your own credentials are in force (admin / admin no longer works)	действуют ваши учётные данные (admin / admin больше не работает)
+on the server's own loopback address (the tunnel is made from your computer)	через loopback сервера (туннель создаётся с вашего компьютера)
+over the verified TLS connection to %s	через проверенное TLS-соединение с %s
+on this server's loopback address ONLY: the certificate at %s could not be verified, so the password was not sent there	ТОЛЬКО через loopback сервера: сертификат %s не проверен, пароль туда не отправлялся
+PROBLEM: %s	ПРОБЛЕМА: %s
+not applicable (tunnel)	не применяется (туннель)
+NOT checked (--no-external-check)	НЕ проверено (--no-external-check)
+NOT checked (the addresses to check are not known in this run)	НЕ проверено (адреса для проверки в этом запуске неизвестны)
+reached from outside (certificate not publicly trusted)	доступен снаружи (сертификат не является публично доверенным)
+reached from outside over verified TLS	доступен снаружи через проверенное TLS-соединение
+NOT reached from outside	НЕ доступен снаружи
+NOT verified from outside	НЕ проверен снаружи
+reachable	доступен
+skipped	пропущено
+given by you	указан вручную
+picked automatically	подобран автоматически
+kept	сохранён
+\n%sFAILED: %s%s\n	\n%sОШИБКА: %s%s\n
+  endpoint: %s\n	  адрес:    %s\n
+  check:    %s\n	  проверка: %s\n
+  result:   %s\n	  результат: %s\n
+  fix:      %s\n	  решение:  %s\n
+  retry:    %s\n	  повтор:   %s\n
+\n%sThe panel was NOT published.%s Nothing that was working before was removed.\n	\n%sПанель НЕ опубликована.%s Ранее работавшая установка не удалена.\n
+%sThe last verified configuration is running again.%s\n	%sПоследняя проверенная конфигурация запущена снова.%s\n
+%sThe new settings did not work; the previous ones are running again.%s\n	%sНовые настройки не заработали; прежняя конфигурация запущена снова.%s\n
+%sThe panel is published and waits for first-time setup.%s\n	%sПанель опубликована и ожидает первоначальной настройки.%s\n
+%sThe panel is published.%s\n	%sПанель опубликована.%s\n
+%sNOT published: %s%s\n	%sНЕ опубликовано: %s%s\n
+%sConfigured, not started (--no-start). Not published.%s\n	%sНастроено, запуск пропущен (--no-start). Не опубликовано.%s\n
+%sStarted, not checked (--no-verify). Not reported as published.%s\n	%sЗапущено без проверки (--no-verify). Публикация не подтверждена.%s\n
+%sThe panel is up on this server's loopback (SSH tunnel mode).%s\n	%sПанель запущена на loopback сервера (режим SSH-туннеля).%s\n
+%sStarted on the Let's Encrypt STAGING CA: a dry run, not published.%s\n	%sЗапущено с тестовым CA Let's Encrypt STAGING. Не опубликовано.%s\n
+%sStarted with a self-signed certificate: every browser warns. Not published.%s\n	%sЗапущено с самоподписанным сертификатом: браузер выдаёт предупреждение. Не опубликовано.%s\n
+%sStarted, but NOT verified from outside (--no-external-check). Not published.%s\n	%sЗапущено, но доступность снаружи НЕ проверена (--no-external-check). Публикация не подтверждена.%s\n
+%sStarted, but not published.%s\n	%sЗапущено, но не опубликовано.%s\n
+  What went wrong: %s\n	  Причина:   %s\n
+  The failed settings are in %s.failed (same permissions as %s).\n	  Неудачные настройки сохранены в %s.failed (права как у %s).\n
+  Run again after fixing it: %s\n\n	  После исправления повторите: %s\n\n
+  Page:      %s\n	  Страница:  %s\n
+  Sign-in:   %s\n	  Вход:      %s\n
+             sent %s\n	             отправлено %s\n
+  Port:      %s (%s)\n	  Порт:      %s (%s)\n
+  Outside:   port %s; panel %s\n	  Снаружи:   порт %s; панель %s\n
+  Challenge: %s\n	  Подтверждение: %s\n
+  TLS:       %s\n	  TLS:       %s\n
+  Expires:   %s\n	  Действует до: %s\n
+  Renewal:   %s\n	  Продление: %s\n
+             Caddy renews the certificate itself, about 30 days before it ends.\n	             Caddy продлевает сертификат автоматически, примерно за 30 дней до истечения.\n
+             Address certificates last about 6 days; the certbot container renews them\n	             Сертификаты IP действуют около 6 дней; контейнер certbot продлевает их\n
+             and checks every minute that port %s serves the file on disk. Port 80\n	             и каждую минуту проверяет сертификат на порту %s. Порт 80\n
+             must stay open and unused for the renewals.\n	             должен оставаться доступным и свободным для продления.\n
+  Trust:     each browser warns. Compare the fingerprint it shows with:\n	  Доверие:   браузер выдаёт предупреждение. Сверьте отпечаток с:\n
+\n  %sSTAGING.%s Browsers do not trust this certificate, on purpose. Switch with:\n	\n  %sSTAGING.%s Браузеры намеренно не доверяют тестовому сертификату. Для перехода:\n
+    ./install.sh --production     (nothing is deleted)\n	    ./install.sh --production     (ничего не удаляется)\n
+\n  Diagnostics:\n	\n  Диагностика:\n
+  Image:     %s\n	  Образ:     %s\n
+             version %s, commit %s\n	             версия %s, коммит %s\n
+             digest %s\n	             digest %s\n
+             previous image (for going back): %s\n	             предыдущий образ (для отката): %s\n
+  Run ./install.sh again to change anything: data, certificates and credentials are kept.\n	  Для изменения настроек повторите ./install.sh: данные, сертификаты и учётные данные сохраняются.\n
+  Back to the last verified configuration: ./install.sh --restore\n	  Возврат к последней проверенной конфигурации: ./install.sh --restore\n
+  First login:  %sadmin%s / %sadmin%s\n	  Первый вход:  %sadmin%s / %sadmin%s\n
+                It opens only the mandatory setup screen: choose your login (or tick\n	                Откроется только обязательная настройка: выберите логин (или отметьте\n
+                "keep admin") and a password of 8+ characters with a lower-case and an\n	                «Точно оставить логин admin») и пароль от 8 символов со строчной и\n
+                upper-case letter. Do it now: whoever signs in first can choose them.\n	                заглавной буквой. Войдите сейчас: первый вошедший задаёт учётные данные.\n
+  Sign in with the login and password you chose (admin / admin no longer works).\n	  Войдите с вашим логином и паролем (admin / admin больше не работает).\n
+  On your computer, run and leave open:  %s\n	  На вашем компьютере запустите и оставьте открытым:  %s\n
+  Link (NOT published): %s\n	  Link (публикация НЕ подтверждена): %s\n
+There is no earlier working configuration to go back to.	Предыдущей рабочей конфигурации для отката нет.
+unknown option %s (try --help)	неизвестный параметр %s (см. --help)
+a single quote in %s is not supported	одинарная кавычка в %s не поддерживается
+auditdsec runs on Linux; this is %s	auditdsec работает на Linux; здесь %s
+unsupported CPU architecture %s (amd64 and arm64 are supported)	архитектура %s не поддерживается (поддерживаются amd64 и arm64)
+curl is needed; install it and run ./install.sh again	нужен curl; установите его и повторите ./install.sh
+%s is not installed	%s не установлен
+'%s compose' does not work; install the Compose plugin	'%s compose' не работает; установите плагин Compose
+cannot talk to the Docker daemon; is it running, and are you root (or in the docker group)?	нет доступа к Docker daemon; проверьте его запуск и права root (или группу docker)
+cannot talk to the Docker daemon	нет доступа к Docker daemon
+/var/log/audit/audit.log is missing: is auditd installed and running? The panel will show nothing until it is.	нет /var/log/audit/audit.log: проверьте установку и запуск auditd. До этого панель не покажет события.
+Linux %s, Docker with Compose, curl	Linux %s, Docker с Compose, curl
+an earlier installation is here%s: its data, certificates and credentials are kept	найдена прежняя установка%s: данные, сертификаты и учётные данные сохраняются
+the agent's source code here has local changes, so no published image matches it. Use --build-local, or undo the changes (git stash).	код агента изменён локально, опубликованного образа для него нет. Используйте --build-local или сохраните изменения через git stash.
+docker pull without credentials	скачивание образа без авторизации (docker pull)
+the registry refused anonymous access: the package is not public	реестр отказал в анонимном доступе: пакет не опубликован публично
+the repository owner must make the package public (GitHub → Packages → Package settings → Change visibility). Nothing was changed on this server.	владелец репозитория должен сделать пакет публичным (GitHub → Packages → Package settings → Change visibility). На сервере ничего не изменено.
+the download failed: %s	не удалось скачать образ: %s
+check this server's internet access and DNS, then run again. Nothing was changed on this server.	проверьте интернет и DNS сервера, затем повторите запуск. На сервере ничего не изменено.
+waiting for GitHub Actions to publish the image	ожидание публикации образа в GitHub Actions
+the image for commit %s is still being built after %s minutes	образ коммита %s всё ещё собирается спустя %s минут
+wait for the build at %s to finish, then run again. Nothing was changed on this server.	дождитесь завершения сборки на %s, затем повторите запуск. На сервере ничего не изменено.
+The image for commit %s is still being built by GitHub Actions; waiting (at most %s minutes)...	Образ коммита %s ещё собирается в GitHub Actions; ожидаем (не более %s минут)...
+GitHub Actions build of commit %s	сборка коммита %s в GitHub Actions
+the build for this commit failed, so no image was published	сборка этого коммита завершилась ошибкой, образ не опубликован
+use the code of a commit whose build succeeded (git checkout <commit>), or --build-local. Nothing was changed on this server.	используйте коммит с успешной сборкой (git checkout <commit>) или --build-local. На сервере ничего не изменено.
+no image is published for commit %s (images are published for commits on main and for release tags)	для коммита %s образ не опубликован (образы выпускаются для main и релизных тегов)
+run the installer from a commit on main or a release (git checkout main && git pull), or use --build-local for your own changes. Nothing was changed on this server.	запускайте установщик из main или релиза (git checkout main && git pull), для собственных изменений используйте --build-local. На сервере ничего не изменено.
+--no-build: no image is present here (%s); run without --no-build to download it	--no-build: образ отсутствует (%s); запустите без --no-build для скачивания
+cannot tell which commit this code is (no git checkout, and deploy/source-commit is not filled in). Download the code with git clone or as a GitHub archive, or use --build-local.	не удалось определить коммит (нет git и заполненного deploy/source-commit). Используйте git clone, архив GitHub или --build-local.
+Downloading the agent image for commit %s...	Скачивание образа агента для коммита %s...
+image %s	образ %s
+Building %s from this tree (--build-local)...	Локальная сборка %s из исходников (--build-local)...
+the image did not build	не удалось собрать образ
+built %s	собран %s
+--no-build: the enforcing image %s is not present here	--no-build: образ для блокировок %s отсутствует на сервере
+unknown mode '%s': use domain or ip (or, for development, tunnel or selfsigned)	неизвестный режим '%s': используйте domain или ip (для разработки — tunnel или selfsigned)
+say where the panel should open: --mode domain --site NAME, or --mode ip [--site ADDRESS]	укажите способ публикации: --mode domain --site NAME или --mode ip [--site ADDRESS]
+This installation uses --mode %s. Keep it?	Эта установка использует --mode %s. Сохранить?
+a domain name is required (--site NAME)	нужно доменное имя (--site NAME)
+A and AAAA records from several independent public DNS servers, compared with this server's addresses	сравнение записей A и AAAA от нескольких независимых DNS-серверов с адресами этого сервера
+the name does not lead only to this server (A: %s, AAAA: %s; this server: %s)	домен ведёт не только на этот сервер (A: %s, AAAA: %s; этот сервер: %s)
+make every A and AAAA record of %s point at this server (delete a wrong AAAA rather than leave it), turn off any CDN proxying (DNS only), wait for DNS to spread, and run again. If this server is behind NAT, give its public address with --public-ip.	направьте все A и AAAA домена %s на этот сервер; ошибочную AAAA удалите. Отключите CDN-проксирование (DNS only), дождитесь обновления DNS и повторите запуск. За NAT укажите публичный IP через --public-ip.
+the DNS check could not run (exit %s)	не удалось выполнить проверку DNS (код %s)
+several public addresses were found (%s); choose one with --site ADDRESS	найдено несколько публичных адресов (%s); выберите один через --site ADDRESS
+no public address of this server was found; give it with --site ADDRESS (and --public-ip if it is behind NAT)	публичный адрес сервера не найден; укажите --site ADDRESS (и --public-ip при NAT)
+'%s' is not an IP address; for a name use --mode domain	'%s' не является IP-адресом; для домена используйте --mode domain
+looking for a RemoteProbe provider (--probe-url and --probe-token-file)	поиск RemoteProbe (--probe-url и --probe-token-file)
+no provider is configured, so whether the panel can be reached from the internet cannot be checked	RemoteProbe не настроен; проверить доступность панели из интернета невозможно
+run cmd/auditdsec-probe on another machine (docs/PANEL.md, 'Проверка снаружи') and pass --probe-url and --probe-token-file. Or pass --no-external-check: the panel is then started but not reported as published.	запустите cmd/auditdsec-probe на другой машине (docs/PANEL.md, «Проверка снаружи») и укажите --probe-url и --probe-token-file. Или используйте --no-external-check: панель запустится без подтверждения публикации.
+cannot read the probe token file %s	невозможно прочитать файл токена RemoteProbe %s
+cannot read %s	невозможно прочитать %s
+the port must be a number from 1 to 65535	порт должен быть числом от 1 до 65535
+asking the RemoteProbe provider %s to connect	запрос подключения у RemoteProbe %s
+the provider could not be used: %s. This says nothing about the port itself.	RemoteProbe недоступен: %s. Это не определяет состояние порта.
+make sure the provider runs, its URL and token are right (--probe-url, --probe-token-file, --probe-cacert), then run again	проверьте запуск RemoteProbe, URL и токен (--probe-url, --probe-token-file, --probe-cacert), затем повторите запуск
+binding port 80, where Let's Encrypt sends the HTTP-01 challenge	проверка свободного порта 80 для подтверждения Let's Encrypt HTTP-01
+port 80 is used by another program (%s)	порт 80 занят другой программой (%s)
+this installer does not stop another web server, and does not route the challenge through one. Free port 80 (or move that site), or put the panel on a domain served by that web server yourself. DNS-01 is not supported by this installer yet.	установщик не останавливает чужой веб-сервер и не перенаправляет через него подтверждение. Освободите порт 80, перенесите существующий сайт или настройте публикацию через свой веб-сервер. DNS-01 пока не поддерживается.
+a temporary listener on port 80, fetched from outside by the RemoteProbe provider	временный слушатель на порту 80, проверяемый снаружи через RemoteProbe
+Let's Encrypt could not validate this %s: port 80 is not reached from outside (%s). The panel port %s being open does not help: the CA only connects to 80 or 443.	Let's Encrypt не может подтвердить %s: порт 80 недоступен снаружи (%s). Открытый порт панели %s не помогает: CA подключается только к 80 или 443.
+allow TCP %s in this server's firewall and in the provider's firewall, or choose port 443 for the panel on a domain (TLS-ALPN-01). Then run again.	разрешите TCP %s в файрволе сервера и провайдера или выберите порт 443 для домена (TLS-ALPN-01). Затем повторите запуск.
+Let's Encrypt needs an e-mail address for a domain (--email)	для домена Let's Encrypt нужен e-mail (--email)
+unknown ACME environment '%s'	неизвестное окружение ACME '%s'
+PANEL_ACME_CA_ROOT=%s is not a readable file	файл PANEL_ACME_CA_ROOT=%s недоступен для чтения
+AUDITDSEC_TG_TOKEN and AUDITDSEC_TG_CHAT_ID must be in %s	в %s должны быть AUDITDSEC_TG_TOKEN и AUDITDSEC_TG_CHAT_ID
+the token is required	нужен токен
+the chat id is required	нужен chat ID
+the upstream port must be a number	внутренний порт агента должен быть числом
+--port is the old name of --upstream-port: the agent's loopback port, not the public one.	--port — старое имя --upstream-port: это внутренний порт агента, а не публичный порт панели.
+the agent refused the password: %s	агент отклонил пароль: %s
+the hash looks wrong; not saving it	хеш выглядит неверным; сохранение отменено
+inspecting the certificate in the certbot volume	проверка сертификата в томе certbot
+the certificate helper could not run (exit %s)	не удалось запустить обработчик сертификатов (код %s)
+check that the certbot image is available (CERTBOT_IMAGE) and run again	проверьте доступность образа certbot (CERTBOT_IMAGE) и повторите запуск
+running certbot from %s	запуск certbot из %s
+the certbot image did not run	образ certbot не запустился
+certbot %s cannot issue certificates for addresses%s	certbot %s не может выпускать сертификаты для IP%s
+certbot 5.3 or newer is needed for --ip-address; set CERTBOT_IMAGE or check the network, then run again	для --ip-address нужен certbot 5.3 или новее; задайте CERTBOT_IMAGE или проверьте сеть и повторите запуск
+the CA did not issue the certificate (its reason is in certbot's output above)	CA не выдал сертификат (причина указана выше в выводе certbot)
+port 80 was reachable from outside a moment ago, so look at the CA's answer: a rate limit (production: 5 certificates per address per week; --staging tests the rest without spending it), or a firewall rule that changed. Then run again.	порт 80 только что был доступен снаружи. Посмотрите ответ CA: возможно, лимит (production: 5 сертификатов на IP в неделю; для проверки используйте --staging) или изменение файрвола. Затем повторите запуск.
+checking the issued certificate	проверка выданного сертификата
+certbot reported success, but the certificate in place is not fit: %s	certbot сообщил об успехе, но сертификат не подходит: %s
+run again; if it repeats, look at: %s logs certbot	повторите запуск; при повторной ошибке посмотрите: %s logs certbot
+hashing the password from --password-file	хеширование пароля из --password-file
+the agent refused it	агент отклонил пароль
+use a password the panel accepts (8+ characters, a lower-case and an upper-case letter)	используйте пароль от 8 символов со строчной и заглавной буквой
+the containers did not start (Docker's message is above)	контейнеры не запустились (сообщение Docker приведено выше)
+look at: %s logs --tail 80; a port taken between the check and the start shows up as 'address already in use'. Then run again.	посмотрите: %s logs --tail 80; если порт заняли после проверки, будет 'address already in use'. Затем повторите запуск.
+internal error: refusing to send a password without verifying TLS	внутренняя ошибка: отправка пароля без проверки TLS запрещена
+GET %s/ from this server for 90 seconds	запрос GET %s/ с этого сервера в течение 90 секунд
+the page did not answer on its real URL (nor on the loopback fallback)	страница не ответила по своему URL или через loopback
+look at: %s	посмотрите: %s
+reading the panel's first-time setup state on loopback	чтение состояния первоначальной настройки панели через loopback
+the panel is locked: its state volume cannot be written, or the saved credentials are damaged or missing after setup was completed	панель заблокирована: том состояния недоступен для записи либо сохранённые учётные данные повреждены или утрачены после настройки
+look at: %s logs --tail 40 auditdsec. Restore the file from a backup, or reset locally with: %s run --rm auditdsec reset-credentials -yes	посмотрите: %s logs --tail 40 auditdsec. Восстановите файл из копии или сбросьте локально: %s run --rm auditdsec reset-credentials -yes
+signing in %s	проверка входа %s
+the panel refused %s	панель отклонила %s
+TLS verification against the system CA store, from this server	проверка TLS по системному хранилищу CA с этого сервера
+the name or address in the certificate may not be the one in the link, issuance may have failed (logs below), or the clock is wrong. Fix it and run again, or go back with ./install.sh --restore	имя или адрес сертификата могут отличаться от ссылки; возможен сбой выпуска или неверное время. Исправьте причину и повторите запуск или вернитесь через ./install.sh --restore.
+TLS handshake from the RemoteProbe provider, verifying the chain for %s	TLS-соединение от RemoteProbe с проверкой цепочки для %s
+the panel answers, but its certificate does not verify from outside: %s	панель отвечает, но сертификат не проходит проверку снаружи: %s
+make sure the certificate was issued by the production CA for %s (logs: %s), then run again	проверьте, что сертификат выпущен production CA для %s (журналы: %s), затем повторите запуск
+HTTPS request from the RemoteProbe provider to the started panel	HTTPS-запрос от RemoteProbe к запущенной панели
+%s. The same port was reached by the temporary listener a moment ago.	%s. Этот порт только что был доступен снаружи через временный слушатель.
+look at: %s logs --tail 40 caddy (the proxy may have failed to bind the port), and at firewall rules changed in the meantime	посмотрите: %s logs --tail 40 caddy (прокси мог не занять порт), а также изменения правил файрвола
+asking the RemoteProbe provider %s	запрос к RemoteProbe %s
+check the provider and run again; the panel is running but is not reported as published	проверьте RemoteProbe и повторите запуск; панель работает, но публикация не подтверждена
+starting the stack	запуск контейнеров
+it did not start	контейнеры не запустились
+see the messages above	см. сообщения выше
+there is no verified configuration to go back to (%s)	нет проверенной конфигурации для отката (%s)
+the previous configuration would not start	предыдущая конфигурация не запустилась
+the sign-in page did not answer	страница входа не ответила
+asking the agent whether first-time setup can be saved	проверка возможности сохранить первоначальную настройку
+443 and %s random ports from %s-%s: bound here, then reached from outside	443 и %s случайных портов из %s-%s: проверка на сервере и снаружи
+the UI could not be published: none of the checked ports is available (%s). Only these ports were tried, not every port.	панель не опубликована: проверенные порты недоступны (%s). Проверены только эти порты, а не все возможные.
+open one port for TCP in this server's firewall AND in the provider's firewall / security group, then run again with --https-port THAT_PORT	откройте TCP-порт в файрволе сервера И провайдера / security group, затем повторите запуск с --https-port THAT_PORT
+binding TCP port %s on all IPv4 and IPv6 addresses of this server	проверка TCP-порта %s на всех IPv4 и IPv6 сервера
+free the port or choose another one with --https-port N (or --https-port auto). Nothing that holds it was stopped.	освободите порт или выберите другой через --https-port N (или --https-port auto). Занимающие порт процессы не остановлены.
+a temporary listener on %s, fetched from outside by the RemoteProbe provider	временный слушатель на %s, проверяемый снаружи через RemoteProbe
+port %s is free here, but the outside check did not reach it: %s	порт %s свободен на сервере, но недоступен снаружи: %s
+allow TCP %s in this server's firewall (e.g. ufw allow %s/tcp) and in the provider's firewall / security group; check NAT port forwarding. A timeout does not say which of them drops it. Then run again.	разрешите TCP %s в файрволе сервера (например, ufw allow %s/tcp) и провайдера / security group; проверьте NAT. Тайм-аут не определяет причину блокировки. Затем повторите запуск.
+port_in_use: the temporary listener could not bind it (something took the port in the meantime)	port_in_use: временный слушатель не смог занять порт (его заняли после проверки)
+%s; held by %s	%s; занят процессом %s
+the provider did not give an answer	RemoteProbe не ответил
+the provider did not answer	RemoteProbe не ответил
+admin / admin while setup is pending	admin / admin до завершения настройки
+the password that was just set	только что заданный пароль
