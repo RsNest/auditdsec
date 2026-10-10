@@ -262,6 +262,9 @@ func TestPipelineHeartbeatAlertsOnMissingLog(t *testing.T) {
 	if ev.Severity != model.SevCritical {
 		t.Errorf("heartbeat event = %+v", ev)
 	}
+	if ev.Arg("state") != "audit_unavailable" {
+		t.Errorf("a missing log is audit_unavailable: %+v", ev)
+	}
 
 	// The alert must not repeat every tick.
 	time.Sleep(200 * time.Millisecond)
@@ -302,6 +305,9 @@ func TestPipelineHeartbeatAlertsOnStaleLog(t *testing.T) {
 	ev := notifier.waitFor(t, model.KindAuditdStopped)
 	if ev.Arg("detail") == "" {
 		t.Errorf("the alert should say why: %+v", ev)
+	}
+	if ev.Arg("state") != "audit_silent" || ev.Severity != model.SevWarn {
+		t.Errorf("a stale log is audit_silent, a warning and not a claim of failure: %+v", ev)
 	}
 }
 
@@ -748,4 +754,41 @@ func TestPanelCertificateIsWatched(t *testing.T) {
 			t.Errorf("expiry only: %d alerts, status %q; want none and ok", alerts, status)
 		}
 	}
+}
+
+// A silent log that then disappears is a different, worse state and is reported
+// at once, not after the cooldown of the first alert.
+func TestPipelineHeartbeatReportsAStateChangeImmediately(t *testing.T) {
+	dir := t.TempDir()
+	auditLog := filepath.Join(dir, "audit.log")
+	if err := os.WriteFile(auditLog, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(auditLog, old, old); err != nil {
+		t.Fatal(err)
+	}
+	_, notifier, _, _ := startPipeline(t, Options{
+		AuditLog:         auditLog,
+		StateDir:         filepath.Join(dir, "state"),
+		HeartbeatEnabled: true,
+		HeartbeatEvery:   20 * time.Millisecond,
+		HeartbeatStale:   time.Hour,
+	})
+	if ev := notifier.waitFor(t, model.KindAuditdStopped); ev.Arg("state") != "audit_silent" {
+		t.Fatalf("first state: %+v", ev)
+	}
+	if err := os.Remove(auditLog); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, e := range notifier.all() {
+			if e.Arg("state") == "audit_unavailable" {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Error("the change from silent to unavailable was not reported")
 }

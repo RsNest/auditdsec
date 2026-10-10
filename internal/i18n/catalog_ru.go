@@ -15,6 +15,7 @@ var catalogRU = map[string]string{
 	"event.log_tamper":             "Вмешательство в журналы или правила аудита: {detail}, пользователь {user}",
 	"event.suspicious_exec":        "Запуск программы из временного каталога: {path}, пользователь {user}",
 	"event.auditd_stopped":         "Служба аудита недоступна: {detail}",
+	"event.audit_silent":           "Журнал аудита молчит: {detail}",
 	"event.panel_cert":             "Сертификат панели: {detail}",
 	"event.unknown":                "Событие {kind}",
 

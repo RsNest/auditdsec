@@ -13,13 +13,13 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/action"
+	"github.com/RsNest/auditdsec/internal/auditlog"
 	"github.com/RsNest/auditdsec/internal/config"
 	"github.com/RsNest/auditdsec/internal/decision"
 	"github.com/RsNest/auditdsec/internal/i18n"
@@ -613,15 +613,19 @@ func (s *Server) counters(d statusDigest) map[string]any {
 
 func (s *Server) auditHealth() map[string]any {
 	c := s.opt.Config
-	fi, err := os.Stat(c.AuditLog)
-	if err != nil {
-		return map[string]any{"healthy": false, "last_write": nil}
+	stale := time.Duration(0)
+	if c.Heartbeat.Enabled {
+		stale = c.Heartbeat.StaleAfter
 	}
-	healthy := true
-	if c.Heartbeat.Enabled && c.Heartbeat.StaleAfter > 0 && s.now().Sub(fi.ModTime()) > c.Heartbeat.StaleAfter {
-		healthy = false
+	st := auditlog.Check(c.AuditLog, s.now(), stale)
+	out := map[string]any{"healthy": st.State == auditlog.OK, "state": string(st.State), "last_write": nil}
+	if !st.LastWrite.IsZero() {
+		out["last_write"] = st.LastWrite.UTC().Format(time.RFC3339)
 	}
-	return map[string]any{"healthy": healthy, "last_write": fi.ModTime().UTC().Format(time.RFC3339)}
+	if st.State != auditlog.OK {
+		out["detail"] = st.Detail
+	}
+	return out
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

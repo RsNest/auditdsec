@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/action"
+	"github.com/RsNest/auditdsec/internal/auditlog"
 	"github.com/RsNest/auditdsec/internal/decision"
 	"github.com/RsNest/auditdsec/internal/delivery"
 	"github.com/RsNest/auditdsec/internal/detect"
@@ -142,6 +143,7 @@ type Pipeline struct {
 	banned          atomic.Uint64
 	heartbeatFiring bool
 	heartbeatAt     time.Time
+	heartbeatState  auditlog.State
 
 	certMu     sync.Mutex
 	certStatus string // for diagnostics: "ok, until ...", the problem, or "not checked yet"
@@ -660,27 +662,21 @@ func (p *Pipeline) notifyEvent(ctx context.Context, ev model.Event) error {
 	return nil
 }
 
-// checkHeartbeat reports the audit log going unreadable or silent. Silence is
-// the failure mode that matters: an attacker who stops auditd leaves no events
-// behind, and without this check the agent would simply look calm.
+// checkHeartbeat reports the audit log becoming unreadable or silent, as two
+// different states. An unreadable log means the agent is blind; a silent one may
+// be a quiet host or a stopped auditd, and is reported as exactly that. A change
+// of state is reported at once; a state that persists repeats only after the
+// cooldown.
 func (p *Pipeline) checkHeartbeat(ctx context.Context) {
 	if !p.opt.HeartbeatEnabled {
 		return
 	}
 	now := p.now()
-	reason := ""
+	st := auditlog.Check(p.opt.AuditLog, now, p.opt.HeartbeatStale)
 
-	fi, err := os.Stat(p.opt.AuditLog)
-	switch {
-	case err != nil:
-		reason = fmt.Sprintf("%s: %v", p.opt.AuditLog, err)
-	case p.opt.HeartbeatStale > 0 && now.Sub(fi.ModTime()) > p.opt.HeartbeatStale:
-		reason = fmt.Sprintf("%s: no new records for %s", p.opt.AuditLog, now.Sub(fi.ModTime()).Round(time.Minute))
-	}
-
-	if reason == "" {
+	if st.State == auditlog.OK {
 		if p.heartbeatFiring {
-			p.heartbeatFiring = false
+			p.heartbeatFiring, p.heartbeatState = false, ""
 			p.log.Info("the audit log is being written again", "path", p.opt.AuditLog)
 		}
 		return
@@ -690,13 +686,13 @@ func (p *Pipeline) checkHeartbeat(ctx context.Context) {
 	if cooldown < time.Hour {
 		cooldown = time.Hour
 	}
-	if p.heartbeatFiring && now.Sub(p.heartbeatAt) < cooldown {
+	if p.heartbeatFiring && p.heartbeatState == st.State && now.Sub(p.heartbeatAt) < cooldown {
 		return
 	}
-	p.heartbeatFiring, p.heartbeatAt = true, now
-	p.log.Warn("the audit log is not alive", "reason", reason)
+	p.heartbeatFiring, p.heartbeatAt, p.heartbeatState = true, now, st.State
+	p.log.Warn("the audit log needs attention", "state", st.State, "reason", st.Detail)
 
-	ev := semantic.HeartbeatLost(p.opt.Host, reason)
+	ev := semantic.AuditHealth(p.opt.Host, st.State, st.Detail)
 	ev.Time = now
 	p.deliver(ctx, ev)
 }

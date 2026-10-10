@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RsNest/auditdsec/internal/auditlog"
 	"github.com/RsNest/auditdsec/internal/i18n"
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/parse"
@@ -378,8 +379,8 @@ func TestDedupKeyGroupsRepeats(t *testing.T) {
 	}
 }
 
-func TestHeartbeatLost(t *testing.T) {
-	ev := HeartbeatLost("web01", "audit.log not readable")
+func TestAuditHealthStates(t *testing.T) {
+	ev := AuditHealth("web01", auditlog.Unavailable, "audit.log not readable")
 	if ev.Kind != model.KindAuditdStopped || ev.Severity != model.SevCritical {
 		t.Fatalf("got %+v", ev)
 	}
@@ -387,5 +388,23 @@ func TestHeartbeatLost(t *testing.T) {
 		if s := i18n.T(lang, ev.SummaryKey, ev.Args); strings.Contains(s, "{") {
 			t.Errorf("lang %s: unrendered placeholder in %q", lang, s)
 		}
+	}
+}
+
+// A silent log is a warning with its own wording, not the claim that the
+// service is down.
+func TestAuditSilentIsAWarningWithItsOwnText(t *testing.T) {
+	ev := AuditHealth("web01", auditlog.Silent, "no new records for 7h0m")
+	if ev.Severity != model.SevWarn || ev.SummaryKey != "event.audit_silent" || ev.Args["state"] != "audit_silent" {
+		t.Fatalf("got %+v", ev)
+	}
+	for _, lang := range i18n.Langs() {
+		s := i18n.T(lang, ev.SummaryKey, ev.Args)
+		if strings.Contains(s, "{") || !strings.Contains(s, "7h0m") {
+			t.Errorf("lang %s: %q", lang, s)
+		}
+	}
+	if un := AuditHealth("web01", auditlog.Unavailable, "x"); un.Severity != model.SevCritical || un.Args["state"] != "audit_unavailable" {
+		t.Errorf("unavailable: %+v", un)
 	}
 }

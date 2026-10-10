@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/RsNest/auditdsec/internal/auditlog"
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/parse"
 	"github.com/RsNest/auditdsec/internal/sanitize"
@@ -193,17 +194,24 @@ func knownKeys() []string {
 	return out
 }
 
-// HeartbeatLost builds the synthetic event reported when the audit log stops
-// being written, which is the signal that matters most: silence from a
-// compromised host looks exactly like silence from a quiet one.
-func HeartbeatLost(host, detail string) model.Event {
-	return model.Event{
+// AuditHealth builds the synthetic event reported when the agent cannot rely on
+// the audit log. The two states are kept apart: an unreadable log (the agent is
+// blind) is critical, a log that merely has not been written for a while is a
+// warning, because a quiet host looks the same as a stopped auditd and the
+// silence alone does not prove either.
+func AuditHealth(host string, state auditlog.State, detail string) model.Event {
+	ev := model.Event{
 		Host:       host,
 		Kind:       model.KindAuditdStopped,
 		Severity:   model.SevCritical,
 		SummaryKey: "event." + string(model.KindAuditdStopped),
-		Args:       map[string]string{"detail": detail, "kind": string(model.KindAuditdStopped)},
+		Args:       map[string]string{"detail": detail, "kind": string(model.KindAuditdStopped), "state": string(state)},
 	}
+	if state == auditlog.Silent {
+		ev.Severity = model.SevWarn
+		ev.SummaryKey = "event.audit_silent"
+	}
+	return ev
 }
 
 func accountRecordOf(ev *parse.Event) string {

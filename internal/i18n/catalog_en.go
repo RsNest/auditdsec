@@ -14,6 +14,7 @@ var catalogEN = map[string]string{
 	"event.log_tamper":             "Logs or audit rules tampered with: {detail}, user {user}",
 	"event.suspicious_exec":        "Program executed from a temporary directory: {path}, user {user}",
 	"event.auditd_stopped":         "Audit service unavailable: {detail}",
+	"event.audit_silent":           "Audit log is silent: {detail}",
 	"event.panel_cert":             "Panel certificate: {detail}",
 	"event.unknown":                "Event {kind}",
 
