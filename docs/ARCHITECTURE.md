@@ -208,17 +208,46 @@ in the agent's own `inet auditdsec` table with two timeout-flagged sets and a dr
 priority -10, so the host's own firewall — ufw, firewalld, Docker's chains — is never
 edited, and uninstalling is one `nft delete table` away.
 
-The table is recreated at startup and the store's active bans are pushed back into it.
+The store's active bans are pushed back into the table at startup and then reconciled.
 That makes the store the source of truth instead of whatever survived a reboot, at the
 cost of a short window during a restart where nothing is blocked.
 
-Panel, detector and Telegram use `Store.EnsureBan`: an active decision retains its
-original reason, expiry and repeat count. A failed panel request can retry enforcement
-without recording another offence. Expired decisions can create the next offence.
-Panel requests are serialized against other panel ban/unban/allow actions. Startup clears
-confirmation for failed reapplications; disabled enforcement is exposed as recorded-only.
-`Applied` remains the last confirmed result, not continuous observation of firewall state;
-cross-interface reconciliation and an operator action journal remain stage 1.6 work.
+All three interfaces — the detector, Telegram and the panel — ask one `decision.Service`
+(`internal/decision`), so an address gets the same answer everywhere:
+
+- **Canonical addresses.** `internal/netaddr` parses with `net/netip`, unmaps `::ffff:`
+  forms and drops zones; records and firewall elements use the canonical text only.
+- **One policy.** Unspecified, loopback, link-local and multicast addresses are never
+  banned. Private ranges are refused unless `ban.ban_private` is set. The allowlist (single
+  addresses and CIDR networks, with a size limit) is checked first, and the address the
+  operator is connected from is protected against a manual ban. Refusals are not events.
+- **Active decisions are idempotent.** An active ban keeps its reason, expiry and repeat
+  count; a retry re-enforces without recording another offence. Operations are serialized.
+- **Desired vs observed state.** A ban record is the desired state. Its observed state is
+  one of `pending`, `applied`, `failed`, `dry_run`, `unknown` (no backend) or `expired`;
+  `Applied` is true only for `applied`. A dry run or a missing backend is never reported as
+  a block. An unblock the firewall did not confirm leaves a *release* record that is
+  retried, and the reply says the unblock is not complete.
+- **Reconciliation.** `Service.Run` compares the records with `List()` at the reconcile
+  interval: lost blocks are re-added, element timeouts are renewed (nftables does not
+  refresh a timeout on a plain `add`, so the element is deleted and re-added in one
+  transaction), orphans are removed, expired records are marked. If the firewall cannot be
+  read, nothing is changed.
+- **Operator journal.** Panel, Telegram and system decisions are appended to `actions.jsonl`
+  with origin and actor.
+- **Notice duty.** An automatic ban is stored together with `NoticeDue`; the pipeline sends
+  the notice and then clears the duty, and does so again after a restart or a reconciliation
+  pass. A crash between the two repeats the notice (at-least-once); the outbox skips an
+  intent ID it already holds, so a replay cannot stall recovery. Decisions are still not
+  transactional with the audit journal: a crash after reading an event but before the
+  decision can lose that one decision.
+- **First-login allowlist.** `ban.auto_allowlist` defaults to `off` for new installations,
+  because the first successful login need not be the owner's. An installation whose config
+  explicitly says `first_login` keeps it. Allowlisting goes through the same service.
+
+The nftables backend applies each change as one `nft -f -` transaction, keeps an intact
+table on start instead of flushing it, and hooks `input` only: traffic forwarded to bridged
+containers is not filtered by it.
 
 Three decisions worth keeping:
 

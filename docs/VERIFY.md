@@ -205,3 +205,20 @@ secrets typed after a prompt; text in free-form fields other than the ones liste
 masking is pattern based, not a guarantee. Retained journals written by earlier versions are
 not rewritten; the events API masks them on the way out, so a stored secret can still sit
 in an old file on disk.
+
+## Stage 1.6 focused verification
+
+`internal/decision`, `internal/store`, `internal/action`, `internal/api`, the Telegram and
+pipeline tests cover: canonical addresses (`::ffff:` and zone forms), policy classes and the
+`ban_private` switch, CIDR allowlist entries and their size limit, the owner's own address,
+idempotent active bans, observed states (applied, failed, dry run, no backend), unconfirmed
+unblocks kept as releases and retried, reconciliation (lost block re-added, timeout renewed,
+orphan removed, expired marked, unreadable firewall changes nothing), the operator journal,
+an owed ban notice surviving a restart, and the outbox skipping an intent it already holds.
+The nftables backend is tested against a fake `nft` that records the scripts it receives
+(one transaction per change, delete+add to renew a timeout, nft duration parsing with d/w).
+
+Not verified: a real `nft` on a real kernel, a live reconciliation against a changed
+firewall, or Telegram delivery; none of those were run. Decisions are not transactional with
+the audit journal, so a crash between reading an event and recording its decision can lose
+that decision. The `input` hook does not filter traffic forwarded to bridged containers.

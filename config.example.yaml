@@ -106,8 +106,13 @@ ban:
   # first_login — protect the source of the first successful login after the
   #               agent starts, which is almost always the person installing
   #               it. This is what stops the detector banning its own owner.
-  # off         — no automatic protection; use /allow instead.
-  auto_allowlist: first_login
+  # off         — no automatic protection; use /allow instead. The default for
+  #               new installations: the first login need not be yours. An
+  #               explicit first_login in an existing config is kept.
+  auto_allowlist: off
+  # Private ranges (10./8, 172.16/12, 192.168/16, fc00::/7) are not banned unless
+  # this is true. Loopback, link-local and multicast addresses are never banned.
+  ban_private: false
 
 # Web panel: the same information as the bot, in a browser. Off by default.
 #
