@@ -306,6 +306,71 @@ does not follow `su`/`sudo -u` chains beyond what each record's `auid` and `ses`
 Attribution is evidence for a person, not proof; an attacker with root can alter audit
 records before they are written only by stopping auditd, which the health checks report.
 
+## Incidents
+
+An incident turns separate events into one story: **why** the alarm fired (a reason with
+arguments, rendered in the reader's language), the **highest severity** reached, the kinds
+and counts of what happened, the addresses that were blocked, the 40 most recent event
+references, and a **status**: `new`, `acknowledged`, `resolved` (with a note of who changed
+it, from the panel or Telegram).
+
+Correlation (`internal/incident`) is deliberately narrow. Events are related only through:
+
+- the same **directly observed source address** (ssh logins, `login_after_bruteforce`, the
+  ban of that address);
+- an action whose SSH session was attributed to that address with confidence **`observed`**
+  (see Session context): brute force → login → `sudo` → authorized_keys change becomes one
+  story. `correlated` and `unknown` attributions never link;
+- the same audit session (session ID and login UID) when its address is unknown;
+- the same host-level condition (log tampering, audit health, persistence, config change).
+
+A shared user name or closeness in time never links events. Opening: a new ban decision, a
+critical event, or a warn-level event of an alarming kind (`user_change`, `log_tamper`,
+`authorized_keys_change`, `suspicious_exec`, `persistence`, `config_change`,
+`auditd_stopped`, `login_after_bruteforce`). Failed logins alone do not open an incident
+(the first five before a ban are not back-filled; the ban reason carries the count); they
+join an open incident of their address. Silence of 1 h (address) / 24 h (session) / 6 h
+(host) starts a new story. A resolved incident is closed: new activity opens a new one.
+An acknowledged incident returns to `new` when activity becomes more serious than what was
+acknowledged.
+
+**Consistency.** The planner `incident.Plan` is pure; the store applies its result in the
+same atomic state write as the detection cursor and the ban decision (`CommitDetectionEvent`),
+rolling the incidents back if the write fails. Replay therefore neither loses nor repeats an
+incident; an event ID already referenced is ignored. Bounds: 500 incidents (resolved ones
+and the least recently seen go first), 40 event references, 20 notes, resolved incidents
+dropped after 90 days. They live in `state.json`, which is rewritten whole on each commit.
+
+**Surfaces.** `GET /api/v1/incidents[?state=open|all|new|acknowledged|resolved]`,
+`GET /api/v1/incidents/{id}`, `POST /api/v1/incidents/{id} {"action":"ack|resolve|reopen"}`;
+the panel's Incidents section; Telegram `/incidents` with acknowledge/resolve buttons.
+Incidents do not send notifications of their own: the existing alerts are unchanged.
+
+## Exceptions
+
+An exception silences the **notification** of one specific expected activity (for example
+`sudo` by `root` whose command starts with `systemctl restart nginx`, or failed logins from
+a known scanner network). A rule names an event kind plus at least one narrower field (user,
+login user, address or CIDR, path prefix, command prefix, program), a mandatory reason and a
+mandatory expiry of at most 90 days; fields are length-limited and free of control characters.
+
+What it does and does not do:
+
+- the event is **still journaled**, shown in the panel with "silenced by exc-N", counted in
+  the outbox as suppressed, and visible through the API (`suppressed`);
+- the event does not open or join an incident;
+- **critical events are never silenced**, whatever the rule says;
+- exceptions **never affect detection, bans or reconciliation**: a silenced address can still
+  be banned and the ban is still announced;
+- the decision is made when the event is ingested (stored in the event), so replay and a
+  later edit of the rules do not change history.
+
+Storage: `state.json` (atomic, rolled back on failure, at most 200 rules, expired rules kept
+visible for 7 days, IDs never reused). Hit counts are in memory and reset on restart. API:
+`GET/POST /api/v1/exceptions`, `DELETE /api/v1/exceptions/{id}`; the panel's Exceptions
+section and a "Silence similar" button in event details that prefills the form. The creator
+(`panel:<ip>`) is recorded in the rule.
+
 ## Bans
 
 `action.Banner` is the interface; `action.Nftables` the implementation. Everything lives
@@ -740,9 +805,10 @@ Interfaces only where there are already two clients, a retry or two implementati
   8. **implemented** — durable detection recovery: the event journal is the queue between
      ingestion and detection, and decisions commit atomically with the detection cursor
      (see "Detection recovery").
-- **Stage 2** (in progress): `auditdsec doctor` (**implemented**, docs/DOCTOR.md), SSH session
-  context (**implemented**, see "Session context"), scoped exceptions and
-  incident handling, file-change details (FIM), saved filters, export, Telegram roles.
+- **Stage 2** (in progress): `auditdsec doctor` (**implemented**, docs/DOCTOR.md), incidents and
+  targeted exceptions (**implemented**, see "Incidents" and "Exceptions"), SSH session
+  context (**implemented**, see "Session context"); remaining:
+  file-change details (FIM), saved filters, export, Telegram roles.
 - **Stage 3**: CrowdSec adapter, webhook / ntfy, `/metrics`, external heartbeat, CI.
 - **Stage 4**: multi-host, learning mode, hardening report, an indexed store when the load
   calls for it, declarative detection rules.

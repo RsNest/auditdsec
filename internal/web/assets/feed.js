@@ -247,9 +247,13 @@
       buttons.push(el("button", { class: "pill pill-quiet pill-sm", type: "button", text: t("ev.act.trust"), onclick: function () { actions.trust(ev.src_ip); } }));
     }
     buttons.push(el("button", { class: "pill pill-quiet pill-sm", type: "button", text: t("ev.act.mute"), onclick: function () { actions.mute(24); } }));
+    if (actions.exception && ev.severity !== "critical") {
+      buttons.push(el("button", { class: "pill pill-quiet pill-sm", type: "button", text: t("ev.act.exception"), onclick: function () { actions.exception(ev); } }));
+    }
 
     var facts = [[t("ev.time"), A.dateTime(ev.time)]];
     if (ev.user) { facts.push([t("ev.user"), ev.user]); }
+    if (ev.suppressed) { facts.push([t("ev.detail.status"), t("exc.muted", { id: ev.suppressed })]); }
     if (ev.src_ip) { facts.push([t("ev.ip"), ev.src_ip]); }
     if (ev.args) {
       Object.keys(ev.args).forEach(function (k) {

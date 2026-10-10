@@ -303,3 +303,35 @@ Not verified: a real auditd/sshd/journald (the record and journal formats are wr
 the documented layouts of auditd 3.x and OpenSSH 8–9; other versions or distributions may
 differ), a real reboot, and a privileged live lab. The web asset budget (160 KiB) is nearly
 exhausted by this change.
+
+## Incidents and exceptions verification
+
+Offline tests (fake clocks, fault-injected state writes):
+
+- incidents: brute force → ban → login → sudo → authorized_keys change in an observed session
+  is one incident with the reason, the highest severity and per-kind counts; correlated and
+  unknown session attributions do not link; two addresses stay separate; a long silence
+  starts a new incident; acknowledge, repeat, escalation back to `new`, resolved is closed;
+  the same event twice changes nothing; `Plan` does not mutate its input; bounds on
+  incidents, event references and resolved age;
+- recovery: a detection commit that fails leaves no incident; after restart exactly one
+  incident exists, with the triggering event counted once, and a second restart changes
+  nothing (shares the protocol of "Detection recovery");
+- API: authentication, listing by state, detail with events and notes, ack / resolve /
+  repeat / unknown action / unknown ID / bad state; Telegram `/incidents`, buttons,
+  escaping of audit-derived text, unknown ID;
+- exceptions: validation (no catch-all, reason, expiry, length, characters, address form),
+  exact matching (kind, user, login user, program, path/command prefix, network),
+  expiry, critical never silenced; store persistence with rollback on a failed write, ID
+  non-reuse, pruning and the cap; in the pipeline a silenced event is stored with its marker,
+  counted as suppressed, not queued, other addresses and a critical event are unaffected, the
+  ban still happens and hits are counted; API create / validation errors / list / delete;
+- panel: syntax checks of the scripts, the asset budget (now 256 KiB), the existing panel
+  review checks.
+
+Not verified: the new panel screens were not rendered in a real browser (only parsed and
+covered by logic checks); no real auditd, sshd, journald or nftables; no load test of
+`state.json` rewrites with hundreds of incidents or bans; Telegram messages were not sent.
+Known limits: the five failures before a ban are not back-filled into the incident; hit
+counts reset on restart; an exception is chosen at ingestion and not re-evaluated; incidents
+produce no notifications of their own.

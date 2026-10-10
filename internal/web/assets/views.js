@@ -10,7 +10,7 @@
   var S = A.state;
 
   var R = {};
-  var model = { status: null, events: [], incidents: [], bans: [], allow: [], suspects: null, cfg: null, diag: null };
+  var model = { status: null, events: [], incidents: [], exceptions: [], bans: [], allow: [], suspects: null, cfg: null, diag: null };
   var pendingBans = Object.create(null), modelRevision = 0;
   var deck = null, journal = null, engine = null, poll = null, observer = null, uid = 0;
 
@@ -74,6 +74,7 @@
       },
         function (e) { A.toast(errText(e), "err"); });
     },
+    exception: function (ev) { R.excForm.prefill(ev); go("exceptions"); },
     mute: function (hours) {
       A.api.mute(hours).then(function (res) {
         A.toast(t("policy.mute.done", { until: A.dateTime(res && res.muted_until) }), "ok");
@@ -251,7 +252,7 @@
 
   /* ---------------- the bar ---------------- */
 
-  var SECTIONS = [["overview", "nav.overview"], ["events", "nav.events"], ["incidents", "nav.incidents"], ["addresses", "nav.addresses"], ["alerts", "nav.alerts"], ["system", "nav.system"]];
+  var SECTIONS = [["overview", "nav.overview"], ["events", "nav.events"], ["incidents", "nav.incidents"], ["exceptions", "nav.exceptions"], ["addresses", "nav.addresses"], ["alerts", "nav.alerts"], ["system", "nav.system"]];
 
   function setLang() {
     S.lang = S.lang === "ru" ? "en" : "ru";
@@ -384,6 +385,11 @@
     R.incTbl = el("div", { class: "tbl-wrap rv" });
     R.incSec = section("incidents", "sec", [head(t("inc.label"), t("inc.title"), el("p", { class: "callout rv", text: t("inc.lede") })), R.incTbl]);
 
+    /* exceptions */
+    R.excTbl = el("div", { class: "tbl-wrap rv" });
+    R.excForm = excForm();
+    R.excSec = section("exceptions", "sec", [head(t("exc.label"), t("exc.title"), el("p", { class: "callout rv", text: t("exc.lede") })), R.excTbl, el("div", { class: "tbl-wrap rv" }, [R.excForm.node])]);
+
     /* addresses */
     R.bansTbl = el("div");
     R.allowTbl = el("div");
@@ -432,7 +438,7 @@
       R.bigWm = el("div", { class: "big-wm", "aria-hidden": "true" }, ["auditdsec", el("i", { text: "." })])
     ]);
 
-    add(main, [R.hero, R.fold, R.events, R.journal, R.rosterSec, R.incSec, R.addr, R.alertSec, R.system, R.close]);
+    add(main, [R.hero, R.fold, R.events, R.journal, R.rosterSec, R.incSec, R.excSec, R.addr, R.alertSec, R.system, R.close]);
     setupReveals();
   }
 
@@ -749,6 +755,67 @@
     ]));
   }
 
+  function excForm() {
+    var kind = el("select", { class: "sel" }, A.KINDS.map(function (k) { return el("option", { value: k, text: t("kind." + k) }); }));
+    var inp = function () { return el("input", { class: "in", type: "text", autocomplete: "off", spellcheck: "false" }); };
+    var user = inp(), ip = inp(), path = inp(), cmd = inp(), reason = inp();
+    var hours = el("select", { class: "sel" }, ["24", "168", "720", "2160"].map(function (h) { return el("option", { value: h, text: t("exc.dur." + h) }); }));
+    var err = el("p", { class: "err", role: "alert", hidden: true });
+    var node = el("form", {
+      onsubmit: function (e) {
+        e.preventDefault();
+        var p = { kind: kind.value, user: user.value.trim(), src_ip: ip.value.trim(), path_prefix: path.value.trim(), cmd_prefix: cmd.value.trim(), reason: reason.value.trim(), hours: parseInt(hours.value, 10) };
+        if (!p.user && !p.src_ip && !p.path_prefix && !p.cmd_prefix) { err.textContent = t("exc.form.need"); err.hidden = false; return; }
+        err.hidden = true;
+        A.api.addException(p).then(function (x) {
+          A.toast(t("exc.form.done", { id: x.id }), "ok");
+          user.value = ip.value = path.value = cmd.value = reason.value = "";
+          refresh();
+        }, function (er) { err.textContent = errText(er); err.hidden = false; });
+      }
+    }, [
+      el("h3", { class: "lbl", text: t("exc.form.title") }),
+      el("div", { class: "form-row" }, [
+        fieldOf(t("exc.form.kind"), kind), fieldOf(t("exc.form.user"), user), fieldOf(t("exc.form.ip"), ip),
+        fieldOf(t("exc.form.path"), path), fieldOf(t("exc.form.cmd"), cmd), fieldOf(t("exc.form.reason"), reason), fieldOf(t("exc.form.hours"), hours),
+        el("button", { class: "pill pill-solid", type: "submit", text: t("exc.form.submit") })
+      ]),
+      err
+    ]);
+    return {
+      node: node,
+      prefill: function (ev) {
+        kind.value = ev.kind; user.value = ev.user || ""; ip.value = ev.src_ip || "";
+        path.value = (ev.args && ev.args.path) || ""; cmd.value = (ev.args && ev.args.cmd) || ""; reason.focus();
+      }
+    };
+  }
+
+  function paintExceptions() {
+    if (!R.excTbl) { return; }
+    clear(R.excTbl);
+    if (!model.exceptions.length) { add(R.excTbl, el("div", { class: "tbl-empty", text: t("exc.empty") })); return; }
+    add(R.excTbl, el("table", { class: "tbl" }, [
+      el("thead", null, el("tr", null, [el("th", { text: t("exc.col.rule") }), el("th", { text: t("exc.col.until") }), el("th", { text: t("exc.col.hits") }), el("th", { class: "r" })])),
+      el("tbody", null, model.exceptions.map(function (x) {
+        var what = [t("kind." + x.kind)].concat([x.user, x.login_user, x.src_ip, x.path_prefix && x.path_prefix + "…", x.cmd_prefix && x.cmd_prefix + "…", x.exe].filter(Boolean)).join(" · ");
+        return el("tr", null, [
+          cell(t("exc.col.rule"), [what, el("small", { text: x.reason + " · " + x.created_by })]),
+          cell(t("exc.col.until"), A.dateTime(x.expires_at)),
+          cell(t("exc.col.hits"), A.num(x.hits || 0)),
+          el("td", { class: "r" }, el("button", {
+            class: "pill pill-quiet pill-sm", type: "button", text: t("exc.remove"),
+            onclick: function () {
+              A.confirmAction(t("exc.remove.confirm", { id: x.id }), t("exc.remove"), "danger").then(function (ok) {
+                if (ok) { A.api.removeException(x.id).then(refresh, function (e) { A.toast(errText(e), "err"); }); }
+              });
+            }
+          }))
+        ]);
+      }))
+    ]));
+  }
+
   function paintBans() {
     if (!R.bansTbl) { return; }
     clear(R.bansTbl);
@@ -900,7 +967,7 @@
   function paintAll() {
     model.status = S.status;
     if (R.telegram) { A.Telegram.paint(R.telegram, model.telegram); }
-    paintHero(); paintFold(); paintRoster(); paintSuspects(); paintIncidents(); paintBans(); paintAllow(); paintAlerts(); paintSystem(); paintClose();
+    paintHero(); paintFold(); paintRoster(); paintSuspects(); paintIncidents(); paintExceptions(); paintBans(); paintAllow(); paintAlerts(); paintSystem(); paintClose();
     paintDeck(false);
     syncBanButtons();
   }
@@ -916,6 +983,7 @@
         A.api.events("limit=200&since=" + encodeURIComponent(since)).then(function (p) { model.events = (p && p.items) || []; A.announceCritical(model.events); }, function () { }),
         A.api.bans().then(function (v) { if (current()) { model.bans = v || []; } }, function () { }),
         A.api.incidents().then(function (v) { if (current()) { model.incidents = (v && v.items) || []; } }, function () { }),
+        A.api.exceptions().then(function (v) { if (current()) { model.exceptions = (v && v.items) || []; } }, function () { }),
         A.api.allowlist().then(function (v) { if (current()) { model.allow = v || []; } }, function () { }),
         A.api.suspects().then(function (v) { if (current()) { model.suspects = v; model.suspectsError = false; } },
           function () { if (current()) { model.suspectsError = true; } }),
@@ -973,7 +1041,7 @@
     }
 
     var current = "";
-    [["overview", "overview"], ["events", "events"], ["journal", "events"], ["kinds", "events"], ["incidents", "incidents"], ["addresses", "addresses"], ["alerts", "alerts"], ["system", "system"]].forEach(function (pair) {
+    [["overview", "overview"], ["events", "events"], ["journal", "events"], ["kinds", "events"], ["incidents", "incidents"], ["exceptions", "exceptions"], ["addresses", "addresses"], ["alerts", "alerts"], ["system", "system"]].forEach(function (pair) {
       var node = document.getElementById(pair[0]);
       if (node && node.getBoundingClientRect().top <= vh * 0.4) { current = pair[1]; }
     });
