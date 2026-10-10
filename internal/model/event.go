@@ -97,6 +97,8 @@ func ValidKind(k Kind) bool {
 // vocabulary. SummaryKey plus Args render the human sentence through i18n, so
 // the same event can be shown in any language.
 type Event struct {
+	// ID is stable across replay of the same source generation and record.
+	ID         string            `json:"event_id,omitempty"`
 	Time       time.Time         `json:"time"`
 	Host       string            `json:"host"`
 	Kind       Kind              `json:"kind"`

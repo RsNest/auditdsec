@@ -77,11 +77,14 @@ type Store struct {
 	retention int
 	now       func() time.Time
 
-	mu     sync.Mutex
-	day    string
-	f      *os.File
-	state  persisted
-	recent []model.Event
+	mu         sync.Mutex
+	day        string
+	f          *os.File
+	state      persisted
+	recent     []model.Event
+	indexes    map[string]*eventIndex
+	indexOrder []string
+	writeErr   error
 }
 
 // Open prepares the store, creating the directory layout and loading state.
@@ -100,6 +103,7 @@ func Open(o Options) (*Store, error) {
 		maxRecent: o.MaxRecent,
 		retention: o.RetentionDays,
 		now:       o.Now,
+		indexes:   map[string]*eventIndex{},
 		state: persisted{
 			Allowlist: map[string]AllowEntry{},
 			Bans:      map[string]Ban{},
@@ -130,29 +134,69 @@ func (s *Store) Close() error {
 
 // AppendEvent records an event and keeps it in the in-memory recent list.
 func (s *Store) AppendEvent(ev model.Event) error {
+	_, err := s.AppendEventOnce(ev)
+	return err
+}
+
+// AppendEventOnce durably records an event, returning false for a stored ID.
+// Legacy events without an ID remain append-only.
+func (s *Store) AppendEventOnce(ev model.Event) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
+	if s.writeErr != nil {
+		return false, s.writeErr
+	}
 	if ev.Time.IsZero() {
 		ev.Time = s.now()
+	}
+	f, err := s.fileFor(ev.Time)
+	if err != nil {
+		return false, err
+	}
+	var index *eventIndex
+	if ev.ID != "" {
+		if len(ev.ID) > 128 {
+			return false, fmt.Errorf("store: event ID is too long")
+		}
+		index, err = s.indexFor(ev.Time.UTC().Format(dayLayout))
+		if err != nil {
+			return false, err
+		}
+		seen, err := s.containsEvent(index, ev.Time.UTC().Format(dayLayout), ev.ID)
+		if err != nil {
+			return false, err
+		}
+		if seen {
+			if err := f.Sync(); err != nil {
+				s.writeErr = err
+				return false, err
+			}
+			return false, nil
+		}
+	}
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return false, fmt.Errorf("store: encode event: %w", err)
+	}
+	if len(b)+1 > maxJournalLine {
+		return false, fmt.Errorf("store: encoded event exceeds journal record limit")
+	}
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		s.writeErr = fmt.Errorf("store: write event: %w", err)
+		return false, s.writeErr
+	}
+	if err := f.Sync(); err != nil {
+		s.writeErr = fmt.Errorf("store: sync event: %w", err)
+		return false, s.writeErr
+	}
+	if index != nil {
+		index.add(ev.ID)
 	}
 	s.recent = append(s.recent, ev)
 	if len(s.recent) > s.maxRecent {
 		s.recent = s.recent[len(s.recent)-s.maxRecent:]
 	}
-
-	f, err := s.fileFor(ev.Time)
-	if err != nil {
-		return err
-	}
-	b, err := json.Marshal(ev)
-	if err != nil {
-		return fmt.Errorf("store: encode event: %w", err)
-	}
-	if _, err := f.Write(append(b, '\n')); err != nil {
-		return fmt.Errorf("store: write event: %w", err)
-	}
-	return nil
+	return true, nil
 }
 
 // Recent returns up to n of the most recent events, newest last.
@@ -372,6 +416,7 @@ func (s *Store) Purge() (int, error) {
 			return removed, fmt.Errorf("store: remove %s: %w", name, err)
 		}
 		removed++
+		delete(s.indexes, day)
 	}
 	return removed, nil
 }
@@ -388,36 +433,26 @@ func (s *Store) fileFor(t time.Time) (*os.File, error) {
 		s.f = nil
 	}
 	path := filepath.Join(s.dir, eventsDirName, day+".jsonl")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o640)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
+	}
+	if err := repairJournalTail(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	s.f, s.day = f, day
 	return f, nil
 }
 
 func (s *Store) readDay(day string) ([]model.Event, error) {
-	path := filepath.Join(s.dir, eventsDirName, day+".jsonl")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("store: read %s: %w", path, err)
-	}
 	var out []model.Event
-	for _, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var ev model.Event
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			// A half-written last line after a crash must not break reading.
-			continue
-		}
-		out = append(out, ev)
-	}
-	return out, nil
+	err := s.walkDay(day, func(ev model.Event) bool { out = append(out, ev); return true })
+	return out, err
 }
 
 func (s *Store) loadState() error {
