@@ -334,3 +334,7 @@ func (s *Server) handleSetupComplete(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("panel setup complete; sign in with the new login and password")
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// SetupState says whether first-time setup is pending ("bootstrap"), done
+// ("ready") or blocked ("locked"), for the startup log.
+func (s *Server) SetupState() string { return s.bootstrapState() }

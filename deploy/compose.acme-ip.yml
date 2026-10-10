@@ -52,6 +52,9 @@ services:
       # How often the loop compares disk and port 443 (seconds). The default is
       # right for real use; the tests shorten it.
       TICK: ${PANEL_RECONCILE_SECONDS:-60}
+      # Where the proxy serves the panel; the loop checks the certificate it
+      # actually presents there.
+      TLS_PORT: ${PANEL_HTTPS_PORT:-443}
     volumes:
       - letsencrypt${PANEL_ACME_SUFFIX:-}:/etc/letsencrypt
       - letsencrypt-lib${PANEL_ACME_SUFFIX:-}:/var/lib/letsencrypt

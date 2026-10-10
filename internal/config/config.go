@@ -17,7 +17,14 @@ import (
 	"github.com/RsNest/auditdsec/internal/redact"
 )
 
-// Profiles.
+// CurrentSchemaVersion is the config format this build writes and reads.
+// Older files (no schema_version) are read as-is: every new key has a safe
+// default, so no migration step is needed to keep an old file working.
+const CurrentSchemaVersion = 1
+
+// Profiles. DEPRECATED as a choice: there is one product with one set of
+// defaults. The names stay valid so existing files keep working; a profile
+// only changes the starting values, and any key set explicitly wins.
 const (
 	ProfileSimple = "simple"
 	ProfilePro    = "pro"
@@ -121,6 +128,10 @@ type WebConfig struct {
 	PasswordHash string
 	Password     string
 	SessionTTL   time.Duration
+	// PublicHTTPSPort is the port the proxy serves the panel on, as the
+	// internet sees it. It is NOT Listen: that is the agent's own plain-HTTP
+	// upstream on loopback. 0 means the proxy's default, 443.
+	PublicHTTPSPort int
 	// PublicURL is the address a person types into a browser, which is not
 	// the listen address when a reverse proxy is in front. It is used for the
 	// link the agent prints at startup; nothing depends on it being right.
@@ -135,6 +146,13 @@ type WebConfig struct {
 // Config is the whole configuration.
 type Config struct {
 	Profile       string
+	// ProfileExplicit is true when an old config asked for a profile by name.
+	// Profiles are a deprecated way to pick a bundle of defaults; the values
+	// are ordinary settings now and any explicit one still wins.
+	ProfileExplicit bool
+	// SchemaVersion is the config format this file was written for (0 = file
+	// predates the key). Newer than this build understands is an error.
+	SchemaVersion int
 	Lang          string
 	Host          string
 	AuditLog      string
@@ -232,19 +250,21 @@ func Load(path string) (*Config, error) {
 	}
 
 	profile := ProfileSimple
+	explicit := false
 	if root != nil {
 		if n, ok := root.child("profile"); ok && n.kind == nodeScalar && n.str != "" {
-			profile = n.str
+			profile, explicit = n.str, true
 		}
 	}
 	if v := os.Getenv("AUDITDSEC_PROFILE"); v != "" {
-		profile = v
+		profile, explicit = v, true
 	}
 	if profile != ProfileSimple && profile != ProfilePro {
 		return nil, fmt.Errorf("config: unknown profile %q (want %s or %s)", profile, ProfileSimple, ProfilePro)
 	}
 
 	c := Defaults(profile)
+	c.ProfileExplicit = explicit
 	if root != nil {
 		if err := c.decode(root); err != nil {
 			return nil, fmt.Errorf("config %s: %w", path, err)
@@ -262,7 +282,7 @@ func Load(path string) (*Config, error) {
 
 func (c *Config) decode(root *node) error {
 	d := &dec{}
-	d.strict(root, "", "profile", "lang", "host", "audit_log", "state_dir",
+	d.strict(root, "", "schema_version", "profile", "lang", "host", "audit_log", "state_dir",
 		"read_from_start", "debug", "log", "telegram", "store", "heartbeat",
 		"detect", "ban", "crowdsec", "web")
 
@@ -270,6 +290,7 @@ func (c *Config) decode(root *node) error {
 	d.str(root, "host", &c.Host)
 	d.str(root, "audit_log", &c.AuditLog)
 	d.str(root, "state_dir", &c.StateDir)
+	d.integer(root, "schema_version", &c.SchemaVersion)
 	d.boolean(root, "read_from_start", &c.ReadFromStart)
 	d.boolean(root, "debug", &c.Debug)
 
@@ -336,9 +357,11 @@ func (c *Config) decode(root *node) error {
 	}
 
 	if n := d.section(root, "web"); n != nil {
-		d.strict(n, "web", "enabled", "listen", "login", "password_hash", "public_url", "session_ttl", "trusted_proxies")
+		d.strict(n, "web", "enabled", "listen", "upstream_listen", "login", "password_hash", "public_url", "public_https_port", "session_ttl", "trusted_proxies")
 		d.boolean(n, "enabled", &c.Web.Enabled)
 		d.str(n, "listen", &c.Web.Listen)
+		d.str(n, "upstream_listen", &c.Web.Listen) // the clearer name for the same setting
+		d.integer(n, "public_https_port", &c.Web.PublicHTTPSPort)
 		d.str(n, "login", &c.Web.Login)
 		d.str(n, "password_hash", &c.Web.PasswordHash)
 		d.str(n, "public_url", &c.Web.PublicURL)
@@ -403,6 +426,14 @@ func (c *Config) applyEnv() {
 		}
 	}
 	envStr("AUDITDSEC_WEB_LISTEN", &c.Web.Listen)
+	envStr("AUDITDSEC_WEB_UPSTREAM_LISTEN", &c.Web.Listen)
+	if v := os.Getenv("AUDITDSEC_WEB_PUBLIC_HTTPS_PORT"); v != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			n = -1
+		}
+		c.Web.PublicHTTPSPort = n
+	}
 	envStr("AUDITDSEC_WEB_LOGIN", &c.Web.Login)
 	envStr("AUDITDSEC_WEB_PASSWORD_HASH", &c.Web.PasswordHash)
 	envStr("AUDITDSEC_WEB_PASSWORD", &c.Web.Password)
@@ -604,6 +635,12 @@ func (c *Config) validateWeb(add func(string, ...any)) {
 			"password would cross the network readable by anyone in the way.\n    Listen on 127.0.0.1 and let "+
 			"./install.sh set up the way in: an SSH tunnel, or a domain / public address with a proxy that adds TLS", host)
 	}
+	if w.PublicHTTPSPort < 0 || w.PublicHTTPSPort > 65535 {
+		add("web.public_https_port: %d is not a port (1-65535, or 0 for the default 443)", w.PublicHTTPSPort)
+	}
+	if c.SchemaVersion > CurrentSchemaVersion {
+		add("schema_version: %d is newer than this build understands (%d); upgrade auditdsec", c.SchemaVersion, CurrentSchemaVersion)
+	}
 	if u := strings.TrimSpace(w.PublicURL); u != "" {
 		parsed, err := url.Parse(u)
 		switch {
@@ -611,6 +648,15 @@ func (c *Config) validateWeb(add func(string, ...any)) {
 			add("web.public_url: %q is not a URL", u)
 		case parsed.Scheme != "http" && parsed.Scheme != "https":
 			add("web.public_url: %q must start with http:// or https://", u)
+		case w.PublicHTTPSPort != 0 && parsed.Scheme == "https":
+			want := strconv.Itoa(w.PublicHTTPSPort)
+			got := parsed.Port()
+			if got == "" {
+				got = "443"
+			}
+			if got != want {
+				add("web.public_url says port %s but web.public_https_port is %s: the link would not open", got, want)
+			}
 		}
 	}
 	for _, p := range w.TrustedProxies {
@@ -692,7 +738,10 @@ func (c *Config) AllowedChat(id int64) bool {
 // issue report.
 func (c *Config) Redacted() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "profile:          %s\n", c.Profile)
+	if c.ProfileExplicit {
+		fmt.Fprintf(&b, "profile:          %s (deprecated preset: its values are ordinary settings now)\n", c.Profile)
+	}
+	fmt.Fprintf(&b, "schema_version:   %d (this build writes %d)\n", c.SchemaVersion, CurrentSchemaVersion)
 	fmt.Fprintf(&b, "lang:             %s\n", c.Lang)
 	fmt.Fprintf(&b, "host:             %s\n", orDefault(c.Host, "(system host name)"))
 	fmt.Fprintf(&b, "audit_log:        %s\n", c.AuditLog)
@@ -726,6 +775,9 @@ func (c *Config) Redacted() string {
 		}
 		fmt.Fprintf(&b, "web:              listen=%s login=%s password=%s session=%s trusted_proxies=%s\n",
 			c.Web.Listen, c.Web.Login, pw, shortDur(c.Web.SessionTTL), proxies)
+		if c.Web.PublicHTTPSPort != 0 {
+			fmt.Fprintf(&b, "web.public_port:  %d (the proxy's port; the agent itself listens on %s)\n", c.Web.PublicHTTPSPort, c.Web.Listen)
+		}
 		fmt.Fprintf(&b, "web.url:          %s\n", c.PanelURL())
 	} else {
 		fmt.Fprintf(&b, "web:              off\n")

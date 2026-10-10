@@ -10,17 +10,22 @@
 # warning from the one a real attacker would cause. Prefer a domain, or a
 # public address with deploy/Caddyfile.acme-ip, whenever either is possible.
 #
-# Only port 443 has to be open: there is no challenge to answer.
+# Only the panel's port (PANEL_HTTPS_PORT, 443 by default) has to be open: there is no challenge to answer.
 
 {
 	admin 127.0.0.1:2019
+	# HTTP/3 would need the same port over UDP as well, and a firewall rule for it.
+	# The panel does not need it.
+	servers {
+		protocols h1 h2
+	}
 	# A browser sends no server name when the URL is an IP address, and Caddy
 	# would then pick the certificate by the address the client connected to,
 	# which is wrong behind NAT and when probing 127.0.0.1. Name it explicitly.
 	default_sni {$PANEL_SITE}
 }
 
-https://{$PANEL_SITE} {
+https://{$PANEL_SITE_ADDR}:{$PANEL_HTTPS_PORT:443} {
 	tls internal
 
 	encode zstd gzip

@@ -113,6 +113,10 @@ func resolveHost(configured, mounted string) string {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		var code exitCode
+		if errors.As(err, &code) {
+			os.Exit(int(code))
+		}
 		if err.Error() != "" {
 			fmt.Fprintf(os.Stderr, "auditdsec: %v\n", err)
 		}
@@ -134,6 +138,16 @@ func run(args []string) error {
 		return cmdExplain(args)
 	case "hash-password":
 		return cmdHashPassword(args)
+	case "net-check":
+		return cmdNetCheck(args)
+	case "port-plan":
+		return cmdPortPlan(args)
+	case "port-check":
+		return cmdPortCheck(args)
+	case "probe-listen":
+		return cmdProbeListen(args)
+	case "remote-check":
+		return cmdRemoteCheck(args)
 	case "reset-credentials":
 		return cmdResetCredentials(args)
 	case "check-site", "check-domain":
@@ -160,6 +174,9 @@ Usage:
   auditdsec explain KIND [-lang ru]  explain one kind of event
   auditdsec hash-password [-stdin]   hash a panel password for the web panel
   auditdsec reset-credentials -yes   forget the panel login and password (local recovery)
+  auditdsec net-check domain NAME | ip   does public DNS lead to this server? which public addresses does it have?
+  auditdsec port-plan | port-check PORT  candidate ports for the panel / can this port be bound?
+  auditdsec remote-check ...             ask a RemoteProbe provider to connect to this server from outside
   auditdsec check-site NAME|IP       can this address get a certificate?
   auditdsec version                  print the build version
 
@@ -547,7 +564,8 @@ func cmdRun(args []string) error {
 		if err != nil {
 			return err
 		}
-		log.Info("web panel enabled", "listen", cfg.Web.Listen, "login", cfg.Web.Login,
+		log.Info("web panel enabled", "public_url", cfg.PanelURL(), "upstream_listen", cfg.Web.Listen,
+			"setup", panel.SetupState(),
 			"session_ttl", cfg.Web.SessionTTL, "trusted_proxies", cfg.Web.TrustedProxies)
 		// The link is the one thing the person actually needs after
 		// installing, and hunting for it in a log line of key=value pairs is

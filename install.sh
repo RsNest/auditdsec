@@ -4,9 +4,10 @@
 #
 #   ./install.sh
 #
-# Asks how the panel should be reachable, writes .env, builds the image,
-# starts everything and then checks that the sign-in page actually answers
-# before printing the link.
+# Asks where the panel should be opened (a domain or this server's public
+# IP address) and on which HTTPS port, checks DNS and the port, checks from a
+# machine outside that the world can reach it, gets a trusted certificate,
+# starts everything and prints the link only after the checks passed.
 #
 # Running it again keeps what is already configured: the password, the
 # Telegram token, the stored events and the certificates. Answer the
@@ -30,7 +31,13 @@ MODE=""           # domain | ip | selfsigned | tunnel
 SITE=""
 EMAIL=""
 LOGIN=""
-PORT=""
+PORT=""           # the agent's own plain-HTTP port on loopback (the upstream)
+HTTPS_PORT=""     # the PUBLIC port the proxy serves the panel on: N | auto
+PUBLIC_IP=""      # this server's public address(es), when they cannot be found
+PROBE_URL=""      # RemoteProbe provider (a service on ANOTHER machine)
+PROBE_TOKEN_FILE=""
+PROBE_CACERT=""
+NO_EXTERNAL=no    # skip the outside check (a technical mode: never "published")
 PASSWORD=""
 PASSWORD_FILE=""
 ENFORCE=""        # yes | no
@@ -41,6 +48,9 @@ ACME=""           # staging | production (domain and ip modes)
 CACERT="${PANEL_CACERT:-}"   # a CA file to verify the panel's certificate against
 NO_BUILD=no
 RESTORE=no
+PORT_DEPRECATED=no
+PORT_RANGE_LO="${PANEL_PORT_RANGE_LO:-20000}"
+PORT_RANGE_HI="${PANEL_PORT_RANGE_HI:-29999}"
 
 LE_PRODUCTION="https://acme-v02.api.letsencrypt.org/directory"
 LE_STAGING="https://acme-staging-v02.api.letsencrypt.org/directory"
@@ -69,7 +79,18 @@ With no options it asks what it needs. Options are for scripts and tests.
   --site NAME|ADDRESS                  domain (domain mode) or address (ip, selfsigned)
   --email ADDRESS                      where Let's Encrypt sends expiry warnings
   --login NAME                         panel login name (default: admin)
-  --port N                             port the agent listens on (default: 9477)
+  --https-port N|auto                  the PUBLIC HTTPS port of the panel (default: auto: 443,
+                                       then up to 16 random high ports). A port you give is
+                                       never replaced silently.
+  --upstream-port N                    the agent's own port on loopback (default: 9477)
+  --port N                             old name of --upstream-port (it was never the public port)
+  --public-ip ADDRESS                  this server's public address, if it cannot be found
+  --probe-url URL                      a RemoteProbe provider: a service running on ANOTHER
+                                       machine that connects to this server from outside
+  --probe-token-file PATH              file with that provider's token
+  --probe-cacert FILE                  CA file for the provider's own certificate
+  --no-external-check                  skip the check from outside. A technical mode: nothing
+                                       is then reported as published and ready.
   --password-file PATH                 read the panel password from this file
   --enforce / --no-enforce             apply bans with nftables, or only record them
   --staging                            Let's Encrypt staging CA: a dry run whose certificates
@@ -110,7 +131,14 @@ while [ $# -gt 0 ]; do
         --site) SITE="${2:-}"; shift 2 ;;
         --email) EMAIL="${2:-}"; shift 2 ;;
         --login) LOGIN="${2:-}"; shift 2 ;;
-        --port) PORT="${2:-}"; shift 2 ;;
+        --port) PORT="${2:-}"; PORT_DEPRECATED=yes; shift 2 ;;
+        --upstream-port) PORT="${2:-}"; shift 2 ;;
+        --https-port) HTTPS_PORT="${2:-}"; shift 2 ;;
+        --public-ip) PUBLIC_IP="${2:-}"; shift 2 ;;
+        --probe-url) PROBE_URL="${2:-}"; shift 2 ;;
+        --probe-token-file) PROBE_TOKEN_FILE="${2:-}"; shift 2 ;;
+        --probe-cacert) PROBE_CACERT="${2:-}"; shift 2 ;;
+        --no-external-check) NO_EXTERNAL=yes; shift ;;
         --password-file) PASSWORD_FILE="${2:-}"; shift 2 ;;
         --enforce) ENFORCE=yes; shift ;;
         --no-enforce) ENFORCE=no; shift ;;

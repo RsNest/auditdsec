@@ -24,8 +24,11 @@ services:
     network_mode: host
     environment:
       AUDITDSEC_WEB: "1"
-      AUDITDSEC_WEB_LISTEN: 127.0.0.1:${PANEL_PORT:-9477}
-      AUDITDSEC_WEB_PUBLIC_URL: https://${PANEL_SITE:-${PANEL_DOMAIN:?set PANEL_SITE in .env, or run ./install.sh}}
+      # The agent's own plain-HTTP upstream (loopback only). Not the public port.
+      AUDITDSEC_WEB_LISTEN: 127.0.0.1:${PANEL_UPSTREAM_PORT:-${PANEL_PORT:-9477}}
+      # What a person types: written by ./install.sh with the real public port.
+      AUDITDSEC_WEB_PUBLIC_URL: ${PANEL_PUBLIC_URL:-https://${PANEL_SITE:-${PANEL_DOMAIN:?set PANEL_SITE in .env, or run ./install.sh}}}
+      AUDITDSEC_WEB_PUBLIC_HTTPS_PORT: ${PANEL_HTTPS_PORT:-443}
       # Only Caddy, on loopback, may state the client's address.
       AUDITDSEC_WEB_TRUSTED_PROXIES: 127.0.0.1,::1
 
@@ -44,7 +47,9 @@ services:
     environment:
       PANEL_SITE: ${PANEL_SITE:-${PANEL_DOMAIN:?set PANEL_SITE in .env, or run ./install.sh}}
       PANEL_EMAIL: ${PANEL_EMAIL:-}
-      PANEL_UPSTREAM: 127.0.0.1:${PANEL_PORT:-9477}
+      PANEL_SITE_ADDR: ${PANEL_SITE_ADDR:-${PANEL_SITE:-${PANEL_DOMAIN:-}}}
+      PANEL_HTTPS_PORT: ${PANEL_HTTPS_PORT:-443}
+      PANEL_UPSTREAM: 127.0.0.1:${PANEL_UPSTREAM_PORT:-${PANEL_PORT:-9477}}
       # Which ACME directory Caddy asks (domain mode), and the HSTS value. Both
       # are set by ./install.sh --staging and cleared by --production.
       PANEL_ACME_URL: ${PANEL_ACME_URL:-https://acme-v02.api.letsencrypt.org/directory}
