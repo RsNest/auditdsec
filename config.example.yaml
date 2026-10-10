@@ -138,6 +138,9 @@ web:
   # from these, so nobody else can forge the address the sign-in limiter counts
   # and the log records. With the bundled Caddy this is loopback.
   trusted_proxies: []
+  # What the agent watches in the certificate served at public_url: verify
+  # (chain and expiry, hourly), expiry (staging, self-signed, a private CA) or off.
+  cert_check: verify
 
 # CrowdSec integration — arrives in v0.3.
 crowdsec:

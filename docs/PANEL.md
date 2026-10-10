@@ -25,11 +25,19 @@ web:
   public_url: https://panel.example.com:27431
   session_ttl: 12h
   trusted_proxies: [127.0.0.1, ::1]
+  cert_check: verify                     # verify | expiry | off
 ```
 
 Переменные окружения: `AUDITDSEC_WEB=1`, `AUDITDSEC_WEB_UPSTREAM_LISTEN`
 (старое `AUDITDSEC_WEB_LISTEN`), `AUDITDSEC_WEB_PUBLIC_HTTPS_PORT`,
-`AUDITDSEC_WEB_PUBLIC_URL`, `AUDITDSEC_WEB_TRUSTED_PROXIES`.
+`AUDITDSEC_WEB_PUBLIC_URL`, `AUDITDSEC_WEB_TRUSTED_PROXIES`, `AUDITDSEC_WEB_CERT_CHECK`.
+
+Сертификат панели агент проверяет сам: раз в час (первый раз через минуту после старта)
+TLS-подключение к `public_url` (если сервер не достаёт свой публичный адрес — к
+`127.0.0.1` с тем же именем), оценка срока и цепочки. `cert_check: verify` — срок и
+цепочка по системным CA; `expiry` — только срок (staging, самоподписанный, частный CA);
+`off` — не проверять. Проблема — событие `panel_cert` (warn) не чаще раза в 6 часов;
+текущее состояние — поле `panel_cert` в `GET /diagnostics`.
 
 Три порта не путаются:
 
@@ -201,7 +209,8 @@ make preview          # соберёт preview.html с демо-данными
   Панель читает из неё `telegram.min_severity`, `telegram.quiet_hours`,
   `telegram.dedup_window`, `telegram.rate_per_minute`, `telegram.chat_ids`.
 - `GET /diagnostics` → `{debug, log_level, counters, audit_log, offset,
-  detector, banner}`.
+  detector, banner, panel_cert}`. `panel_cert` — «ok, valid until …», «PROBLEM: …»,
+  «unknown: …» (не удалось подключиться) или «not checked yet»; нет поля — панель не по https.
 
 ### Изменение
 

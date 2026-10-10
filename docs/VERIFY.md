@@ -46,6 +46,12 @@ Docker Hub, сборка `deploy/Dockerfile` на `golang:1.24-alpine`, host net
 | `no_external` | `--no-external-check` → выход 0, но «NOT published» и `Link (NOT published)` |
 | `persistence_fails` | том состояния только для чтения → агент не стартует, `service_start_failed`, выход 17, `admin / admin` не предлагается. Узкий случай `bootstrap_persistence_failed` (агент работает, но не может записать учётные данные) проверяется Go-тестом `TestUnwritableStateDirStopsFirstTimeSetup` и путём `locked` в установщике, но не на стенде |
 
+Наблюдение за сертификатом панели: после `ip_auto` и `setup_persists` (с `KEEP=1`) через
+минуту `GET /api/v1/diagnostics` вернул `"panel_cert":"ok, valid until …"`, в `.env` —
+`PANEL_CERT_CHECK=expiry` (на стенде задан `--cacert`). Сигнал о проблеме (`panel_cert` в
+Telegram) проверен Go-тестами `TestPanelCertificateIsWatched` и `TestCertProblem`, на стенде
+не вызывался: истекающий сертификат там не моделировался.
+
 `interactive.py`: первый вопрос — домен или IP, туннеля в меню нет, адрес раньше порта,
 порт раньше e-mail, итог «published», ссылка последней строкой; повторный запуск
 переносит панель на порт, введённый руками, и не спрашивает зонд повторно.

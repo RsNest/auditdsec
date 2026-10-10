@@ -263,6 +263,12 @@ Implemented in stage 0.
   certificate over HTTP-01 on 80 (the only challenge an address can use) and Caddy loads
   the files; a loop renews it and checks every minute that the panel port serves the
   file on disk.
+- The agent watches the certificate its panel serves (`internal/netcheck/served.go`,
+  `pipeline.watchPanelCert`): hourly, off the main loop, it dials `public_url` (loopback
+  with the same SNI if the server cannot reach itself) and reports a `panel_cert` warning
+  when the certificate has expired, has less than a quarter of its lifetime left, or —
+  with `web.cert_check: verify` — does not chain to the system roots. Staging,
+  self-signed and privately signed setups use `expiry`. The status is in diagnostics.
 - `./install.sh` decides and checks, in this order: preflight → domain or IP → public DNS
   (`auditdsec net-check`: several resolvers, A and AAAA apart, CNAME followed; every
   record must lead here) → port (`port-plan`, `port-check` binds v4 and v6, then
