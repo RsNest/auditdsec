@@ -190,6 +190,9 @@ func (s *Server) routes() {
 	api("GET /api/v1/incidents", true, s.handleIncidents)
 	api("GET /api/v1/incidents/{id}", true, s.handleIncident)
 	api("POST /api/v1/incidents/{id}", true, s.handleIncidentAction)
+	api("GET /api/v1/exceptions", true, s.handleExceptions)
+	api("POST /api/v1/exceptions", true, s.handleExceptionAdd)
+	api("DELETE /api/v1/exceptions/{id}", true, s.handleExceptionDelete)
 	api("POST /api/v1/bans", true, s.handleBan)
 	api("DELETE /api/v1/bans/{ip}", true, s.handleUnban)
 	api("GET /api/v1/allowlist", true, s.handleAllowlist)
@@ -411,18 +414,19 @@ func (s *Server) lang(r *http.Request) i18n.Lang {
 }
 
 type eventJSON struct {
-	ID       string            `json:"id"`
-	EventID  string            `json:"event_id,omitempty"`
-	Time     time.Time         `json:"time"`
-	Host     string            `json:"host"`
-	Kind     model.Kind        `json:"kind"`
-	Severity string            `json:"severity"`
-	User     string            `json:"user,omitempty"`
-	SrcIP    string            `json:"src_ip,omitempty"`
-	Summary  string            `json:"summary"`
-	Args     map[string]string `json:"args,omitempty"`
-	Raw      string            `json:"raw,omitempty"`
-	Context  *model.Context    `json:"context,omitempty"`
+	ID         string            `json:"id"`
+	EventID    string            `json:"event_id,omitempty"`
+	Time       time.Time         `json:"time"`
+	Host       string            `json:"host"`
+	Kind       model.Kind        `json:"kind"`
+	Severity   string            `json:"severity"`
+	User       string            `json:"user,omitempty"`
+	SrcIP      string            `json:"src_ip,omitempty"`
+	Summary    string            `json:"summary"`
+	Args       map[string]string `json:"args,omitempty"`
+	Raw        string            `json:"raw,omitempty"`
+	Context    *model.Context    `json:"context,omitempty"`
+	Suppressed string            `json:"suppressed,omitempty"`
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -488,7 +492,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, eventJSON{
 			ID: id, EventID: ev.ID, Time: ev.Time.UTC(), Host: ev.Host, Kind: ev.Kind, Severity: ev.Severity.String(),
-			User: ev.User, SrcIP: ev.SrcIP, Summary: summary, Args: ev.Args, Raw: ev.Raw, Context: ev.Context,
+			User: ev.User, SrcIP: ev.SrcIP, Summary: summary, Args: ev.Args, Raw: ev.Raw, Context: ev.Context, Suppressed: ev.Suppressed,
 		})
 		return len(items) <= limit
 	})

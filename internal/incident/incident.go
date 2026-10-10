@@ -259,7 +259,7 @@ func Plan(st *State, in Input) Change {
 		}
 	}
 
-	if l, ok := linkOf(ev); ok {
+	if l, ok := linkOf(ev); ok && ev.Suppressed == "" {
 		n := get(l.key, l.gap, ev.Time)
 		if n == nil && opens(ev) {
 			rk, args := reasonOf(ev, l)

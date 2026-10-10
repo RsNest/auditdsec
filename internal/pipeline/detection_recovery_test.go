@@ -13,6 +13,7 @@ import (
 	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/delivery"
 	"github.com/RsNest/auditdsec/internal/detect"
+	"github.com/RsNest/auditdsec/internal/exception"
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/store"
 )
@@ -571,5 +572,67 @@ func TestIncidentSurvivesRecoveryExactlyOnce(t *testing.T) {
 			t.Errorf("round %d: the triggering event was counted %d times", round, in.Total)
 		}
 		b.crash()
+	}
+}
+
+// An exception silences the notification of the exact activity it names and
+// nothing else: the event is stored with the marker, critical events and
+// detection are untouched.
+func TestExceptionSilencesOnlyWhatItNames(t *testing.T) {
+	l := newLab(t)
+	l.planner = true
+	a := l.boot()
+	defer a.crash()
+	mustStart(t, a)
+	if _, err := a.st.AddException(exception.Rule{Kind: model.KindSSHLoginFail, SrcIP: attacker, Reason: "known scanner", ExpiresAt: l.now.Add(time.Hour)}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for i := 0; i < 6; i++ {
+		if err := a.p.handle(ctx, l.failure(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := l.failure(10)
+	other.ID, other.SrcIP = "ev-other", "203.0.113.9"
+	if err := a.p.handle(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	crit := l.failure(11)
+	crit.ID, crit.Severity = "ev-crit", model.SevCritical
+	if err := a.p.handle(ctx, crit); err != nil {
+		t.Fatal(err)
+	}
+
+	byID := map[string]model.Event{}
+	for _, ev := range a.st.Recent(50) {
+		byID[ev.ID] = ev
+	}
+	if len(byID) != 8 {
+		t.Fatalf("every event must be stored, got %d", len(byID))
+	}
+	if byID["ev-0"].Suppressed == "" || byID["ev-5"].Suppressed == "" {
+		t.Error("the named activity was not marked")
+	}
+	if byID["ev-other"].Suppressed != "" {
+		t.Error("another address was silenced")
+	}
+	if byID["ev-crit"].Suppressed != "" {
+		t.Error("a critical event was silenced")
+	}
+	st := a.p.outbox.Stats()
+	if st.Suppressed < 6 {
+		t.Errorf("the silenced events must be counted as suppressed: %+v", st)
+	}
+	// 2 event notifications (the other address, the critical one) + the ban notice.
+	if st.Queued != 3 {
+		t.Errorf("only unsilenced events and the ban notice may be queued: %+v", st)
+	}
+	// Detection and bans do not depend on exceptions.
+	if ban, ok := a.ban(); !ok || ban.Count != 1 {
+		t.Errorf("the ban must still happen: %+v", ban)
+	}
+	if _, hits := a.st.Exceptions(); hits["exc-1"].Count != 6 {
+		t.Errorf("hits: %+v", hits)
 	}
 }

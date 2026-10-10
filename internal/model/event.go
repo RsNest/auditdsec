@@ -120,6 +120,9 @@ type Event struct {
 	// Context is the process and session attribution; see Context. Absent on
 	// events stored before it existed.
 	Context *Context `json:"context,omitempty"`
+	// Suppressed is the ID of the exception that silenced this event's
+	// notification. The event itself is stored and shown as usual.
+	Suppressed string `json:"suppressed,omitempty"`
 }
 
 // Arg returns one rendering argument, or the empty string.

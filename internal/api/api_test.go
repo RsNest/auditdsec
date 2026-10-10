@@ -926,3 +926,42 @@ func TestIncidentsAPI(t *testing.T) {
 		t.Errorf("bad state: %d", rec.Code)
 	}
 }
+
+func TestExceptionsAPI(t *testing.T) {
+	s, _, _ := newServer(t)
+	if rec := do(t, s, http.MethodGet, "/api/v1/exceptions", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("exceptions need a session: %d", rec.Code)
+	}
+	token := signIn(t, s)
+	body := map[string]any{"kind": "sudo", "user": "root", "cmd_prefix": "systemctl restart nginx", "reason": "nightly deploy", "hours": 24}
+	rec := do(t, s, http.MethodPost, "/api/v1/exceptions", token, body)
+	var got exceptionJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || rec.Code != http.StatusOK || got.ID != "exc-1" || !got.Active || got.CreatedBy == "" {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	// Refusals say why and store nothing.
+	for name, b := range map[string]map[string]any{
+		"whole kind": {"kind": "sudo", "reason": "x", "hours": 1},
+		"no reason":  {"kind": "sudo", "user": "root", "hours": 1},
+		"too long":   {"kind": "sudo", "user": "root", "reason": "x", "hours": 99999},
+		"no expiry":  {"kind": "sudo", "user": "root", "reason": "x"},
+		"bad kind":   {"kind": "nope", "user": "root", "reason": "x", "hours": 1},
+	} {
+		if rec := do(t, s, http.MethodPost, "/api/v1/exceptions", token, b); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d", name, rec.Code)
+		}
+	}
+	var list struct {
+		Items []exceptionJSON `json:"items"`
+	}
+	rec = do(t, s, http.MethodGet, "/api/v1/exceptions", token, nil)
+	if json.Unmarshal(rec.Body.Bytes(), &list); len(list.Items) != 1 {
+		t.Fatalf("%s", rec.Body.String())
+	}
+	if rec = do(t, s, http.MethodDelete, "/api/v1/exceptions/exc-9", token, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown: %d", rec.Code)
+	}
+	if rec = do(t, s, http.MethodDelete, "/api/v1/exceptions/exc-1", token, nil); rec.Code != http.StatusNoContent {
+		t.Errorf("delete: %d", rec.Code)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/delivery"
+	"github.com/RsNest/auditdsec/internal/exception"
 	"github.com/RsNest/auditdsec/internal/model"
 )
 
@@ -228,4 +229,62 @@ func TestRestoreConsumedStopsAtTheCursor(t *testing.T) {
 	if len(restored) != 2 || restored[0] != "e0" || restored[1] != "e1" {
 		t.Errorf("restored %v, want the two consumed events only", restored)
 	}
+}
+
+func TestExceptionsPersistAndRollBack(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	var fail error
+	s := detectStore(t, &now, func() error { return fail })
+	r := exception.Rule{Kind: model.KindSudo, User: "root", Reason: "deploy", ExpiresAt: now.Add(time.Hour)}
+
+	fail = errors.New("disk full")
+	if _, err := s.AddException(r, "panel"); err == nil {
+		t.Fatal("want the write failure")
+	}
+	if rules, _ := s.Exceptions(); len(rules) != 0 {
+		t.Fatalf("a failed write left a rule: %+v", rules)
+	}
+	fail = nil
+	got, err := s.AddException(r, "panel:203.0.113.1")
+	if err != nil || got.ID != "exc-1" || got.CreatedBy != "panel:203.0.113.1" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	ev := model.Event{Kind: model.KindSudo, Severity: model.SevInfo, User: "root"}
+	if x, ok := s.MatchException(ev); !ok || x.ID != "exc-1" {
+		t.Fatal("no match")
+	}
+	if _, hits := s.Exceptions(); hits["exc-1"].Count != 1 {
+		t.Errorf("hits: %+v", hits)
+	}
+	if err := s.RemoveException("exc-9"); !errors.Is(err, ErrNoException) {
+		t.Errorf("%v", err)
+	}
+	if err := s.RemoveException("exc-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.MatchException(ev); ok {
+		t.Error("a removed exception still matches")
+	}
+	// IDs are not reused.
+	if next, _ := s.AddException(r, "x"); next.ID != "exc-2" {
+		t.Errorf("%s", next.ID)
+	}
+	// Expired rules are dropped after the keep period, and the number is capped.
+	now = now.Add(exception.MaxLife + exception.KeepExpiry + 24*time.Hour)
+	r.ExpiresAt = now.Add(time.Hour)
+	if _, err := s.AddException(r, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if rules, _ := s.Exceptions(); len(rules) != 1 {
+		t.Errorf("old rules were not pruned: %d", len(rules))
+	}
+	for i := 0; i < exception.MaxRules; i++ {
+		if _, err := s.AddException(r, "x"); err != nil {
+			if !errors.Is(err, exception.ErrInvalid) {
+				t.Fatal(err)
+			}
+			return
+		}
+	}
+	t.Error("the number of exceptions is not capped")
 }

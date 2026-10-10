@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/delivery"
+	"github.com/RsNest/auditdsec/internal/exception"
 	"github.com/RsNest/auditdsec/internal/incident"
 	"github.com/RsNest/auditdsec/internal/model"
 )
@@ -84,6 +85,9 @@ type persisted struct {
 	Detect *DetectState `json:"detect,omitempty"`
 	// Incidents are the correlated stories built from consumed events.
 	Incidents *incident.State `json:"incidents,omitempty"`
+	// Exceptions are the owner's targeted silences; ExceptionSeq numbers them.
+	Exceptions   []exception.Rule `json:"exceptions,omitempty"`
+	ExceptionSeq int              `json:"exception_seq,omitempty"`
 }
 
 // Options configures a Store.
@@ -116,9 +120,10 @@ type Store struct {
 	indexes    map[string]*eventIndex
 	indexOrder []string
 	writeErr   error
-	pending    map[string]bool // journal days with input the detector has not consumed
-	detecting  bool            // a consumer is running in this process
-	hook       func() error    // test seam: runs before every state write
+	pending    map[string]bool          // journal days with input the detector has not consumed
+	detecting  bool                     // a consumer is running in this process
+	hits       map[string]ExceptionHits // exception hit counts since start
+	hook       func() error             // test seam: runs before every state write
 }
 
 // Open prepares the store, creating the directory layout and loading state.

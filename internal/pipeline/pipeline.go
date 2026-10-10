@@ -481,7 +481,7 @@ func (p *Pipeline) emit(ctx context.Context, events []*parse.Event) error {
 func (p *Pipeline) handle(ctx context.Context, ev model.Event) error {
 	// The one boundary: whatever built the event, nothing reaches the journal,
 	// the notification plan, the detector or a message unsanitized.
-	ev = sanitize.Event(ev)
+	ev = p.silence(sanitize.Event(ev))
 	added, err := p.persistEvent(ev)
 	if err != nil {
 		return err
@@ -737,7 +737,7 @@ func (p *Pipeline) autoAllowlist(ctx context.Context, ev model.Event) {
 }
 
 func (p *Pipeline) deliver(ctx context.Context, ev model.Event) (bool, error) {
-	ev = sanitize.Event(ev)
+	ev = p.silence(sanitize.Event(ev))
 	added, err := p.persistEvent(ev)
 	if added && err == nil {
 		err = p.notifyEvent(ctx, ev)
@@ -759,7 +759,10 @@ func (p *Pipeline) persistEvent(ev model.Event) (bool, error) {
 			}
 			ev.ID = fmt.Sprintf("%x", nonce)
 		}
-		prepared := p.planner.PlanEvent(ev)
+		prepared := delivery.Plan{Suppressed: "exception"}
+		if ev.Suppressed == "" {
+			prepared = p.planner.PlanEvent(ev)
+		}
 		plan = &prepared
 	}
 	committed, err := p.opt.Store.AppendEventWithPlan(ev, plan)
@@ -778,6 +781,9 @@ func (p *Pipeline) persistEvent(ev model.Event) (bool, error) {
 func (p *Pipeline) notifyEvent(ctx context.Context, ev model.Event) error {
 	if p.outbox != nil {
 		return p.recoverDeliveries(ctx)
+	}
+	if ev.Suppressed != "" {
+		return nil // silenced by an exception: stored and shown, not sent
 	}
 	if err := p.opt.Notifier.Notify(ctx, ev); err != nil {
 		p.log.Error("cannot send the alert", "kind", ev.Kind, "error", err)
@@ -1043,4 +1049,18 @@ func (p *Pipeline) saveSessions() {
 	if err := p.opt.Sessions.Save(p.sessionPath); err != nil {
 		p.log.Warn("cannot save the session table; attribution may be incomplete after a restart", "error", err)
 	}
+}
+
+// silence marks an event that an exception silences. The event is still
+// stored; only its notification (and its incident) is skipped. Critical events
+// are never silenced, and detection never sees any of this.
+func (p *Pipeline) silence(ev model.Event) model.Event {
+	if ev.Suppressed != "" {
+		return ev
+	}
+	if x, ok := p.opt.Store.MatchException(ev); ok {
+		ev.Suppressed = x.ID
+		p.log.Debug("event silenced by an exception", "exception", x.ID, "kind", ev.Kind)
+	}
+	return ev
 }
