@@ -11,7 +11,7 @@ import (
 
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/parse"
-	"github.com/RsNest/auditdsec/internal/redact"
+	"github.com/RsNest/auditdsec/internal/sanitize"
 )
 
 // maxRaw caps the stored evidence per event.
@@ -87,7 +87,6 @@ func (m *Mapper) MapVerbose(ev *parse.Event) (model.Event, string, bool) {
 		Time: ev.Time,
 		Host: m.host,
 		Args: map[string]string{},
-		Raw:  truncate(ev.Raw(), maxRaw),
 	}
 
 	switch {
@@ -134,14 +133,10 @@ func (m *Mapper) MapVerbose(ev *parse.Event) (model.Event, string, bool) {
 		out.Kind = model.KindSudo
 		out.Severity = model.SevInfo
 		out.User = userOf(ev)
-		cmd := redact.String(ev.Field("cmd"))
-		out.Args["cmd"] = cmd
+		// From the record itself: a value that cannot be decoded is replaced,
+		// never passed through as reversible hex.
+		out.Args["cmd"] = sanitize.Command(rawLines(ev))
 		out.Args["cwd"] = ev.Field("cwd")
-		// The raw line carries the same command hex-encoded; replace it so the
-		// stored evidence cannot be decoded back into a secret.
-		if hexCmd := rawHexCmd(ev); hexCmd != "" {
-			out.Raw = strings.ReplaceAll(out.Raw, hexCmd, cmd)
-		}
 
 	case accountRecordOf(ev) != "":
 		typ := accountRecordOf(ev)
@@ -181,8 +176,10 @@ func (m *Mapper) MapVerbose(ev *parse.Event) (model.Event, string, bool) {
 	out.SummaryKey = "event." + string(out.Kind)
 	out.Args["user"] = out.User
 	out.Args["kind"] = string(out.Kind)
-	out.Args = redact.Args(out.Args)
-	return out, "", true
+	// The evidence is rebuilt from the records with their arguments masked as
+	// vectors, then the whole event passes the final guard.
+	out.Raw = sanitize.AuditRaw(rawLines(ev), maxRaw)
+	return sanitize.Event(out), "", true
 }
 
 // knownKeys lists the audit rule keys the agent acts on, for the debug message
@@ -333,36 +330,13 @@ func succeeded(ev *parse.Event) bool {
 	return ev.Field("success") == "yes"
 }
 
-// rawHexCmd returns the hex form of the sudo command as it appears in the log.
-func rawHexCmd(ev *parse.Event) string {
-	for _, r := range ev.Records {
-		i := strings.Index(r.Raw, "cmd=")
-		if i < 0 {
-			continue
-		}
-		rest := r.Raw[i+4:]
-		end := strings.IndexAny(rest, " '\"")
-		if end < 0 {
-			end = len(rest)
-		}
-		if cand := rest[:end]; isUpperHex(cand) {
-			return cand
-		}
+// rawLines is the original text of each record of the event.
+func rawLines(ev *parse.Event) []string {
+	lines := make([]string, len(ev.Records))
+	for i, r := range ev.Records {
+		lines[i] = r.Raw
 	}
-	return ""
-}
-
-func isUpperHex(s string) bool {
-	if len(s) < 4 || len(s)%2 != 0 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
+	return lines
 }
 
 func valid(s string) bool {
@@ -376,13 +350,6 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }
 
 // PanelCertProblem builds the event reported when the certificate the panel

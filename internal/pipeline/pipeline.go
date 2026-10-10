@@ -25,7 +25,7 @@ import (
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/netcheck"
 	"github.com/RsNest/auditdsec/internal/parse"
-	"github.com/RsNest/auditdsec/internal/redact"
+	"github.com/RsNest/auditdsec/internal/sanitize"
 	"github.com/RsNest/auditdsec/internal/semantic"
 	"github.com/RsNest/auditdsec/internal/source"
 	"github.com/RsNest/auditdsec/internal/store"
@@ -346,9 +346,10 @@ func (p *Pipeline) feedSource(ctx context.Context, line source.Line) error {
 	}
 	lineText := line.Text
 	if p.opt.Debug {
-		// Secrets are masked first: a debug log is still a file on disk, and a
-		// hex-encoded sudo command would otherwise carry a password into it.
-		p.log.Debug("audit line", "line", redact.AuditLine(lineText))
+		// Never the content: a secret can be split over the records of one
+		// event (a1="-p" a2="secret"), so a single line cannot be masked on
+		// its own. The sanitized event is logged once it is assembled.
+		p.log.Debug("audit line", "start", line.Start.Offset, "bytes", len(lineText), "type", sanitize.RecordType(lineText))
 	}
 	events, err := p.asm.AddAt(lineText, line.Start.Offset, p.now())
 	if err != nil {
@@ -416,6 +417,9 @@ func (p *Pipeline) emit(ctx context.Context, events []*parse.Event) error {
 // handle journals an event before detection, and enforces its decisions before
 // sending the triggering alert. Derived events are never fed back into detection.
 func (p *Pipeline) handle(ctx context.Context, ev model.Event) error {
+	// The one boundary: whatever built the event, nothing reaches the journal,
+	// the notification plan, the detector or a message unsanitized.
+	ev = sanitize.Event(ev)
 	added, err := p.persistEvent(ev)
 	if err != nil {
 		return err
@@ -581,6 +585,7 @@ func (p *Pipeline) reapplyBans(ctx context.Context) {
 }
 
 func (p *Pipeline) deliver(ctx context.Context, ev model.Event) (bool, error) {
+	ev = sanitize.Event(ev)
 	added, err := p.persistEvent(ev)
 	if added && err == nil {
 		err = p.notifyEvent(ctx, ev)
@@ -589,6 +594,7 @@ func (p *Pipeline) deliver(ctx context.Context, ev model.Event) (bool, error) {
 }
 
 func (p *Pipeline) persistEvent(ev model.Event) (bool, error) {
+	ev = sanitize.Event(ev) // idempotent; deliver() reaches here without handle()
 	var plan *delivery.Plan
 	if p.planner != nil {
 		if ev.Time.IsZero() {

@@ -49,37 +49,6 @@ func TestStringLeavesHarmlessFlagsAlone(t *testing.T) {
 	}
 }
 
-// Debug logging prints raw audit lines, so the hex form of a command must be
-// decoded and masked rather than copied verbatim.
-func TestAuditLine(t *testing.T) {
-	in := `type=USER_CMD msg=audit(1760000000.000:6): pid=2000 uid=1000 msg='cwd="/home/ruslan" cmd=6D7973716C202D7068756E74657232 terminal=pts/0 res=success'`
-	got := AuditLine(in)
-	if strings.Contains(got, "6D7973716C202D7068756E74657232") {
-		t.Errorf("the hex command survived: %q", got)
-	}
-	if !strings.Contains(got, `cmd="mysql -p***"`) {
-		t.Errorf("the command should be decoded and masked, got %q", got)
-	}
-	if !strings.Contains(got, "pid=2000") {
-		t.Errorf("the rest of the line must stay intact: %q", got)
-	}
-}
-
-func TestAuditLineLeavesOrdinaryLinesAlone(t *testing.T) {
-	in := `type=SYSCALL msg=audit(1760000000.000:9): arch=c000003e syscall=257 success=yes comm="vim" key="ads_identity"`
-	if got := AuditLine(in); got != in {
-		t.Errorf("AuditLine changed a line with no secrets:\n got %q\nwant %q", got, in)
-	}
-}
-
-func TestAuditLineMasksPlaintextSecrets(t *testing.T) {
-	in := `type=EXECVE msg=audit(1760000000.000:9): a0="psql" a1="password=hunter2"`
-	got := AuditLine(in)
-	if strings.Contains(got, "hunter2") {
-		t.Errorf("a plaintext secret survived: %q", got)
-	}
-}
-
 func TestArgs(t *testing.T) {
 	in := map[string]string{"cmd": "mysql password=abc", "path": "/etc/passwd"}
 	out := Args(in)
@@ -108,5 +77,111 @@ func TestToken(t *testing.T) {
 		if got := Token(in); got != want {
 			t.Errorf("Token(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestStringJSONAndEnvNames(t *testing.T) {
+	tests := map[string]string{
+		`curl -d '{"password": "hunter2", "user": "bob"}' x`: `curl -d '{"password": "***", "user": "bob"}' x`,
+		`{"api_key":"abc123"}`:                               `{"api_key":"***"}`,
+		"MYSQL_PWD=hunter2 mysqldump db":                     "MYSQL_PWD=*** mysqldump db",
+		"PGPASSWORD=hunter2 psql":                            "PGPASSWORD=*** psql",
+		"Cookie: session=abcdef":                             "Cookie: ***",
+		"bypass=1 passenger=2":                               "bypass=1 passenger=2",
+	}
+	for in, want := range tests {
+		if got := String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+		if got := String(String(in)); got != String(in) {
+			t.Errorf("String is not idempotent on %q: %q", in, got)
+		}
+	}
+}
+
+// A secret that is a separate argument is invisible to flat text patterns;
+// the argument vector sees it.
+func TestArgvMasksSeparateArguments(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"long option value", []string{"restic", "--password", "s3cr3t", "backup"}, []string{"restic", "--password", "***", "backup"}},
+		{"long option equals", []string{"app", "--token=abc", "x"}, []string{"app", "--token=***", "x"}},
+		{"sshpass", []string{"sshpass", "-p", "hunter2", "ssh", "host"}, []string{"sshpass", "-p", "***", "ssh", "host"}},
+		{"sshpass under sudo", []string{"sudo", "-u", "bob", "sshpass", "-phunter2", "ssh"}, []string{"sudo", "-u", "bob", "sshpass", "-p***", "ssh"}},
+		{"mysql attached", []string{"mysql", "-uroot", "-phunter2", "db"}, []string{"mysql", "-uroot", "-p***", "db"}},
+		{"mysql prompt", []string{"mysql", "-p", "db"}, []string{"mysql", "-p", "db"}},
+		{"redis", []string{"redis-cli", "-a", "hunter2", "ping"}, []string{"redis-cli", "-a", "***", "ping"}},
+		{"curl user", []string{"curl", "-u", "bob:hunter2", "https://x"}, []string{"curl", "-u", "bob:***", "https://x"}},
+		{"curl header", []string{"curl", "-H", "Authorization: Bearer abc", "https://x"}, []string{"curl", "-H", "Authorization: ***", "https://x"}},
+		{"curl cookie", []string{"curl", "-b", "sid=abc", "https://x"}, []string{"curl", "-b", "***", "https://x"}},
+		{"env assignment", []string{"env", "PGPASSWORD=hunter2", "psql"}, []string{"env", "PGPASSWORD=***", "psql"}},
+		{"docker env flag", []string{"docker", "run", "-e", "DB_PASSWORD=hunter2", "img"}, []string{"docker", "run", "-e", "DB_PASSWORD=***", "img"}},
+		{"docker login", []string{"docker", "login", "-u", "bob", "-p", "hunter2"}, []string{"docker", "login", "-u", "bob", "-p", "***"}},
+		{"openssl passin", []string{"openssl", "rsa", "-passin", "pass:hunter2"}, []string{"openssl", "rsa", "-passin", "***"}},
+		{"keyword", []string{"mysqladmin", "-u", "root", "password", "newpass"}, []string{"mysqladmin", "-u", "root", "password", "***"}},
+		{"openssl passwd", []string{"openssl", "passwd", "-1", "hunter2"}, []string{"openssl", "passwd", "-1", "***"}},
+		{"useradd hash", []string{"useradd", "-p", "$6$salt$hash", "bob"}, []string{"useradd", "-p", "***", "bob"}},
+		{"htpasswd", []string{"htpasswd", "-b", "/etc/x", "bob", "hunter2"}, []string{"htpasswd", "-b", "/etc/x", "bob", "***"}},
+		{"chpasswd", []string{"echo", "root:hunter2", "|", "chpasswd"}, []string{"echo", "root:***", "|", "chpasswd"}},
+		{"url credentials", []string{"git", "clone", "https://bob:pa55@h/x"}, []string{"git", "clone", "https://bob:***@h/x"}},
+		// harmless everyday commands stay as they are
+		{"mkdir -p", []string{"mkdir", "-p", "/var/lib/x"}, []string{"mkdir", "-p", "/var/lib/x"}},
+		{"ssh port", []string{"ssh", "-p", "2222", "host"}, []string{"ssh", "-p", "2222", "host"}},
+		{"docker run port", []string{"docker", "run", "-p", "80:80", "img"}, []string{"docker", "run", "-p", "80:80", "img"}},
+		{"docker run user", []string{"docker", "run", "--user", "1000:1000", "img"}, []string{"docker", "run", "--user", "1000:1000", "img"}},
+		{"passwd tool", []string{"passwd", "root"}, []string{"passwd", "root"}},
+		{"password file option", []string{"app", "--password-file", "/run/x"}, []string{"app", "--password-file", "/run/x"}},
+		{"PWD", []string{"env", "PATH=/bin", "ls"}, []string{"env", "PATH=/bin", "ls"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := append([]string(nil), tc.in...)
+			got := Argv(tc.in)
+			if strings.Join(got, "\x00") != strings.Join(tc.want, "\x00") {
+				t.Errorf("Argv(%q)\n got %q\nwant %q", in, got, tc.want)
+			}
+			if again := Argv(got); strings.Join(again, "\x00") != strings.Join(got, "\x00") {
+				t.Errorf("Argv is not idempotent: %q then %q", got, again)
+			}
+			if strings.Join(tc.in, "\x00") != strings.Join(in, "\x00") {
+				t.Error("Argv modified its input")
+			}
+		})
+	}
+}
+
+func TestCommandKeepsQuotingOfUntouchedWords(t *testing.T) {
+	tests := map[string]string{
+		`grep "a b" file`:                         `grep "a b" file`,
+		`mysql -u root -phunter2 -e 'select 1'`:   `mysql -u root -p*** -e 'select 1'`,
+		`sshpass -p 'hunter 2' ssh host`:          `sshpass -p *** ssh host`,
+		`curl -H "Authorization: Bearer abc" url`: `curl -H 'Authorization: ***' url`,
+		`echo it's fine && mysql -phunter2`:       `echo it's fine && mysql -p***`, // unbalanced quote: split on spaces
+		`echo root:hunter2 | chpasswd`:            `echo root:*** | chpasswd`,
+		`restic --password=s3cr3t backup`:         `restic --password=*** backup`,
+		"  ls   -l  ":                             "ls -l",
+	}
+	for in, want := range tests {
+		if got := Command(in); got != want {
+			t.Errorf("Command(%q)\n got %q\nwant %q", in, got, want)
+		}
+		if got := Command(Command(in)); got != Command(in) {
+			t.Errorf("Command is not idempotent on %q: %q", in, got)
+		}
+	}
+}
+
+// Bounded work: a huge or hostile command line does not blow up.
+func TestCommandIsBounded(t *testing.T) {
+	long := strings.Repeat("a ", 100000) + "--password hunter2"
+	got := Command(long)
+	if strings.Contains(got, "hunter2") {
+		t.Error("the secret after the word limit survived")
+	}
+	if n := len(SplitCommand(long)); n > maxTokens+1 {
+		t.Errorf("%d words examined", n)
 	}
 }

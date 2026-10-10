@@ -59,13 +59,13 @@ func ParseLine(line string) (Record, error) {
 	const marker = "msg=audit("
 	i := strings.Index(s, marker)
 	if i < 0 {
-		return Record{}, fmt.Errorf("%w: no audit timestamp: %s", ErrSkip, truncate(s, 80))
+		return Record{}, fmt.Errorf("%w: no audit timestamp (line of %d bytes)", ErrSkip, len(s))
 	}
 	head := s[:i]
 	rest := s[i+len(marker):]
 	j := strings.IndexByte(rest, ')')
 	if j < 0 {
-		return Record{}, fmt.Errorf("parse: unterminated audit timestamp: %s", truncate(s, 80))
+		return Record{}, fmt.Errorf("parse: unterminated audit timestamp (line of %d bytes)", len(s))
 	}
 	ts, serial, err := parseStamp(rest[:j])
 	if err != nil {
@@ -93,7 +93,7 @@ func ParseLine(line string) (Record, error) {
 
 	typ := fields["type"]
 	if typ == "" {
-		return Record{}, fmt.Errorf("%w: no type field: %s", ErrSkip, truncate(s, 80))
+		return Record{}, fmt.Errorf("%w: no type field (line of %d bytes)", ErrSkip, len(s))
 	}
 	return Record{Type: typ, Time: ts, Serial: serial, Fields: fields, Raw: raw}, nil
 }

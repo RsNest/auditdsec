@@ -25,6 +25,7 @@ import (
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/notify/telegram"
 	"github.com/RsNest/auditdsec/internal/pipeline"
+	"github.com/RsNest/auditdsec/internal/sanitize"
 	"github.com/RsNest/auditdsec/internal/store"
 	"github.com/RsNest/auditdsec/internal/web"
 )
@@ -462,6 +463,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		if userQ != "" && !strings.Contains(strings.ToLower(ev.User), userQ) {
 			return true
 		}
+		// Events written by older versions may hold unmasked evidence: it is
+		// masked on the way out, before the search can match against it, so
+		// neither the answer nor a query can reveal it. Stored files are not
+		// rewritten.
+		ev = sanitize.Event(ev)
 		summary := i18n.T(lang, ev.SummaryKey, ev.Args)
 		if needle != "" && !strings.Contains(strings.ToLower(summary+" "+ev.User+" "+ev.SrcIP+" "+ev.Raw), needle) {
 			return true
