@@ -106,6 +106,11 @@ type Event struct {
 	SummaryKey string            `json:"summary_key"`
 	Args       map[string]string `json:"args,omitempty"`
 	Raw        string            `json:"raw,omitempty"`
+	// Incomplete says why the audit records behind this event were not all
+	// seen (closed on a timeout, cut by a memory limit, records arriving
+	// late). Empty for a complete event. The event is evidence either way,
+	// but an incomplete one is not proof of everything that happened.
+	Incomplete string `json:"incomplete,omitempty"`
 }
 
 // Arg returns one rendering argument, or the empty string.

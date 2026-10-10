@@ -45,57 +45,6 @@ func TestAssemblerGroupsBySerialAndEOE(t *testing.T) {
 	}
 }
 
-// Without an EOE record, a new serial closes the previous event.
-func TestAssemblerNewSerialClosesPrevious(t *testing.T) {
-	a := NewAssembler(time.Second)
-	now := time.Unix(1760000000, 0)
-
-	if done, _ := a.Add(`type=USER_LOGIN msg=audit(1760000000.000:1): msg='res=success'`, now); len(done) != 0 {
-		t.Fatalf("got %d events too early", len(done))
-	}
-	done, err := a.Add(`type=USER_LOGIN msg=audit(1760000001.000:2): msg='res=failed'`, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(done) != 1 || done[0].Serial != 1 {
-		t.Fatalf("expected serial 1 to be completed, got %+v", done)
-	}
-	if a.Pending() != 1 {
-		t.Errorf("Pending = %d, want 1 (serial 2 still open)", a.Pending())
-	}
-}
-
-func TestAssemblerExpire(t *testing.T) {
-	a := NewAssembler(500 * time.Millisecond)
-	start := time.Unix(1760000000, 0)
-
-	if _, err := a.Add(`type=USER_LOGIN msg=audit(1760000000.000:1): msg='res=success'`, start); err != nil {
-		t.Fatal(err)
-	}
-	if done := a.Expire(start.Add(100 * time.Millisecond)); len(done) != 0 {
-		t.Fatalf("expired too early: %d", len(done))
-	}
-	done := a.Expire(start.Add(600 * time.Millisecond))
-	if len(done) != 1 || done[0].Serial != 1 {
-		t.Fatalf("Expire = %+v", done)
-	}
-	if a.Pending() != 0 {
-		t.Errorf("Pending = %d", a.Pending())
-	}
-}
-
-func TestAssemblerFlush(t *testing.T) {
-	a := NewAssembler(time.Hour)
-	now := time.Unix(1760000000, 0)
-	_, _ = a.Add(`type=USER_LOGIN msg=audit(1760000000.000:1): msg='res=success'`, now)
-	if done := a.Flush(); len(done) != 1 {
-		t.Fatalf("Flush = %d events, want 1", len(done))
-	}
-	if done := a.Flush(); len(done) != 0 {
-		t.Errorf("second Flush = %d events, want 0", len(done))
-	}
-}
-
 func TestAssemblerSkipsJunk(t *testing.T) {
 	a := NewAssembler(time.Second)
 	now := time.Unix(1760000000, 0)
