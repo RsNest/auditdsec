@@ -572,7 +572,7 @@ STACK_STARTED=no
 setup_probe() {
     PROBE_URL="${PROBE_URL:-$(env_get PANEL_PROBE_URL)}"
     PROBE_TOKEN_FILE="${PROBE_TOKEN_FILE:-$(env_get PANEL_PROBE_TOKEN_FILE)}"
-    PROBE_CACERT="${PROBE_CACERT:-$(env_get PANEL_PROBE_CACERT)}"
+    PROBE_CACERT="${PROBE_CACERT:-$(cfg PANEL_PROBE_CACERT)}"
     [ "$MODE" = tunnel ] && return 0
     if [ "$NO_EXTERNAL" = yes ]; then
         warn "--no-external-check: whether the internet reaches the panel will NOT be known; it is not reported as published."
@@ -779,7 +779,7 @@ port; another port works just as well, and the certificate is the same.
   2) I will give the port
 
 EOF
-            case "$(ask "Choose 1 or 2" 1)" in
+            case "$(ask "Port: 1 automatic, 2 given by you" 1)" in
                 1|auto) HTTPS_PORT=auto ;;
                 2) HTTPS_PORT="$(ask "Port (1-65535)" "")" ;;
                 *) die "pick 1 or 2" ;;
