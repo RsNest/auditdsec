@@ -146,6 +146,7 @@ sudo make rules          # копирует правила, добавляет .
 sudo cp deploy/auditdsec.rules /etc/audit/rules.d/50-auditdsec.rules
 sudo deploy/gen-sshkeys-rules.sh | sudo tee -a /etc/audit/rules.d/50-auditdsec.rules
 sudo augenrules --load
+auditdsec check-rules        # every key the agent acts on must be listed as present
 sudo auditctl -l | head
 ```
 

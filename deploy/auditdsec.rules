@@ -70,6 +70,17 @@
 -w /var/log/wtmp -p wa -k ads_logs
 -w /var/log/lastlog -p wa -k ads_logs
 
+## Removing, renaming or truncating logs by a logged-in user. Watches above see
+## writes to a few named files; these see the destructive calls on anything
+## under /var/log. auid>=1000 with auid!=unset leaves out the daemons: auditd's
+## own rotation and logrotate run without a login session, so they do not
+## trigger the self-feeding loop described above.
+## renameat2 is a separate line because an older libaudit does not know the
+## name; a failure there must not drop the rest.
+-a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat,truncate -F dir=/var/log -F auid>=1000 -F auid!=unset -k ads_logs
+-a always,exit -F arch=b64 -S renameat2 -F dir=/var/log -F auid>=1000 -F auid!=unset -k ads_logs
+-a always,exit -F arch=b32 -S unlink,unlinkat,rename,renameat,truncate,truncate64 -F dir=/var/log -F auid>=1000 -F auid!=unset -k ads_logs
+
 ## Kernel modules: a rootkit's usual door.
 -a always,exit -F arch=b64 -S init_module,finit_module,delete_module -F auid!=-1 -k ads_modules
 -a always,exit -F arch=b32 -S init_module,finit_module,delete_module -F auid!=-1 -k ads_modules

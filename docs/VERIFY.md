@@ -222,3 +222,20 @@ Not verified: a real `nft` on a real kernel, a live reconciliation against a cha
 firewall, or Telegram delivery; none of those were run. Decisions are not transactional with
 the audit journal, so a crash between reading an event and recording its decision can lose
 that decision. The `input` hook does not filter traffic forwarded to bridged containers.
+
+## Stage 1.7 focused verification
+
+Tests cover: the three audit-log states (fresh, missing, directory, unreadable, stale, silence
+check disabled); the heartbeat reporting `audit_unavailable` as critical and `audit_silent` as
+a warning with its own text, not repeating inside the cooldown, and reporting a change from
+silent to unavailable immediately; sudo, su, console and non-SSH network authentication mapped
+to `auth_ok` / `auth_fail` without a source address, while sshd records keep the SSH kinds;
+the shipped rules file agreeing with the mapper's keys in both directions and containing the
+destructive-call rules for `/var/log` with the daemon exclusion and no write watch on
+`/var/log/audit`; a deleted log file mapped to critical `log_tamper` with its path and a
+refused deletion ignored; the `check-rules` key comparison.
+
+Not verified: the rules against a real auditd (`augenrules --load`, `auditctl -l`, a kernel
+that rejects a syscall name); a real unlink/rename/truncate producing the records used in the
+tests (they are written from the documented record format); `check-rules` on a host. No
+privileged live lab was run. The `-F dir=` rules do not see `ftruncate` or `open(O_TRUNC)`.

@@ -433,3 +433,7 @@ func localAuth(out model.Event, ev *parse.Event, ok, root bool) model.Event {
 	out.Raw = sanitize.AuditRaw(rawLines(ev), maxRaw)
 	return sanitize.Event(out)
 }
+
+// RequiredKeys lists the audit rule keys the agent acts on. A rule set that
+// lacks one produces no events of that class, silently.
+func RequiredKeys() []string { return knownKeys() }

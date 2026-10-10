@@ -346,11 +346,46 @@ metrics, alert routing.
 ## Heartbeat
 
 The failure that matters most is silence: an attacker who stops auditd leaves no events,
-and the agent would otherwise look calm. Every `heartbeat.check_every` the pipeline stats
-the audit log and reports a critical `auditd_stopped` event when the file is unreadable or
-has not been written for longer than `heartbeat.stale_after`, with a cooldown so it says
-it once rather than every minute. A hard signal — auditd's own `DAEMON_END` record — is
-handled by `semantic` like any other event.
+and the agent would otherwise look calm. Every `heartbeat.check_every` the pipeline asks
+`internal/auditlog` for the state of the audit log, and the panel status uses the same
+function, so the two cannot disagree. There are two failure states, kept apart because
+they mean different things:
+
+- `audit_unavailable` — the file is missing, not a regular file or not readable. The agent
+  is blind, whatever auditd is doing. Critical.
+- `audit_silent` — the file is readable but was not written for longer than
+  `heartbeat.stale_after`. A quiet host looks identical to a stopped auditd, so this is a
+  warning with its own wording ("silent"), not a claim that the service is down.
+
+A change of state is reported at once; a state that persists repeats only after a cooldown.
+A hard signal — auditd's own `DAEMON_END` record — is handled by `semantic` like any other
+event. Neither state proves anything about the kernel's audit subsystem; they describe what
+the agent can read.
+
+## Audit rules and keys
+
+`deploy/auditdsec.rules` and `semantic.keyRules` are two halves of one contract: an
+event reaches the agent only if a rule tags it with a key the mapper knows. A test reads
+the shipped rules and fails when a key appears on one side only, and when no rule covers
+`unlink`, `unlinkat`, `rename`, `renameat`, `renameat2` or `truncate` under `/var/log`.
+`auditdsec check-rules` runs the same comparison against the rule files of a host
+(`/etc/audit/rules.d`, `/etc/audit/audit.rules`) and exits non-zero when a key is missing;
+it reads files and does not know what the kernel has loaded (`auditctl -l` does).
+
+Log tampering is covered in two ways: write watches on named files (`auth.log`, `secure`,
+`wtmp`, `lastlog`, the audit configuration) and syscall rules for deleting, renaming and
+truncating anything under `/var/log` by a logged-in user (`auid>=1000`, so auditd's own
+rotation and logrotate do not feed back into the log). Truncation through `open(O_TRUNC)`
+of a log outside the watched list, and `ftruncate` on an open descriptor, are not covered.
+
+## Authentication kinds
+
+Only records written by `sshd` become `ssh_login_ok` / `ssh_login_fail`, which carry the
+source address and feed the brute-force detector and the suspect list. Any other
+authentication (sudo, su, a console login, another network service) becomes `auth_ok` or
+`auth_fail` with the service name and no address, so a mistyped sudo password is not
+counted as an SSH attack. A saved Telegram kind selection made before these kinds existed
+does not include them; they appear in the feed and can be enabled in the alert settings.
 
 ## Debug mode
 

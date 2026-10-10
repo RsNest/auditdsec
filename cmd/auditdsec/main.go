@@ -5,6 +5,7 @@
 //
 //	auditdsec run [-config FILE]     follow the audit log (the default)
 //	auditdsec check-config [-config] load the settings and report problems
+//	auditdsec check-rules [-rules]  check the audit rule files for the keys the agent needs
 //	auditdsec explain KIND [-lang]   explain one kind of event
 //	auditdsec hash-password          hash a panel password for the config
 //	auditdsec version                print the build version
@@ -30,6 +31,7 @@ import (
 
 	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/api"
+	"github.com/RsNest/auditdsec/internal/auditlog"
 	"github.com/RsNest/auditdsec/internal/config"
 	"github.com/RsNest/auditdsec/internal/decision"
 	"github.com/RsNest/auditdsec/internal/detect"
@@ -38,6 +40,7 @@ import (
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/notify/telegram"
 	"github.com/RsNest/auditdsec/internal/pipeline"
+	"github.com/RsNest/auditdsec/internal/semantic"
 	"github.com/RsNest/auditdsec/internal/store"
 )
 
@@ -136,6 +139,8 @@ func run(args []string) error {
 		return cmdRun(args)
 	case "check-config":
 		return cmdCheckConfig(args)
+	case "check-rules":
+		return cmdCheckRules(args)
 	case "explain":
 		return cmdExplain(args)
 	case "hash-password":
@@ -173,6 +178,7 @@ Usage:
   auditdsec run [-config FILE] [-debug]
                                      follow the audit log (the default command)
   auditdsec check-config [-config F] load the settings and report problems
+  auditdsec check-rules [-rules P]  check the audit rule files for the keys the agent needs
   auditdsec explain KIND [-lang ru]  explain one kind of event
   auditdsec hash-password [-stdin]   hash a panel password for the web panel
   auditdsec reset-credentials -yes   forget the panel login and password (local recovery)
@@ -260,6 +266,35 @@ func cmdCheckConfig(args []string) error {
 		src = "(no file, environment only)"
 	}
 	fmt.Printf("configuration source: %s\n\n%s\nThe configuration is valid.\n", src, cfg.Redacted())
+	return nil
+}
+
+// cmdCheckRules compares the audit rule files with the keys the agent acts on.
+// A missing key means a whole class of events is never produced, with no
+// error anywhere, so this is the check to run after installing the rules.
+func cmdCheckRules(args []string) error {
+	fs := flag.NewFlagSet("check-rules", flag.ContinueOnError)
+	paths := fs.String("rules", "/etc/audit/rules.d,/etc/audit/audit.rules", "comma-separated rule files or directories")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rep, err := auditlog.CheckRules(strings.Split(*paths, ","), semantic.RequiredKeys())
+	if err != nil {
+		return err
+	}
+	if len(rep.Files) == 0 {
+		return fmt.Errorf("no audit rule files found in %s (is this the host, not a container?)", *paths)
+	}
+	fmt.Printf("rule files read: %s\n", strings.Join(rep.Files, ", "))
+	fmt.Printf("keys present:    %s\n", strings.Join(rep.Present, ", "))
+	if len(rep.Extra) > 0 {
+		fmt.Printf("other keys:      %s (the agent ignores them)\n", strings.Join(rep.Extra, ", "))
+	}
+	if !rep.OK() {
+		return fmt.Errorf("missing keys: %s — install deploy/auditdsec.rules and run augenrules --load", strings.Join(rep.Missing, ", "))
+	}
+	fmt.Println("All required audit keys are present in the rule files.")
+	fmt.Println("This reads files only; `auditctl -l` shows what the kernel has loaded.")
 	return nil
 }
 
