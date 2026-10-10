@@ -145,7 +145,7 @@ type WebConfig struct {
 
 // Config is the whole configuration.
 type Config struct {
-	Profile       string
+	Profile string
 	// ProfileExplicit is true when an old config asked for a profile by name.
 	// Profiles are a deprecated way to pick a bundle of defaults; the values
 	// are ordinary settings now and any explicit one still wins.
