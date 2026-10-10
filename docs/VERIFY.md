@@ -183,3 +183,25 @@ commit-tagged amd64/arm64 images only after the checks pass.
 No live VDS, real Telegram outage, or forced machine power loss was exercised for this
 stage. Crash behavior is verified at the persisted journal/WAL boundaries; the unavoidable
 provider-acceptance/receipt gap is documented as at-least-once delivery.
+
+## Stage 1.5 focused verification
+
+`internal/redact` and `internal/sanitize` tests cover: PROCTITLE hex with NUL-separated
+arguments, EXECVE arguments where the option and its value are separate fields or sit in
+separate records, fragmented `a1[0]` arguments, a hex sudo command, terminal input,
+undecodable (odd-length) hex, headers, `NAME=value` environment arguments, sub-command
+keywords, commands embedded in `sh -c` arguments, tool-specific options (sshpass, mysql,
+redis-cli, curl, docker login, openssl), and everyday commands that must stay unchanged
+(`mkdir -p`, `ssh -p`, `docker run -p`, `--user 1000:1000`). Idempotency is asserted on
+every representation, and decoding/output bounds on oversized input.
+
+`TestSecretsNeverReachPersistentFiles` drives realistic audit lines through the mapper and
+the pipeline with a notifier that puts the whole event into its plan, then scans every file
+the agent wrote (event journal, outbox WAL) for each planted secret in plain and hex form.
+It was checked to fail when the pipeline guard is disabled.
+
+Not verified: a live auditd on a real host; arguments of programs the tables do not know;
+secrets typed after a prompt; text in free-form fields other than the ones listed. The
+masking is pattern based, not a guarantee. Retained journals written by earlier versions are
+not rewritten; the events API masks them on the way out, so a stored secret can still sit
+in an old file on disk.

@@ -66,11 +66,38 @@ the detector — is memory only.
 
 **Remaining stage 1 defects** (see **Target architecture**):
 
-- delivery is synchronous: a slow Telegram delays detection and reading; one rate limit
-  covers critical and routine alerts; a dedup group is recorded before the send succeeds;
-- `PROCTITLE` and other encodings of a command line are not all masked before storage;
 - bans: addresses are compared as strings, an allowlist entry can remove a ban the firewall
   failed to lift, and `Applied` is not the observed firewall state.
+
+## Sanitization (stage 1.5)
+
+`internal/sanitize` is the one boundary between what auditd wrote and what the agent keeps,
+logs, serves or sends. `internal/redact` holds the primitives (flat-text patterns and the
+argument-vector masker `Argv`/`Command`); `sanitize` applies them to audit records.
+
+- The mapper rebuilds `Event.Raw` from the records, not from regexes over text: hex values
+  are decoded with bounds (8 KiB per value, 1 KiB per rendered argument, 128 arguments),
+  PROCTITLE is split on NUL bytes, EXECVE `aN`/`aN[M]` arguments are reassembled across
+  fields and records, and the vector is masked as a whole, so `-p` and its separate
+  password, headers, `NAME=value` arguments, sub-command keywords and commands embedded in
+  `sh -c` arguments are covered. Terminal input (`TTY`, `USER_TTY`) is dropped.
+- A value that should have been hex but cannot be decoded becomes
+  `[redacted: undecodable value]`; hex is never copied through, because it is reversible.
+- Quoted arguments are shown with backticks (`-e `select 1``): the audit line syntax has no
+  escapes and a value can sit inside `msg='...'`. `redact.SplitCommand` reads the form back,
+  which keeps sanitizing idempotent.
+- `pipeline.handle`, `persistEvent` and `deliver` pass every event through `sanitize.Event`
+  before the journal record, the notification plan (outbox payloads are persistent), the
+  detector and any message, whatever built it. The events API applies it again on the way
+  out, before search, so evidence written by older versions is masked in answers; stored
+  files are not rewritten.
+- Debug logging prints offset, size and record type of a line, never its content (a secret
+  split over records cannot be masked line by line); parse errors no longer quote the line.
+- Event IDs, byte cursors and completeness metadata do not depend on the masked text.
+
+Limits: pattern based. A secret that is a bare positional argument of an unknown program, or
+typed after a prompt, is not recognised. Masked evidence is not a full copy of the audit
+record; the original stays in auditd's own log.
 
 ## Storage
 
