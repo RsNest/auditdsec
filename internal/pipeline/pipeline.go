@@ -144,6 +144,8 @@ type Pipeline struct {
 	heartbeatFiring bool
 	heartbeatAt     time.Time
 	heartbeatState  auditlog.State
+	detectReady     bool
+	noticed         map[string]bool
 
 	certMu     sync.Mutex
 	certStatus string // for diagnostics: "ok, until ...", the problem, or "not checked yet"
@@ -249,6 +251,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				return err
 			}
 		}
+	}
+
+	if err := p.startDetection(ctx); err != nil {
+		return err
 	}
 
 	lines := make(chan source.Line, lineBuffer)
@@ -438,8 +444,12 @@ func (p *Pipeline) emit(ctx context.Context, events []*parse.Event) error {
 	return nil
 }
 
-// handle journals an event before detection, and enforces its decisions before
-// sending the triggering alert. Derived events are never fed back into detection.
+// handle journals an event, then lets detection consume the journal. The two
+// are separate durable steps: the event is committed first, and detection
+// advances its own cursor only together with the decisions it produced
+// (consumeDetection), so a crash between them leaves the event waiting for
+// detection instead of losing its decision. Enforcement happens inside the
+// consumption, before the triggering alert is handed to delivery.
 func (p *Pipeline) handle(ctx context.Context, ev model.Event) error {
 	// The one boundary: whatever built the event, nothing reaches the journal,
 	// the notification plan, the detector or a message unsanitized.
@@ -448,91 +458,180 @@ func (p *Pipeline) handle(ctx context.Context, ev model.Event) error {
 	if err != nil {
 		return err
 	}
+	if added {
+		p.autoAllowlist(ctx, ev)
+	}
+	if err := p.consumeDetection(ctx); err != nil {
+		return err
+	}
 	if !added {
 		return nil
 	}
-	p.autoAllowlist(ctx, ev)
+	return p.notifyEvent(ctx, ev)
+}
 
-	var res detect.Result
-	if p.opt.Detector != nil {
-		res = p.opt.Detector.Feed(ev)
+// startDetection initializes the durable detection progress, rebuilds the
+// correlation memory from events consumed before this start and consumes the
+// events that were journaled but not yet judged. It runs once, before the
+// first new line is read.
+func (p *Pipeline) startDetection(ctx context.Context) error {
+	if p.opt.Detector == nil || p.detectReady {
+		return nil
 	}
-	for _, d := range res.Decisions {
-		p.applyDecision(ctx, d)
+	skipped, err := p.opt.Store.InitDetection()
+	if err != nil {
+		return fmt.Errorf("pipeline: detection progress: %w", err)
 	}
-	if err := p.notifyEvent(ctx, ev); err != nil {
+	if skipped > 0 {
+		p.log.Warn("detection starts at the end of the existing event journal",
+			"journal_days", skipped,
+			"note", "events written before this version are history and produce no bans; the recovery guarantee begins now")
+	}
+	if r, ok := p.opt.Detector.(detect.Restorable); ok {
+		now := p.now()
+		restored := 0
+		err := p.opt.Store.RestoreConsumed(now.Add(-r.Horizon()), func(ev model.Event) {
+			r.RestoreFailure(ev, now)
+			restored++
+		})
+		if err != nil {
+			return fmt.Errorf("pipeline: restore detection state: %w", err)
+		}
+		p.log.Debug("detection state restored", "events", restored)
+	}
+	p.detectReady = true
+	if err := p.consumeDetection(ctx); err != nil {
 		return err
 	}
+	p.flushBanNotices(ctx)
+	return nil
+}
+
+// consumeDetection runs the detector over every journaled event it has not yet
+// judged, in journal order. A failure to persist a result stops the agent: the
+// detector's in-memory counters already include the event, and the safe way to
+// get them right is to restart and rebuild them from the journal.
+func (p *Pipeline) consumeDetection(ctx context.Context) error {
+	if p.opt.Detector == nil {
+		return nil
+	}
+	if !p.detectReady {
+		return p.startDetection(ctx)
+	}
+	err := p.opt.Store.ConsumeDetection(func(pos delivery.Position, ev model.Event) error {
+		return p.detectOne(ctx, pos, ev)
+	})
+	if err != nil {
+		p.log.Error("detection could not record a result; restart the agent to recover from the journal", "error", err)
+		select {
+		case p.fatal <- err:
+		default:
+		}
+		return err
+	}
+	return nil
+}
+
+// detectOne judges one journaled event. Derived events are persisted first
+// under stable IDs (idempotent on a replay); then the decisions and the cursor
+// are committed in one write; only then is the firewall touched.
+func (p *Pipeline) detectOne(ctx context.Context, pos delivery.Position, ev model.Event) error {
+	var res detect.Result
+	if ev.Kind != model.KindLoginAfterBruteForce { // derived events never feed detection
+		res = p.opt.Detector.Feed(ev)
+	}
+	var fresh []model.Event
 	for n, derived := range res.Events {
 		if ev.ID != "" {
 			derived.ID = fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d", ev.ID, derived.Kind, n))))
 		}
 		p.processed.Add(1)
-		if _, err := p.deliver(ctx, derived); err != nil {
+		derived = sanitize.Event(derived)
+		added, err := p.persistEvent(derived)
+		if err != nil {
+			return err
+		}
+		if added {
+			fresh = append(fresh, derived)
+		}
+	}
+
+	props := make([]decision.Proposal, 0, len(res.Decisions))
+	for _, d := range res.Decisions {
+		props = append(props, decision.Proposal{IP: d.IP, Reason: d.Reason, Until: d.Until})
+	}
+	committed, err := p.dec.CommitDetection(ctx, pos, props)
+	if err != nil {
+		return err
+	}
+	created := false
+	for _, c := range committed {
+		switch {
+		case c.Refused != nil && c.Refused.Reason == decision.ReasonOver:
+			// The detector times decisions by the event's own clock, so replaying
+			// an old log yields decisions whose window is already over. They are
+			// history, not an attack in progress.
+			p.log.Info("ban decision skipped: the attack it describes is already over",
+				"ip", c.IP, "reason", c.Reason, "until", untilLabel(c.Until),
+				"note", "normal while reading an audit log that was written before the agent started")
+		case c.Refused != nil:
+			p.log.Info("ban refused by policy", "ip", c.IP, "reason", c.Reason, "policy", c.Refused.Error())
+		case c.Created:
+			created = true
+			p.banned.Add(1)
+			p.log.Warn("ban decision recorded",
+				"ip", c.Ban.IP, "reason", c.Ban.Reason, "until", untilLabel(c.Ban.Until),
+				"repeat", c.Ban.Count, "state", c.Ban.State, "backend", c.Ban.Backend)
+		}
+	}
+	if created {
+		p.flushBanNotices(ctx)
+	}
+	for _, d := range fresh {
+		if err := p.notifyEvent(ctx, d); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// applyDecision hands the detector's ban decision to the decision service,
-// which applies the one policy of the agent (canonical addresses, never
-// loopback or link-local, private networks only when allowed, the allowlist
-// first), enforces it and records what the firewall did. The owner is told
-// either way — unless the policy refused: that is the protection working, not
-// an event.
-//
-// The notification duty is written with the decision itself (NoticeDue), so a
-// crash between the two cannot lose the notice; flushBanNotices settles it.
-func (p *Pipeline) applyDecision(ctx context.Context, d action.Decision) {
-	// The detector times decisions by the event's own clock, so replaying an
-	// existing audit log produces decisions whose window is already over.
-	// Those are history, not an attack in progress: blocking an address over a
-	// burst from last Tuesday helps nobody, and on a first start with
-	// read_from_start it would flood the chat.
-	if !d.Permanent() && !d.Until.After(p.now()) {
-		p.log.Info("ban decision skipped: the attack it describes is already over",
-			"ip", d.IP, "reason", d.Reason, "until", untilLabel(d.Until),
-			"note", "normal while reading an audit log that was written before the agent started")
-		return
-	}
-
-	res, err := p.dec.Ban(ctx, decision.BanRequest{
-		IP: d.IP, Until: d.Until, Reason: d.Reason,
-		Actor: decision.Actor{Origin: decision.FromDetector}, NoticeDue: true,
-	})
-	if err != nil {
-		if ref, ok := decision.IsRefusal(err); ok {
-			p.log.Info("ban refused by policy", "ip", d.IP, "reason", d.Reason, "policy", ref.Error())
-			return
-		}
-		p.log.Error("cannot record the ban", "ip", d.IP, "error", err)
-		return
-	}
-	if !res.Created {
-		return // an active decision is not another offence
-	}
-	p.banned.Add(1)
-	p.log.Warn("ban decision recorded",
-		"ip", res.Ban.IP, "reason", res.Ban.Reason, "until", untilLabel(res.Ban.Until),
-		"repeat", res.Ban.Count, "state", res.Ban.State, "backend", res.Ban.Backend)
-	p.flushBanNotices(ctx)
-}
-
 // flushBanNotices sends the notification of every automatic ban whose notice
 // is still owed, then clears the duty. It is what runs after a decision, after
 // each reconciliation and at start, so a notice owed at a crash is not lost.
-// Delivery is at least once: a crash between the outbox accepting a notice and
-// the duty being cleared repeats it, and the outbox refuses a notice it
-// already holds.
+//
+// The duty is stored with the decision; the intent ID is derived from the
+// decision itself, so a replay builds the same intent. A duty found at start
+// (not created by this process) is first looked up in the notification
+// journal: a notice already journaled is only imported, never journaled a
+// second time. Delivery stays at least once: a crash after the outbox has sent
+// a notice and before the duty is cleared can repeat it only if the outbox had
+// already forgotten the job.
 func (p *Pipeline) flushBanNotices(ctx context.Context) {
+	if p.noticed == nil {
+		p.noticed = map[string]bool{}
+	}
 	for _, ban := range p.dec.DueNotices() {
 		var applyErr error
 		if ban.State == store.StateFailed {
 			applyErr = errors.New(ban.LastError)
 		}
 		if p.planner != nil {
-			if err := p.enqueueNotice(ctx, p.planner.PlanBan(ban, applyErr)); err != nil {
+			plan := p.planner.PlanBan(ban, applyErr)
+			key := ban.IP + "|" + ban.CreatedAt.Format(time.RFC3339Nano)
+			journaled := false
+			if len(plan.Intents) > 0 && !p.noticed[key] {
+				var err error
+				if journaled, err = p.opt.Store.HasNoticeIntent(plan.Intents[0].ID); err != nil {
+					p.log.Warn("cannot look up the ban notice in the journal", "ip", ban.IP, "error", err)
+				}
+			}
+			p.noticed[key] = true
+			if journaled {
+				if err := p.recoverDeliveries(ctx); err != nil {
+					p.failDelivery(err)
+					return
+				}
+			} else if err := p.enqueueNotice(ctx, plan); err != nil {
 				p.failDelivery(err)
 				return
 			}

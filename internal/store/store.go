@@ -79,6 +79,8 @@ type persisted struct {
 	Releases   map[string]Release `json:"releases,omitempty"`
 	MutedUntil time.Time          `json:"muted_until,omitempty"`
 	Meta       map[string]string  `json:"meta,omitempty"`
+	// Detect is the durable progress of detection over the event journal.
+	Detect *DetectState `json:"detect,omitempty"`
 }
 
 // Options configures a Store.
@@ -91,6 +93,9 @@ type Options struct {
 	RetentionDays int
 	// Now is overridable for tests.
 	Now func() time.Time
+	// BeforeStateWrite, when set, runs before every write of the state file and
+	// may fail it. It exists for tests that inject persistence failures.
+	BeforeStateWrite func() error
 }
 
 // Store is the on-disk store. All methods are safe for concurrent use.
@@ -108,6 +113,9 @@ type Store struct {
 	indexes    map[string]*eventIndex
 	indexOrder []string
 	writeErr   error
+	pending    map[string]bool // journal days with input the detector has not consumed
+	detecting  bool            // a consumer is running in this process
+	hook       func() error    // test seam: runs before every state write
 }
 
 // Open prepares the store, creating the directory layout and loading state.
@@ -126,6 +134,7 @@ func Open(o Options) (*Store, error) {
 		maxRecent: o.MaxRecent,
 		retention: o.RetentionDays,
 		now:       o.Now,
+		hook:      o.BeforeStateWrite,
 		indexes:   map[string]*eventIndex{},
 		state: persisted{
 			Allowlist: map[string]AllowEntry{},
@@ -247,6 +256,7 @@ func (s *Store) AppendEventWithPlan(ev model.Event, plan *delivery.Plan) (Journa
 	if len(s.recent) > s.maxRecent {
 		s.recent = s.recent[len(s.recent)-s.maxRecent:]
 	}
+	s.noteAppendLocked(ev.Time.UTC().Format(dayLayout))
 	return JournalCommit{Added: true, Position: delivery.Position{Day: ev.Time.UTC().Format(dayLayout), Start: start, End: start + int64(len(b)+1)}}, nil
 }
 
@@ -362,11 +372,22 @@ func (s *Store) Purge() (int, error) {
 		if day == s.day {
 			continue
 		}
+		// Evidence the detector has not consumed yet is never deleted: the
+		// decision it owes would be lost with the file.
+		if s.detecting && s.state.Detect != nil {
+			if fi, err := e.Info(); err == nil && fi.Size() > s.state.Detect.Cursors[day] {
+				continue
+			}
+		}
 		if err := os.Remove(filepath.Join(dir, name)); err != nil {
 			return removed, fmt.Errorf("store: remove %s: %w", name, err)
 		}
 		removed++
 		delete(s.indexes, day)
+		if s.state.Detect != nil {
+			delete(s.state.Detect.Cursors, day)
+			delete(s.pending, day)
+		}
 	}
 	return removed, nil
 }
@@ -457,6 +478,11 @@ func (s *Store) loadRecent() {
 }
 
 func (s *Store) saveStateLocked() error {
+	if s.hook != nil {
+		if err := s.hook(); err != nil {
+			return fmt.Errorf("store: write state: %w", err)
+		}
+	}
 	b, err := json.MarshalIndent(s.state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("store: encode state: %w", err)

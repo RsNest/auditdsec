@@ -322,3 +322,6 @@ func humanWindow(d time.Duration) string {
 	}
 	return s
 }
+
+// Horizon is how far back a failure can still count toward the threshold.
+func (d *BruteForce) Horizon() time.Duration { return d.opt.Window }

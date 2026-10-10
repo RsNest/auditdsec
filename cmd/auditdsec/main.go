@@ -555,13 +555,6 @@ func cmdRun(args []string) error {
 			Allowed:              st.IsAllowed,
 			Host:                 host,
 		})
-		observedAt := time.Now()
-		if err := st.WalkEvents(observedAt.Add(-cfg.Detect.Window), observedAt, func(ev model.Event) bool {
-			bf.RestoreFailure(ev, observedAt)
-			return true
-		}); err != nil {
-			return fmt.Errorf("restore brute-force history: %w", err)
-		}
 		detector = bf
 	}
 

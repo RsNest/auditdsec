@@ -242,6 +242,17 @@ func (s *Store) recordBanLocked(key, reason string, until time.Time, origin stri
 		return Ban{}, ErrAllowlisted
 	}
 	snapshot := s.snapshotLocked()
+	b := s.applyBanLocked(key, reason, until, origin, notice)
+	if err := s.saveStateLocked(); err != nil {
+		s.restoreLocked(snapshot)
+		return Ban{}, err
+	}
+	return b, nil
+}
+
+// applyBanLocked changes the in-memory state to a new decision; the caller
+// saves it (or restores a snapshot) and has already checked the allowlist.
+func (s *Store) applyBanLocked(key, reason string, until time.Time, origin string, notice bool) Ban {
 	b := s.state.Bans[key]
 	b.IP = key
 	b.CreatedAt = s.now()
@@ -256,11 +267,7 @@ func (s *Store) recordBanLocked(key, reason string, until time.Time, origin stri
 	s.state.Bans[key] = b
 	// A new decision supersedes a pending release of the same address.
 	delete(s.state.Releases, key)
-	if err := s.saveStateLocked(); err != nil {
-		s.restoreLocked(snapshot)
-		return Ban{}, err
-	}
-	return b, nil
+	return b
 }
 
 // UpdateBan changes the enforcement fields of a ban atomically. fn must not

@@ -7,6 +7,8 @@
 package detect
 
 import (
+	"time"
+
 	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/model"
 )
@@ -30,4 +32,14 @@ type Detector interface {
 	Feed(ev model.Event) Result
 	// Name identifies the detector in logs and in /status.
 	Name() string
+}
+
+// Restorable is a detector that can rebuild its bounded correlation memory
+// from events that were consumed before a restart. The events are history:
+// restoring never produces a decision or a derived event.
+type Restorable interface {
+	// RestoreFailure feeds one already-consumed event as seen at observedAt.
+	RestoreFailure(ev model.Event, observedAt time.Time)
+	// Horizon is how far back events can still matter.
+	Horizon() time.Duration
 }
