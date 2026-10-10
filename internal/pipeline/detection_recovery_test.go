@@ -533,3 +533,43 @@ func TestMissingOrCorruptProgressIsNotSilentlyReset(t *testing.T) {
 	}
 	b.crash()
 }
+
+// The incident is committed with the decision and the cursor, so a crash can
+// neither lose it nor make it twice.
+func TestIncidentSurvivesRecoveryExactlyOnce(t *testing.T) {
+	l := newLab(t)
+	a := l.boot()
+	mustStart(t, a)
+	for i := 0; i < 5; i++ {
+		if err := a.p.handle(context.Background(), l.failure(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l.failStateWritesAfter(0)
+	if err := a.p.handle(context.Background(), l.failure(5)); err == nil {
+		t.Fatal("the commit must fail")
+	}
+	if n := len(a.st.Incidents("")); n != 0 {
+		t.Fatalf("an incident exists although its commit failed: %d", n)
+	}
+	a.crash()
+	l.healStateWrites()
+	l.now = l.now.Add(30 * time.Second) // the clock moves past the events
+
+	for round := 0; round < 2; round++ {
+		b := l.boot()
+		mustStart(t, b)
+		list := b.st.Incidents("")
+		if len(list) != 1 {
+			t.Fatalf("round %d: want exactly one incident, got %d", round, len(list))
+		}
+		in := list[0]
+		if in.ReasonKey != "incident.reason.bruteforce_ban" || in.SrcIP != attacker || len(in.Bans) != 1 || in.State != "new" {
+			t.Errorf("round %d: %+v", round, in)
+		}
+		if in.Total != 1 {
+			t.Errorf("round %d: the triggering event was counted %d times", round, in.Total)
+		}
+		b.crash()
+	}
+}

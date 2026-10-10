@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/delivery"
+	"github.com/RsNest/auditdsec/internal/incident"
 	"github.com/RsNest/auditdsec/internal/model"
 )
 
@@ -81,6 +82,8 @@ type persisted struct {
 	Meta       map[string]string  `json:"meta,omitempty"`
 	// Detect is the durable progress of detection over the event journal.
 	Detect *DetectState `json:"detect,omitempty"`
+	// Incidents are the correlated stories built from consumed events.
+	Incidents *incident.State `json:"incidents,omitempty"`
 }
 
 // Options configures a Store.

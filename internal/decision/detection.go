@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/delivery"
+	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/netaddr"
 	"github.com/RsNest/auditdsec/internal/store"
 )
@@ -38,7 +39,7 @@ type Committed struct {
 // A proposal for an address that already has an active ban changes nothing
 // (no new offence, no extended ban). One for an address the policy or the
 // allowlist protects is refused. Both still let the cursor move.
-func (s *Service) CommitDetection(ctx context.Context, pos delivery.Position, props []Proposal) ([]Committed, error) {
+func (s *Service) CommitDetection(ctx context.Context, pos delivery.Position, props []Proposal, ev *model.Event) ([]Committed, error) {
 	out := make([]Committed, len(props))
 	var accepted []store.DetectBan
 	var index []int
@@ -65,7 +66,7 @@ func (s *Service) CommitDetection(ctx context.Context, pos delivery.Position, pr
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	results, err := s.opt.Store.CommitDetection(pos, accepted)
+	results, err := s.opt.Store.CommitDetectionEvent(pos, accepted, ev)
 	if err != nil {
 		return nil, err
 	}

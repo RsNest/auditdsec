@@ -588,7 +588,7 @@ func (p *Pipeline) detectOne(ctx context.Context, pos delivery.Position, ev mode
 	for _, d := range res.Decisions {
 		props = append(props, decision.Proposal{IP: d.IP, Reason: d.Reason, Until: d.Until})
 	}
-	committed, err := p.dec.CommitDetection(ctx, pos, props)
+	committed, err := p.dec.CommitDetection(ctx, pos, props, &ev)
 	if err != nil {
 		return err
 	}

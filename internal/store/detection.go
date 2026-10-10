@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/delivery"
+	"github.com/RsNest/auditdsec/internal/incident"
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/netaddr"
 )
@@ -308,6 +309,12 @@ func (s *Store) consumeDay(day string, handle func(delivery.Position, model.Even
 // an address that already has an active ban changes nothing, and one for an
 // allowlisted address is refused, in both cases with the cursor still moving.
 func (s *Store) CommitDetection(pos delivery.Position, bans []DetectBan) ([]DetectResult, error) {
+	return s.CommitDetectionEvent(pos, bans, nil)
+}
+
+// CommitDetectionEvent is CommitDetection that also correlates the consumed
+// event into incidents in the same atomic write.
+func (s *Store) CommitDetectionEvent(pos delivery.Position, bans []DetectBan, ev *model.Event) ([]DetectResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.state.Detect
@@ -340,10 +347,43 @@ func (s *Store) CommitDetection(pos delivery.Position, bans []DetectBan) ([]Dete
 		}
 		results = append(results, DetectResult{Ban: s.applyBanLocked(key, b.Reason, b.Until, "detector", true), Created: true})
 	}
+	var change incident.Change
+	var prevIncidents map[string]*incident.Incident
+	var prevSeq int
+	if ev != nil {
+		in := incident.Input{Event: *ev}
+		for _, r := range results {
+			if r.Created {
+				in.Banned = append(in.Banned, incident.Ban{IP: r.Ban.IP, Reason: r.Ban.Reason})
+			}
+		}
+		st := s.incidentsLocked()
+		change = incident.Plan(st, in)
+		prevSeq = st.Seq
+		prevIncidents = map[string]*incident.Incident{}
+		for _, u := range change.Upsert {
+			prevIncidents[u.ID] = st.Items[u.ID]
+		}
+		for _, id := range change.Drop {
+			prevIncidents[id] = st.Items[id]
+		}
+		s.applyIncidentsLocked(change)
+	}
 	d.Cursors[pos.Day] = pos.End
 	if err := s.saveStateLocked(); err != nil {
 		s.restoreLocked(snapshot)
 		d.Cursors[pos.Day] = cur
+		if ev != nil {
+			st := s.incidentsLocked()
+			for id, old := range prevIncidents {
+				if old == nil {
+					delete(st.Items, id)
+				} else {
+					st.Items[id] = old
+				}
+			}
+			st.Seq = prevSeq
+		}
 		return nil, err
 	}
 	return results, nil
