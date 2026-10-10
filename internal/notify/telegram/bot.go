@@ -288,6 +288,9 @@ func (c *Client) applyBan(ctx context.Context, ip string) string {
 	until = ban.Until
 
 	text := c.tr("ui.ban.recorded", map[string]string{"ip": ip, "until": c.fmtTime(until)})
+	if ban.Permanent() {
+		text = c.tr("ui.ban.recorded_permanent", map[string]string{"ip": ip})
+	}
 	if c.opt.Enforcer == nil {
 		return text + "\n\n" + c.tr("ui.ban.no_backend", nil)
 	}

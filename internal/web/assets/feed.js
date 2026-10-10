@@ -15,13 +15,62 @@
 
   /* ---------------- the deck ---------------- */
 
+  function blocked(ip, bans) {
+    return (bans || []).some(function (b) {
+      return b.ip === ip && b.applied && (b.permanent || Date.parse(b.until) > Date.now());
+    });
+  }
+
+  function protectedIP(ip, allow) {
+    return (allow || []).some(function (a) { return a.ip === ip; });
+  }
+
+  function deckSignature(list) {
+    return list.map(function (e) { return e.id + ":" + (e.attempts || "") + ":" + (e.review_state || ""); }).join(",");
+  }
+
+  function selectDeck(events, suspects, bans, allow) {
+    var candidates = (events || []).filter(function (ev) {
+      // Failures use the per-address review queue, not the last 200 raw rows.
+      if (suspects && ev.kind === "ssh_login_fail") { return false; }
+      return !ev.src_ip || ev.severity === "critical" ||
+        (!blocked(ev.src_ip, bans) && !protectedIP(ev.src_ip, allow));
+    });
+    (suspects && suspects.items || []).forEach(function (s) {
+      if (blocked(s.ip, bans) || protectedIP(s.ip, allow)) { return; }
+      var ev = Object.assign({}, s.event, { attempts: s.attempts, review_state: s.state });
+      candidates.push(ev);
+    });
+    candidates.sort(function (a, b) {
+      return (A.SEV_RANK[b.severity] - A.SEV_RANK[a.severity]) ||
+        (Number(b.review_state === "needs_attention") - Number(a.review_state === "needs_attention")) ||
+        ((a.attempts || 0) - (b.attempts || 0)) || (a.time < b.time ? 1 : -1);
+    });
+    var seen = Object.create(null), selected = [];
+    candidates.forEach(function (ev) {
+      var key = ev.kind === "ssh_login_fail" ? "failure:" + ev.src_ip : ev.kind + "|" + (ev.src_ip || ev.user || "");
+      if (selected.length < 7 && !seen[key]) { seen[key] = true; selected.push(ev); }
+    });
+    return selected;
+  }
+
+  function banButton(ev, actions) {
+    var b = el("button", {
+      class: "pill pill-danger pill-sm", type: "button", dataset: { banIp: ev.src_ip },
+      disabled: !actions.canBan(ev.src_ip),
+      text: actions.isBlocked(ev.src_ip) ? t("bans.state.applied") : t("ev.act.ban", { ip: ev.src_ip }),
+      onclick: function () { actions.ban(ev.src_ip, "24h", "panel: " + ev.kind); }
+    });
+    return b;
+  }
+
   function pose(rank) {
     var dir = rank % 2 ? 1 : -1;
     return "translate(" + rank * 14 + "px," + -rank * 11 + "px) scale(" + (1 - rank * 0.045) + ") rotate(" + dir * rank * 1.5 + "deg)";
   }
 
   function Deck(host, actions) {
-    var items = [], nodes = [], order = [], pos = 0, busy = false, drag = null;
+    var items = [], nodes = [], order = [], pos = 0, busy = false, drag = null, generation = 0;
     var stage = el("div", { class: "deck", tabindex: "0", role: "group", "aria-label": t("deck.aria") });
     var dots = el("div", { class: "dots", "aria-hidden": "true" });
     var hint = el("p", { class: "hint", text: t("deck.hint") });
@@ -31,10 +80,7 @@
     function card(ev) {
       var buttons = [];
       if (ev.src_ip && A.bannable(ev.src_ip)) {
-        buttons.push(el("button", {
-          class: "pill pill-danger pill-sm", type: "button", text: t("ev.act.ban", { ip: ev.src_ip }),
-          onclick: function () { actions.ban(ev.src_ip, "24h", "panel: " + ev.kind); }
-        }));
+        buttons.push(banButton(ev, actions));
       }
       if (ev.src_ip) {
         buttons.push(el("button", {
@@ -46,7 +92,8 @@
         el("div", { class: "dc-top" }, [sevTag(ev.severity), el("span", { class: "lbl", text: A.relative(ev.time) })]),
         el("div", null, [
           el("h3", { class: "dc-title", text: ev.summary || t("kind." + ev.kind) }),
-          el("p", { class: "dc-kind", text: t("kind." + ev.kind) })
+          el("p", { class: "dc-kind", text: ev.attempts ? t("suspects.attempts", { count: ev.attempts }) : t("kind." + ev.kind) }),
+          ev.review_state === "needs_attention" ? el("p", { class: "err", text: t("suspects.attention") }) : null
         ]),
         el("div", { class: "dc-foot" }, [
           el("div", { class: "dc-meta" }, [
@@ -81,11 +128,13 @@
     function toss(dir) {
       if (busy || order.length < 2) { return; }
       busy = true;
+      var version = generation;
       var idx = order[0], node = nodes[idx];
       node.classList.remove("drag");
       node.style.transform = "translate(" + dir * stage.offsetWidth * 1.15 + "px,-30px) rotate(" + dir * 22 + "deg)";
       node.style.opacity = "0";
       setTimeout(function () {
+        if (version !== generation) { return; }
         order.push(order.shift());
         pos = (pos + 1) % items.length;
         layout(idx);
@@ -96,6 +145,7 @@
     function bringBack() {
       if (busy || order.length < 2) { return; }
       busy = true;
+      var version = generation;
       var idx = order.pop(), node = nodes[idx];
       node.classList.add("snap");
       node.style.transform = "translate(" + -stage.offsetWidth * 1.15 + "px,-30px) rotate(-22deg)";
@@ -104,7 +154,7 @@
       node.classList.remove("snap");
       order.unshift(idx);
       pos = (pos - 1 + items.length) % items.length;
-      requestAnimationFrame(function () { layout(); busy = false; });
+      requestAnimationFrame(function () { if (version === generation) { layout(); busy = false; } });
     }
 
     stage.addEventListener("pointerdown", function (e) {
@@ -139,10 +189,13 @@
     });
 
     function set(list) {
+      generation++;
+      var hadFocus = stage.contains(document.activeElement);
       items = list || [];
       clear(stage); clear(dots);
       nodes = []; order = []; pos = 0; busy = false; drag = null;
       hint.hidden = items.length < 2;
+      if (hadFocus) { stage.focus({ preventScroll: true }); }
       if (!items.length) {
         add(stage, el("div", { class: "deck-empty", text: t("deck.empty") }));
         return;
@@ -156,7 +209,7 @@
       layout();
     }
 
-    return { set: set, signature: function () { return items.map(function (e) { return e.id; }).join(","); } };
+    return { set: set, signature: function () { return deckSignature(items); } };
   }
 
   /* ---------------- journal rows ---------------- */
@@ -176,10 +229,7 @@
 
     var buttons = [];
     if (ev.src_ip && A.bannable(ev.src_ip)) {
-      buttons.push(el("button", {
-        class: "pill pill-danger pill-sm", type: "button", text: t("ev.act.ban", { ip: ev.src_ip }),
-        onclick: function () { actions.ban(ev.src_ip, "24h", "panel: " + ev.kind); }
-      }));
+      buttons.push(banButton(ev, actions));
     }
     if (ev.src_ip) {
       buttons.push(el("button", { class: "pill pill-quiet pill-sm", type: "button", text: t("ev.act.trust"), onclick: function () { actions.trust(ev.src_ip); } }));
@@ -344,5 +394,6 @@
     };
   }
 
-  window.ADS.feed = { Deck: Deck, Journal: Journal, row: row, sevTag: sevTag };
+  window.ADS.feed = { Deck: Deck, Journal: Journal, row: row, sevTag: sevTag,
+    selectDeck: selectDeck, deckSignature: deckSignature, blocked: blocked, protectedIP: protectedIP, banButton: banButton };
 })();

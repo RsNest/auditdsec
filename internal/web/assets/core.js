@@ -284,6 +284,7 @@
     events: function (query) { return request("GET", "/events" + (query ? "?" + query : "")); },
     explain: function (kind) { return request("GET", "/explain/" + kind + "?lang=" + state.lang); },
     bans: function () { return request("GET", "/bans"); },
+    suspects: function () { return request("GET", "/suspects"); },
     ban: function (payload) { return request("POST", "/bans", payload); },
     unban: function (ip) { return request("DELETE", "/bans/" + encodeURIComponent(ip)); },
     allowlist: function () { return request("GET", "/allowlist"); },

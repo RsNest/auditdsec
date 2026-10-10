@@ -136,7 +136,8 @@ func TestIndexHasNoInlineCode(t *testing.T) {
 }
 
 func TestAssetBudget(t *testing.T) {
-	const codeBudget, fontBudget = 150 * 1024, 100 * 1024
+	// The address review queue and its bilingual state messages fit in 160 KiB.
+	const codeBudget, fontBudget = 160 * 1024, 100 * 1024
 	code, fonts := 0, 0
 	for name, a := range assets {
 		if len(a.body) == 0 {

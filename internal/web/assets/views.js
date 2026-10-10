@@ -10,13 +10,15 @@
   var S = A.state;
 
   var R = {};
-  var model = { status: null, events: [], bans: [], allow: [], cfg: null, diag: null };
+  var model = { status: null, events: [], bans: [], allow: [], suspects: null, cfg: null, diag: null };
+  var pendingBans = Object.create(null), modelRevision = 0;
   var deck = null, journal = null, engine = null, poll = null, observer = null, uid = 0;
 
   function errText(e) {
     if (!e) { return t("err.generic"); }
     if (e.code === "allowlisted") { return t("err.allowlisted"); }
     if (e.code === "offline") { return t("err.offline"); }
+    if (e.code === "firewall") { return t("bans.form.failed"); }
     return e.message || t("err.generic");
   }
   function logo(cls) { return el("span", { class: cls || "wm" }, ["auditdsec", el("i", { text: "." })]); }
@@ -34,19 +36,41 @@
   /* ---------------- actions the deck, journal and tables share ---------------- */
 
   var actions = {
+    isBlocked: function (ip) { return A.feed.blocked(ip, model.bans); },
+    canBan: function (ip) { return !pendingBans[ip] && !actions.isBlocked(ip) && !A.feed.protectedIP(ip, model.allow); },
     ban: function (ip, duration, reason) {
-      if (!A.bannable(ip)) { A.toast(t("err.private_ip"), "err"); return; }
-      A.confirmAction(t("bans.form.confirm", { ip: ip, duration: t("bans.dur." + duration) }), t("bans.form.submit"), "danger")
+      if (!A.bannable(ip)) { A.toast(t("err.private_ip"), "err"); return Promise.resolve(false); }
+      if (!actions.canBan(ip)) { return Promise.resolve(false); }
+      var session = S.token;
+      pendingBans[ip] = session;
+      syncBanButtons();
+      return A.confirmAction(t("bans.form.confirm", { ip: ip, duration: t("bans.dur." + duration) }), t("bans.form.submit"), "danger")
         .then(function (ok) {
-          if (!ok) { return; }
-          A.api.ban({ ip: ip, duration: duration, reason: reason || "panel" }).then(function () {
-            A.toast(t("bans.form.done", { ip: ip }), "ok");
+          if (!ok || S.token !== session) { return false; }
+          return A.api.ban({ ip: ip, duration: duration, reason: reason || "panel" }).then(function (b) {
+            if (S.token !== session) { return false; }
+            modelRevision++;
+            model.bans = model.bans.filter(function (old) { return old.ip !== b.ip; }).concat([b]);
+            // Repaint before polling: every card for a blocked IP disappears now.
+            paintAll();
+            A.toast(t(b.applied ? "bans.form.done" : "bans.form.recorded", { ip: b.ip }), b.applied ? "ok" : "warn");
             refresh();
-          }, function (e) { A.toast(errText(e), "err"); });
+            return !!b.applied;
+          });
+        }).catch(function (e) {
+          if (S.token === session) { A.toast(errText(e), "err"); refresh(); }
+          return false;
+        }).finally(function () {
+          if (pendingBans[ip] === session) { delete pendingBans[ip]; }
+          syncBanButtons();
         });
     },
     trust: function (ip) {
-      A.api.allow(ip).then(function () { A.toast(t("allow.form.done", { ip: ip }), "ok"); refresh(); },
+      A.api.allow(ip).then(function (a) {
+        modelRevision++;
+        model.allow = model.allow.filter(function (old) { return old.ip !== a.ip; }).concat([a]);
+        paintAll(); A.toast(t("allow.form.done", { ip: ip }), "ok"); refresh();
+      },
         function (e) { A.toast(errText(e), "err"); });
     },
     mute: function (hours) {
@@ -56,6 +80,15 @@
       }, function (e) { A.toast(errText(e), "err"); });
     }
   };
+
+  function syncBanButtons() {
+    Array.prototype.forEach.call(document.querySelectorAll("[data-ban-ip]"), function (b) {
+      var ip = b.dataset.banIp;
+      b.disabled = !actions.canBan(ip);
+      b.textContent = pendingBans[ip] ? t("bans.form.busy") :
+        actions.isBlocked(ip) ? t("bans.state.applied") : t("ev.act.ban", { ip: ip });
+    });
+  }
 
   /* ---------------- sign-in: the form and nothing else ---------------- */
 
@@ -349,8 +382,11 @@
     /* addresses */
     R.bansTbl = el("div");
     R.allowTbl = el("div");
+    R.suspectsTbl = el("div");
+    R.suspectsNote = el("p", { class: "callout" });
     R.addr = section("addresses", "sec", [
       head(t("addr.label"), t("addr.title"), el("p", { class: "callout rv", text: t("allow.note") })),
+      el("div", { class: "tbl-wrap rv" }, [el("h3", { class: "sub-h", text: t("suspects.title") }), R.suspectsNote, R.suspectsTbl]),
       el("div", { class: "tbl-wrap rv" }, [el("h3", { class: "sub-h", text: t("bans.title") }), R.bansTbl, banForm()]),
       el("div", { class: "tbl-wrap rv" }, [el("h3", { class: "sub-h", text: t("addr.allow.title") }), R.allowTbl, allowForm()])
     ]);
@@ -410,14 +446,12 @@
         if (!A.isIP(value)) { return invalid(t("err.bad_ip")); }
         if (!A.bannable(value)) { return invalid(t("err.private_ip")); }
         err.hidden = true; ip.removeAttribute("aria-invalid");
-        A.confirmAction(t("bans.form.confirm", { ip: value, duration: t("bans.dur." + dur.value) }), t("bans.form.submit"), "danger").then(function (ok) {
-          if (!ok) { return; }
-          A.api.ban({ ip: value, duration: dur.value, reason: reason.value.trim() || "manual" }).then(function () {
-            A.toast(t("bans.form.done", { ip: value }), "ok");
-            ip.value = ""; reason.value = "";
-            refresh();
-          }, function (e) { invalid(errText(e)); });
-        });
+        var button = ev.target.querySelector("[type=submit]");
+        if (button.disabled) { return; }
+        button.disabled = true;
+        actions.ban(value, dur.value, reason.value.trim() || "manual").then(function (applied) {
+          if (applied) { ip.value = ""; reason.value = ""; }
+        }).finally(function () { button.disabled = false; });
       }
     }, [
       el("h3", { class: "lbl", text: t("bans.form.title") }),
@@ -647,6 +681,42 @@
 
   function cell(label, kids) { return el("td", { dataset: { label: label } }, kids); }
 
+  function paintSuspects() {
+    if (!R.suspectsTbl) { return; }
+    clear(R.suspectsTbl);
+    var page = model.suspects;
+    if (!page || model.suspectsError) {
+      R.suspectsNote.textContent = t("suspects.unavailable");
+      if (!page) { return; }
+    } else {
+      R.suspectsNote.textContent = t(page.auto_enforcing ? "suspects.policy" : "suspects.disabled", {
+        count: page.threshold, minutes: Math.round(page.window_seconds / 60)
+      }) + (page.truncated ? " " + t("suspects.truncated") : "");
+    }
+    var items = page.items.filter(function (s) {
+      return !actions.isBlocked(s.ip) && !A.feed.protectedIP(s.ip, model.allow);
+    });
+    if (!items.length) { add(R.suspectsTbl, el("div", { class: "tbl-empty", text: t("suspects.empty") })); return; }
+    add(R.suspectsTbl, el("table", { class: "tbl" }, [
+      el("thead", null, el("tr", null, [
+        el("th", { text: t("bans.col.ip") }), el("th", { text: t("suspects.count") }),
+        el("th", { text: t("suspects.last") }), el("th", { text: t("bans.col.state") }), el("th", { class: "r" })
+      ])),
+      el("tbody", null, items.map(function (s) {
+        return el("tr", null, [
+          el("td", { class: "mono", text: s.ip }), cell(t("suspects.count"), A.num(s.attempts)),
+          cell(t("suspects.last"), A.relative(s.last)),
+          cell(t("bans.col.state"), t(s.state === "needs_attention" ? "suspects.attention" : "suspects.review")),
+          el("td", { class: "r" }, [
+            A.feed.banButton(s.event, actions),
+            el("button", { class: "pill pill-quiet pill-sm", type: "button", text: t("ev.act.trust"),
+              onclick: function () { actions.trust(s.ip); } })
+          ])
+        ]);
+      }))
+    ]));
+  }
+
   function paintBans() {
     if (!R.bansTbl) { return; }
     clear(R.bansTbl);
@@ -669,7 +739,11 @@
             onclick: function () {
               A.confirmAction(t("bans.unban.confirm", { ip: b.ip }), t("bans.unban"), "danger").then(function (ok) {
                 if (!ok) { return; }
-                A.api.unban(b.ip).then(function () { A.toast(t("bans.unban.done", { ip: b.ip }), "ok"); refresh(); },
+                A.api.unban(b.ip).then(function () {
+                  modelRevision++;
+                  model.bans = model.bans.filter(function (old) { return old.ip !== b.ip; });
+                  paintAll(); A.toast(t("bans.unban.done", { ip: b.ip }), "ok"); refresh();
+                },
                   function (e) { A.toast(errText(e), "err"); });
               });
             }
@@ -780,35 +854,32 @@
 
   function paintDeck(force) {
     if (!deck) { return; }
-    var ranked = model.events.slice().sort(function (a, b) {
-      return (A.SEV_RANK[b.severity] - A.SEV_RANK[a.severity]) || (a.time < b.time ? 1 : -1);
-    });
-    var pickd = [], seen = {};
-    ranked.forEach(function (e) {
-      var key = e.kind + "|" + (e.src_ip || e.user || "");
-      if (pickd.length < 7 && !seen[key]) { seen[key] = true; pickd.push(e); }
-    });
-    ranked.forEach(function (e) { if (pickd.length < 7 && pickd.indexOf(e) < 0) { pickd.push(e); } });
-    var sig = pickd.map(function (e) { return e.id; }).join(",");
+    var pickd = A.feed.selectDeck(model.events, model.suspects, model.bans, model.allow);
+    var sig = A.feed.deckSignature(pickd);
     if (force || sig !== deck.signature()) { deck.set(pickd); }
   }
 
   function paintAll() {
     model.status = S.status;
     if (R.telegram) { A.Telegram.paint(R.telegram, model.telegram); }
-    paintHero(); paintFold(); paintRoster(); paintBans(); paintAllow(); paintAlerts(); paintSystem(); paintClose();
+    paintHero(); paintFold(); paintRoster(); paintSuspects(); paintBans(); paintAllow(); paintAlerts(); paintSystem(); paintClose();
     paintDeck(false);
+    syncBanButtons();
   }
 
   /* ---------------- data ---------------- */
 
   function loadAll() {
+    var revision = modelRevision, session = S.token;
+    function current() { return revision === modelRevision && session === S.token; }
     return A.loadStatus().then(function () {
       var since = new Date(Date.now() - 86400e3).toISOString();
       return Promise.all([
         A.api.events("limit=200&since=" + encodeURIComponent(since)).then(function (p) { model.events = (p && p.items) || []; A.announceCritical(model.events); }, function () { }),
-        A.api.bans().then(function (v) { model.bans = v || []; }, function () { }),
-        A.api.allowlist().then(function (v) { model.allow = v || []; }, function () { }),
+        A.api.bans().then(function (v) { if (current()) { model.bans = v || []; } }, function () { }),
+        A.api.allowlist().then(function (v) { if (current()) { model.allow = v || []; } }, function () { }),
+        A.api.suspects().then(function (v) { if (current()) { model.suspects = v; model.suspectsError = false; } },
+          function () { if (current()) { model.suspectsError = true; } }),
         A.api.config().then(function (v) { model.cfg = v; }, function () { }),
         A.api.telegram().then(function (v) { model.telegram = v; }, function () { }),
         A.api.diagnostics().then(function (v) { model.diag = v; }, function () { })
@@ -920,6 +991,8 @@
   /* ---------------- lifecycle ---------------- */
 
   function stopAll() {
+    modelRevision++;
+    pendingBans = Object.create(null);
     A.Telegram.close();
     stopPoll(); stopEngine();
     if (observer) { observer.disconnect(); observer = null; }
@@ -928,7 +1001,7 @@
     if (sheet) { sheet.parentNode.removeChild(sheet); }
     clear($("#main"));
     R = {}; deck = null; journal = null;
-    model = { status: null, events: [], bans: [], allow: [], cfg: null, diag: null };
+    model = { status: null, events: [], bans: [], allow: [], suspects: null, cfg: null, diag: null };
     S.status = null;
   }
 

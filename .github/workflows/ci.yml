@@ -52,6 +52,8 @@ jobs:
         run: shellcheck -S warning install.sh deploy/*.sh scripts/e2e/stage0/*.sh
       - name: installer language
         run: bash scripts/check-installer-language.sh
+      - name: panel review policy
+        run: node scripts/check-panel-review.cjs
 
   images:
     needs: test

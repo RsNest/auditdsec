@@ -34,9 +34,12 @@ func (s *Server) handleSuspects(w http.ResponseWriter, r *http.Request) {
 	}
 	capIPs := min(max(s.opt.Config.Detect.MaxTracked, 1), 10000)
 	blocked := make(map[string]bool)
+	pending := make(map[string]bool)
 	for _, b := range s.opt.Store.Bans() {
 		if s.opt.Enforcer != nil && b.Applied && b.Active(now) {
 			blocked[b.IP] = true
+		} else if b.Active(now) {
+			pending[b.IP] = true
 		}
 	}
 	protected := make(map[string]bool)
@@ -80,7 +83,7 @@ func (s *Server) handleSuspects(w http.ResponseWriter, r *http.Request) {
 				Summary: i18n.T(lang, ev.SummaryKey, ev.Args),
 			}
 		}
-		if item.Attempts >= threshold {
+		if item.Attempts >= threshold || pending[key] {
 			item.State = "needs_attention"
 		}
 		return true
