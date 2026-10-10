@@ -290,6 +290,10 @@ Implemented in stage 0.
 
 ### RemoteProbe
 
+Open question: a beginner has no second server to run it on. The proposed answer — the
+owner's own phone or laptop as the outside visitor — is in
+`docs/decisions/0001-outside-check-without-second-server.md` (not implemented).
+
 `internal/netcheck/probe.go` holds the contract (request, results), the checker, the HTTP
 service and the client; `docs/PANEL.md` documents it. The service is built not to become
 an open scanner: bearer token, global and per-target rate limits, a cap on concurrent
