@@ -559,7 +559,8 @@ ensure_enforce_image() {
 # legacy_image — the image an installation from before published images used
 # (built here as auditdsec:<version>), if it is still present.
 legacy_image() {
-    local ref="auditdsec:$(env_get AUDITDSEC_VERSION)"
+    local ref
+    ref="auditdsec:$(env_get AUDITDSEC_VERSION)"
     [ "$ref" != "auditdsec:" ] || ref="auditdsec:0.1.0"
     $DOCKER image inspect "$ref" >/dev/null 2>&1 && printf "%s" "$ref"
     return 0
