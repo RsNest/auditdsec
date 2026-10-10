@@ -138,6 +138,7 @@ const (
 	IncompleteRecords  = "the event had more records than the limit; the rest were dropped"
 	IncompleteLate     = "records arrived after the event had already been closed"
 	IncompleteShutdown = "the agent stopped before the event ended"
+	IncompleteSource   = "the audit source generation changed before the event ended"
 )
 
 // Limits bound the memory the assembler may use. Exceeding one never loses
@@ -315,9 +316,13 @@ func (a *Assembler) Expire(now time.Time) []*Event {
 
 // Flush closes everything still open, for shutdown.
 func (a *Assembler) Flush() []*Event {
+	return a.FlushWithReason(IncompleteShutdown)
+}
+
+func (a *Assembler) FlushWithReason(reason string) []*Event {
 	var done []*Event
 	for _, k := range append([]eventKey(nil), a.order...) {
-		done = append(done, a.close(k, false, IncompleteShutdown)...)
+		done = append(done, a.close(k, false, reason)...)
 	}
 	return done
 }
@@ -336,6 +341,17 @@ func (a *Assembler) OldestOpen() (int64, bool) {
 		}
 	}
 	return best, ok
+}
+
+// OpenStarts lets the consumer retain cursor snapshots only for open events.
+func (a *Assembler) OpenStarts() []int64 {
+	starts := make([]int64, 0, len(a.pending))
+	for _, p := range a.pending {
+		if p.ev.Start >= 0 {
+			starts = append(starts, p.ev.Start)
+		}
+	}
+	return starts
 }
 
 // close removes an open event and returns it. ended says its EOE arrived;

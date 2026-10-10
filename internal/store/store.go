@@ -167,6 +167,12 @@ func (s *Store) AppendEventOnce(ev model.Event) (bool, error) {
 		if err != nil {
 			return false, err
 		}
+		if !seen && legacyKey(ev) != "" {
+			seen, err = s.containsEvent(index, ev.Time.UTC().Format(dayLayout), legacyKey(ev))
+			if err != nil {
+				return false, err
+			}
+		}
 		if seen {
 			if err := f.Sync(); err != nil {
 				s.writeErr = err
@@ -192,6 +198,8 @@ func (s *Store) AppendEventOnce(ev model.Event) (bool, error) {
 	}
 	if index != nil {
 		index.add(ev.ID)
+	} else if cached := s.indexes[ev.Time.UTC().Format(dayLayout)]; cached != nil {
+		cached.add(legacyKey(ev))
 	}
 	s.recent = append(s.recent, ev)
 	if len(s.recent) > s.maxRecent {

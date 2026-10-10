@@ -395,6 +395,7 @@ func (s *Server) lang(r *http.Request) i18n.Lang {
 
 type eventJSON struct {
 	ID       string            `json:"id"`
+	EventID  string            `json:"event_id,omitempty"`
 	Time     time.Time         `json:"time"`
 	Host     string            `json:"host"`
 	Kind     model.Kind        `json:"kind"`
@@ -463,7 +464,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return true
 		}
 		items = append(items, eventJSON{
-			ID: id, Time: ev.Time.UTC(), Host: ev.Host, Kind: ev.Kind, Severity: ev.Severity.String(),
+			ID: id, EventID: ev.ID, Time: ev.Time.UTC(), Host: ev.Host, Kind: ev.Kind, Severity: ev.Severity.String(),
 			User: ev.User, SrcIP: ev.SrcIP, Summary: summary, Args: ev.Args, Raw: ev.Raw,
 		})
 		return len(items) <= limit
@@ -721,6 +722,8 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 				if n, err := strconv.ParseInt(it.Value, 10, 64); err == nil {
 					out["offset"] = n
 				}
+			case "ui.diag.source":
+				out["source_status"] = it.Value
 			case "ui.diag.detector":
 				out["detector"] = it.Value
 			case "ui.diag.banner":

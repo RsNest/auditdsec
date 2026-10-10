@@ -136,3 +136,54 @@ func TestOversizedLineIsDiscardedUntilNewline(t *testing.T) {
 		t.Fatal("oversized line was fragmented", big, normal)
 	}
 }
+
+func TestMissingInitializedCursorFailsInsteadOfSkippingHistory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	state := filepath.Join(dir, "tail.json")
+	if err := os.WriteFile(path, []byte("queued\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	o := Options{Path: path, StatePath: state, FromStart: true}
+	_, ch, stop := startAcknowledged(t, o)
+	_ = nextSourceLine(t, ch)
+	_ = nextSourceLine(t, ch)
+	stop()
+	if err := os.Remove(state); err != nil {
+		t.Fatal(err)
+	}
+	err := New(o).RunLines(context.Background(), func(Line) error { t.Error("missing cursor emitted data"); return nil })
+	if err == nil {
+		t.Fatal("missing cursor was treated as a fresh install")
+	}
+}
+
+func TestFreshInstallSkipsContinuationOfExistingPartialLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	if err := os.WriteFile(path, []byte("unfinished history"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, ch, _ := startAcknowledged(t, Options{Path: path})
+	_ = nextSourceLine(t, ch)
+	appendLine(t, path, " continuation")
+	appendLine(t, path, "new")
+	if l := nextSourceLine(t, ch); !l.Skipped {
+		t.Fatal("old partial line continuation was emitted", l)
+	}
+	if l := nextSourceLine(t, ch); l.Text != "new" {
+		t.Fatal("new complete record was lost", l)
+	}
+}
+
+func TestCorruptCursorFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "tail.json")
+	if err := os.WriteFile(state, []byte("broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := New(Options{Path: filepath.Join(dir, "audit.log"), StatePath: state}).RunLines(context.Background(), func(Line) error { return nil })
+	if err == nil {
+		t.Fatal("corrupt cursor silently reset")
+	}
+}

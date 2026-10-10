@@ -131,6 +131,7 @@ var catalogEN = map[string]string{
 	"ui.diag.skipped":     "Lines skipped",
 	"ui.diag.audit_log":   "Audit log",
 	"ui.diag.offset":      "Read up to byte",
+	"ui.diag.source":      "Source continuity",
 	"ui.diag.detector":    "Detector",
 	"ui.diag.banner":      "Bans applied by",
 	"ui.diag.bans":        "Ban decisions",

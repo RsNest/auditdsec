@@ -132,6 +132,7 @@ var catalogRU = map[string]string{
 	"ui.diag.skipped":    "Строк пропущено",
 	"ui.diag.audit_log":  "Журнал аудита",
 	"ui.diag.offset":     "Прочитано до байта",
+	"ui.diag.source":     "Непрерывность источника",
 	"ui.diag.detector":   "Детектор",
 	"ui.diag.banner":     "Блокировки применяет",
 	"ui.diag.bans":       "Решений о блокировке",

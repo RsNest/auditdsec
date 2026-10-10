@@ -53,12 +53,28 @@ func (i *eventIndex) add(id string) {
 	i.ids[id] = struct{}{}
 }
 
+// Legacy rows have no event ID. Match their exact retained evidence on the
+// conservative migration replay, so an upgrade does not resend old alerts.
+func legacyKey(ev model.Event) string {
+	if ev.Raw == "" {
+		return ""
+	}
+	return fmt.Sprintf("legacy:%x", sha256.Sum256([]byte(fmt.Sprintf("%d|%s|%s", ev.Time.UnixNano(), ev.Kind, ev.Raw))))
+}
+
 func (s *Store) indexFor(day string) (*eventIndex, error) {
 	if i := s.indexes[day]; i != nil {
 		return i, nil
 	}
 	i := &eventIndex{bits: make([]byte, bloomBytes), ids: map[string]struct{}{}, ring: make([]string, recentIDs)}
-	if err := s.walkDay(day, func(ev model.Event) bool { i.add(ev.ID); return true }); err != nil {
+	if err := s.walkDay(day, func(ev model.Event) bool {
+		if ev.ID != "" {
+			i.add(ev.ID)
+		} else {
+			i.add(legacyKey(ev))
+		}
+		return true
+	}); err != nil {
 		return nil, err
 	}
 	for len(s.indexOrder) >= 2 {
@@ -81,7 +97,7 @@ func (s *Store) containsEvent(i *eventIndex, day, id string) (bool, error) {
 	}
 	found := false
 	err := s.walkDay(day, func(ev model.Event) bool {
-		if ev.ID == id {
+		if ev.ID == id || (ev.ID == "" && legacyKey(ev) == id) {
 			found = true
 			return false
 		}

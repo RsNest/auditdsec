@@ -593,7 +593,11 @@ func cmdRun(args []string) error {
 	runErr := make(chan error, 1)
 	go func() {
 		defer wg.Done()
-		runErr <- pl.Run(ctx)
+		err := pl.Run(ctx)
+		runErr <- err
+		if err != nil {
+			stop()
+		}
 	}()
 
 	<-ctx.Done()

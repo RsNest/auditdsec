@@ -6,6 +6,7 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -49,7 +50,7 @@ const metaFirstLoginAllowed = "first_login_allowlisted"
 
 // lineBuffer is how many log lines may wait to be processed. When it fills the
 // tailer blocks, which is the right trade: slowing down beats losing events.
-const lineBuffer = 2048
+const lineBuffer = 16
 
 // Options configures the pipeline.
 type Options struct {
@@ -104,9 +105,12 @@ type Pipeline struct {
 	log *slog.Logger
 	now func() time.Time
 
-	mapper *semantic.Mapper
-	asm    *parse.Assembler
-	tailer *source.Tailer
+	mapper        *semantic.Mapper
+	asm           *parse.Assembler
+	tailer        *source.Tailer
+	current       source.Cursor
+	openPositions map[int64]source.Cursor
+	fatal         chan error
 
 	processed atomic.Uint64
 	reported  atomic.Uint64
@@ -153,11 +157,13 @@ func New(o Options) (*Pipeline, error) {
 		statePath = filepath.Join(o.StateDir, "tail.json")
 	}
 	return &Pipeline{
-		opt:    o,
-		log:    o.Logger,
-		now:    o.Now,
-		mapper: semantic.New(o.Host),
-		asm:    parse.NewAssembler(2 * time.Second),
+		opt:           o,
+		log:           o.Logger,
+		now:           o.Now,
+		mapper:        semantic.New(o.Host),
+		asm:           parse.NewAssembler(2 * time.Second),
+		openPositions: map[int64]source.Cursor{},
+		fatal:         make(chan error, 1),
 		tailer: source.New(source.Options{
 			Path:      o.AuditLog,
 			StatePath: statePath,
@@ -169,21 +175,28 @@ func New(o Options) (*Pipeline, error) {
 
 // Run follows the log until the context is cancelled.
 func (p *Pipeline) Run(ctx context.Context) error {
-	lines := make(chan string, lineBuffer)
+	lines := make(chan source.Line, lineBuffer)
+	tailctx, stopReader := context.WithCancel(ctx)
+	readerErr := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		defer close(lines)
-		if err := p.tailer.Run(ctx, func(l string) {
+		err := p.tailer.RunLines(tailctx, func(l source.Line) error {
 			select {
 			case lines <- l:
-			case <-ctx.Done():
+				return nil
+			case <-tailctx.Done():
+				return tailctx.Err()
 			}
-		}); err != nil {
+		})
+		if err != nil {
 			p.log.Error("the log reader stopped", "error", err)
 		}
+		readerErr <- err
 	}()
+	defer func() { stopReader(); wg.Wait() }()
 
 	expire := time.NewTicker(time.Second)
 	defer expire.Stop()
@@ -211,22 +224,30 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 	for {
 		select {
+		case err := <-p.fatal:
+			return err
 		case <-ctx.Done():
-			p.emit(context.WithoutCancel(ctx), p.asm.Flush())
-			wg.Wait()
+			// Open events and unread queued lines remain behind the saved cursor.
+			// Flushing them on shutdown would persist fragments before their EOE.
 			p.log.Info("stopped",
 				"events", p.processed.Load(), "alerts", p.reported.Load(), "skipped_lines", p.skipped.Load())
 			return nil
 
 		case line, ok := <-lines:
 			if !ok {
-				wg.Wait()
-				return nil
+				return <-readerErr
 			}
-			p.feed(ctx, line)
+			if err := p.feedSource(ctx, line); err != nil {
+				return err
+			}
 
 		case <-expire.C:
-			p.emit(ctx, p.asm.Expire(p.now()))
+			if err := p.emit(ctx, p.asm.Expire(p.now())); err != nil {
+				return err
+			}
+			if err := p.acknowledge(); err != nil {
+				return err
+			}
 
 		case <-heartbeat.C:
 			p.checkHeartbeat(ctx)
@@ -247,22 +268,72 @@ func (p *Pipeline) Run(ctx context.Context) error {
 }
 
 // feed pushes one log line through the assembler and emits whatever it closed.
-func (p *Pipeline) feed(ctx context.Context, line string) {
+func (p *Pipeline) feedSource(ctx context.Context, line source.Line) error {
+	if line.Boundary {
+		if err := p.emit(ctx, p.asm.FlushWithReason(parse.IncompleteSource)); err != nil {
+			return err
+		}
+		p.asm = parse.NewAssembler(2 * time.Second)
+		p.openPositions = map[int64]source.Cursor{}
+		p.current = line.End
+		return p.acknowledge()
+	}
+	if line.Start.Generation != p.current.Generation {
+		return errors.New("pipeline: source generation changed without a boundary")
+	}
+	p.current = line.End
+	if line.Oversized || line.Skipped {
+		p.skipped.Add(1)
+		p.log.Warn("discarded source line", "start", line.Start.Offset, "end", line.End.Offset, "oversized", line.Oversized)
+		return p.acknowledge()
+	}
+	lineText := line.Text
 	if p.opt.Debug {
 		// Secrets are masked first: a debug log is still a file on disk, and a
 		// hex-encoded sudo command would otherwise carry a password into it.
-		p.log.Debug("audit line", "line", redact.AuditLine(line))
+		p.log.Debug("audit line", "line", redact.AuditLine(lineText))
 	}
-	events, err := p.asm.Add(line, p.now())
+	events, err := p.asm.AddAt(lineText, line.Start.Offset, p.now())
 	if err != nil {
 		p.skipped.Add(1)
 		p.log.Debug("line skipped", "error", err)
 	}
-	p.emit(ctx, events)
+	if err := p.emit(ctx, events); err != nil {
+		return err
+	}
+	for _, start := range p.asm.OpenStarts() {
+		if start == line.Start.Offset {
+			p.openPositions[start] = line.Start
+		}
+	}
+	return p.acknowledge()
+}
+
+func (p *Pipeline) acknowledge() error {
+	if p.current.Generation == "" {
+		return nil
+	}
+	positions := map[int64]source.Cursor{}
+	for _, start := range p.asm.OpenStarts() {
+		c, ok := p.openPositions[start]
+		if !ok {
+			return errors.New("pipeline: missing cursor for an open audit event")
+		}
+		positions[start] = c
+	}
+	p.openPositions = positions
+	checkpoint := p.current
+	if start, ok := p.asm.OldestOpen(); ok {
+		checkpoint = positions[start]
+	}
+	if err := p.tailer.SaveCursor(checkpoint); err != nil {
+		return fmt.Errorf("persist acknowledged source cursor: %w", err)
+	}
+	return nil
 }
 
 // emit translates assembled events, stores the interesting ones and alerts.
-func (p *Pipeline) emit(ctx context.Context, events []*parse.Event) {
+func (p *Pipeline) emit(ctx context.Context, events []*parse.Event) error {
 	for _, ae := range events {
 		ev, reason, ok := p.mapper.MapVerbose(ae)
 		if !ok {
@@ -274,28 +345,47 @@ func (p *Pipeline) emit(ctx context.Context, events []*parse.Event) {
 			continue
 		}
 		p.processed.Add(1)
-		p.handle(ctx, ev)
+		if p.current.Generation != "" {
+			key := fmt.Sprintf("%q|%q|%q|%d|%d|%d", p.current.Path, p.current.Generation, ae.Node, ae.Time.UnixNano(), ae.Serial, ae.Start)
+			ev.ID = fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
+		}
+		if err := p.handle(ctx, ev); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // handle delivers an event and then runs it past the detector. Events the
 // detector produces are delivered but never fed back into it, so a derived
 // event cannot trigger another one.
-func (p *Pipeline) handle(ctx context.Context, ev model.Event) {
-	p.deliver(ctx, ev)
+func (p *Pipeline) handle(ctx context.Context, ev model.Event) error {
+	added, err := p.deliver(ctx, ev)
+	if err != nil {
+		return err
+	}
+	if !added {
+		return nil
+	}
 	p.autoAllowlist(ctx, ev)
 
 	if p.opt.Detector == nil {
-		return
+		return nil
 	}
 	res := p.opt.Detector.Feed(ev)
-	for _, derived := range res.Events {
+	for n, derived := range res.Events {
+		if ev.ID != "" {
+			derived.ID = fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d", ev.ID, derived.Kind, n))))
+		}
 		p.processed.Add(1)
-		p.deliver(ctx, derived)
+		if _, err := p.deliver(ctx, derived); err != nil {
+			return err
+		}
 	}
 	for _, d := range res.Decisions {
 		p.applyDecision(ctx, d)
 	}
+	return nil
 }
 
 // applyDecision records a ban, applies it to the firewall when a backend is
@@ -406,17 +496,27 @@ func (p *Pipeline) reapplyBans(ctx context.Context) {
 	}
 }
 
-func (p *Pipeline) deliver(ctx context.Context, ev model.Event) {
-	if err := p.opt.Store.AppendEvent(ev); err != nil {
+func (p *Pipeline) deliver(ctx context.Context, ev model.Event) (bool, error) {
+	added, err := p.opt.Store.AppendEventOnce(ev)
+	if err != nil {
 		p.log.Error("cannot store the event", "kind", ev.Kind, "error", err)
+		select {
+		case p.fatal <- err:
+		default:
+		}
+		return false, err
+	}
+	if !added {
+		return false, nil
 	}
 	if err := p.opt.Notifier.Notify(ctx, ev); err != nil {
 		p.log.Error("cannot send the alert", "kind", ev.Kind, "error", err)
-		return
+		return true, nil
 	}
 	p.reported.Add(1)
 	p.log.Debug("event handled",
 		"kind", ev.Kind, "severity", ev.Severity.String(), "user", ev.User, "ip", ev.SrcIP)
+	return true, nil
 }
 
 // checkHeartbeat reports the audit log going unreadable or silent. Silence is
@@ -525,6 +625,7 @@ func (p *Pipeline) Diagnostics() []DiagItem {
 		{Key: "ui.diag.skipped", Value: strconv.FormatUint(skipped, 10)},
 		{Key: "ui.diag.audit_log", Value: auditLog},
 		{Key: "ui.diag.offset", Value: strconv.FormatInt(p.tailer.LastOffset(), 10)},
+		{Key: "ui.diag.source", Value: p.tailer.Status()},
 		{Key: "ui.diag.detector", Value: detectorName(p.opt.Detector)},
 		{Key: "ui.diag.banner", Value: bannerName(p.opt.Banner)},
 		{Key: "ui.diag.bans", Value: strconv.FormatUint(p.Banned(), 10)},

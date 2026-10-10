@@ -33,6 +33,7 @@ type Line struct {
 	End       Cursor
 	Boundary  bool
 	Oversized bool
+	Skipped   bool
 	Gap       string
 }
 
@@ -50,7 +51,7 @@ func (t *Tailer) setStatus(s string) { t.mu.Lock(); defer t.mu.Unlock(); t.statu
 func (t *Tailer) SaveCursor(c Cursor) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if c.Version != 2 || c.Offset < 0 || c.Generation == "" {
+	if c.Version != 2 || c.Offset < 0 || len(c.Generation) != 32 || c.Path == "" || c.FileID == "" {
 		return errors.New("invalid acknowledged cursor")
 	}
 	if old := t.checkpoint; old != nil && old.Generation == c.Generation && old.Offset == c.Offset {
@@ -85,6 +86,23 @@ func (t *Tailer) SaveCursor(c Cursor) error {
 		if err := os.Rename(f.Name(), t.opt.StatePath); err != nil {
 			return err
 		}
+		marker, err := os.OpenFile(t.opt.StatePath+".initialized", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		if err == nil {
+			_, writeErr := marker.WriteString("2\n")
+			if writeErr == nil {
+				writeErr = marker.Sync()
+			}
+			closeErr := marker.Close()
+			if writeErr != nil {
+				return writeErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+		}
 		if dir, err := os.Open(filepath.Dir(t.opt.StatePath)); err == nil {
 			_ = dir.Sync()
 			_ = dir.Close()
@@ -100,6 +118,11 @@ func (t *Tailer) restoreCursor() (*Cursor, error) {
 	}
 	b, err := os.ReadFile(t.opt.StatePath)
 	if errors.Is(err, os.ErrNotExist) {
+		if _, markerErr := os.Stat(t.opt.StatePath + ".initialized"); markerErr == nil {
+			return nil, errors.New("saved cursor is missing after initialization; restore it or explicitly reset the cursor")
+		} else if !errors.Is(markerErr, os.ErrNotExist) {
+			return nil, markerErr
+		}
 		return nil, nil
 	}
 	if err != nil {
@@ -127,6 +150,7 @@ type acknowledgedReader struct {
 	offset                int64
 	lineStart             int64
 	discard               bool
+	skip                  bool
 	first, missing        bool
 	resume                *Cursor
 	gap                   string
@@ -272,6 +296,10 @@ func (r *acknowledgedReader) open() error {
 	r.f, r.id, r.generation, r.path, r.offset = f, id, generation, path, start
 	r.lineStart = start
 	r.head, r.partial, r.discard = fingerprint(f, 0, headSize), nil, false
+	r.skip = start > 0 && r.resume == nil && !r.t.opt.FromStart && !bytes.Equal(fingerprint(f, start-1, 1), []byte{'\n'})
+	if r.skip {
+		r.discard = true
+	}
 	c := r.position()
 	if r.first && r.resume == nil {
 		// Persist the initial baseline, including offset zero, before read-ahead.
@@ -283,6 +311,8 @@ func (r *acknowledgedReader) open() error {
 	if r.gap != "" {
 		r.t.setStatus(r.gap)
 		r.t.log.Error("source continuity lost", "reason", r.gap)
+	} else if strings.HasPrefix(r.t.Status(), "audit log unavailable:") {
+		r.t.setStatus("ok")
 	}
 	if err := r.emit(Line{Start: c, End: c, Boundary: true, Gap: r.gap}); err != nil {
 		return err
@@ -386,10 +416,11 @@ func (r *acknowledgedReader) consume(b []byte) error {
 		if !r.discard {
 			text = string(r.partial[:len(r.partial)-1])
 		}
-		if err := r.emit(Line{Text: text, Start: from, End: to, Oversized: r.discard}); err != nil {
+		if err := r.emit(Line{Text: text, Start: from, End: to, Oversized: r.discard && !r.skip, Skipped: r.skip}); err != nil {
 			return err
 		}
 		r.partial, r.discard = nil, false
+		r.skip = false
 		r.lineStart = end
 		b = b[len(part):]
 	}

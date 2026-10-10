@@ -130,3 +130,20 @@ func TestFailedAppendDoesNotChangeRecentOrAcceptMoreWrites(t *testing.T) {
 		t.Fatal("failed journal accepted another write")
 	}
 }
+
+func TestLegacyEvidenceIsNotResentOnCursorMigration(t *testing.T) {
+	s := testStore(t, time.Now)
+	ev := event(time.Now(), model.KindSudo, model.SevInfo, "")
+	ev.Raw = "type=SYSCALL msg=audit(1760000000.000:1): key=ads_sudo"
+	if err := s.AppendEvent(ev); err != nil {
+		t.Fatal(err)
+	}
+	ev.ID = "new-source-derived-id"
+	if added, err := s.AppendEventOnce(ev); added || err != nil {
+		t.Fatal("migration duplicated legacy evidence", added, err)
+	}
+	ev.Time = ev.Time.Add(time.Second)
+	if added, err := s.AppendEventOnce(ev); !added || err != nil {
+		t.Fatal("legacy matching dropped a different event", added, err)
+	}
+}

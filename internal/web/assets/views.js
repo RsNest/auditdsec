@@ -755,6 +755,7 @@
       [t("diag.banner"), d.banner || (s.ban && s.ban.backend) || t("common.none")],
       [t("diag.audit_log"), d.audit_log || t("common.unknown")],
       [t("diag.offset"), d.offset !== undefined ? A.num(d.offset) : t("common.unknown")],
+	  [t("diag.source"), d.source_status || t("common.unknown")],
       [t("diag.events"), A.num(c.events_total !== undefined ? c.events_total : c.events_24h)],
       [t("diag.alerts"), A.num(c.alerts_sent)],
       [t("diag.skipped"), A.num(c.lines_skipped)],
