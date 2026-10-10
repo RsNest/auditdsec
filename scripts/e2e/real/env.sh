@@ -31,9 +31,9 @@ reset() {
 # DEFAULT_ACCOUNT=1 leaves the password out, as a person who just runs ./install.sh does.
 inst() {
     if [ "${DEFAULT_ACCOUNT:-}" = 1 ]; then
-        (cd "$WORK" && ./install.sh --no-build --yes --no-enforce "$@")
+        (cd "$WORK" && ./install.sh --no-build --yes --no-enforce --no-external-check "$@")
     else
-        (cd "$WORK" && ./install.sh --no-build --yes --no-enforce --password-file "$PW_FILE" "$@")
+        (cd "$WORK" && ./install.sh --no-build --yes --no-enforce --no-external-check --password-file "$PW_FILE" "$@")
     fi
 }
 

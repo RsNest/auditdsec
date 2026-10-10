@@ -16,7 +16,7 @@ printf "AUDITDSEC_TG_TOKEN='123:abc'\nAUDITDSEC_TG_CHAT_ID='42'\n" > .env
 # shellcheck disable=SC2016
 printf 'a-long-test-password-with-$dollar"quote\\slash\n' > "$E2E_STATE/pw.txt"
 export DOCKER="$REPO/scripts/e2e/fakedocker" E2E_REPO="$E2E_STATE/work"
-./install.sh --mode "$mode" --password-file "$E2E_STATE/pw.txt" --yes --no-enforce --port "${PANEL_PORT:-19477}" "$@"
+./install.sh --mode "$mode" --password-file "$E2E_STATE/pw.txt" --yes --no-enforce --no-external-check --upstream-port "${PANEL_PORT:-19477}" "$@"
 rc=$?
 echo "install.sh exit=$rc"
 exit $rc
