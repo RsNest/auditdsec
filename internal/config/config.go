@@ -591,6 +591,9 @@ func (c *Config) validate() error {
 		}
 	}
 
+	if c.SchemaVersion > CurrentSchemaVersion {
+		add("schema_version: %d is newer than this build understands (%d); upgrade auditdsec", c.SchemaVersion, CurrentSchemaVersion)
+	}
 	c.validateWeb(add)
 
 	if len(errs) > 0 {
@@ -637,9 +640,6 @@ func (c *Config) validateWeb(add func(string, ...any)) {
 	}
 	if w.PublicHTTPSPort < 0 || w.PublicHTTPSPort > 65535 {
 		add("web.public_https_port: %d is not a port (1-65535, or 0 for the default 443)", w.PublicHTTPSPort)
-	}
-	if c.SchemaVersion > CurrentSchemaVersion {
-		add("schema_version: %d is newer than this build understands (%d); upgrade auditdsec", c.SchemaVersion, CurrentSchemaVersion)
 	}
 	if u := strings.TrimSpace(w.PublicURL); u != "" {
 		parsed, err := url.Parse(u)

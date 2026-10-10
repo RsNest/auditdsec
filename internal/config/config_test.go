@@ -400,3 +400,121 @@ func TestPublicListenAddressIsRefused(t *testing.T) {
 		t.Error("a malformed public_url was accepted")
 	}
 }
+
+// The public HTTPS port and the agent's own upstream are separate settings;
+// the clearer key upstream_listen and the old key listen mean the same thing.
+func TestPublicPortAndUpstreamFromFile(t *testing.T) {
+	clearEnv(t)
+	c, err := Load(writeConfig(t, `schema_version: 1
+telegram:
+  token: "t"
+  chat_ids: [1]
+web:
+  enabled: true
+  upstream_listen: 127.0.0.1:19477
+  public_https_port: 27431
+  public_url: https://panel.example.com:27431
+  password_hash: "pbkdf2-sha256$310000$c2FsdA$a2V5"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SchemaVersion != 1 || c.Web.Listen != "127.0.0.1:19477" || c.Web.PublicHTTPSPort != 27431 {
+		t.Errorf("schema %d, upstream %q, public port %d", c.SchemaVersion, c.Web.Listen, c.Web.PublicHTTPSPort)
+	}
+	if got := c.PanelURL(); got != "https://panel.example.com:27431" {
+		t.Errorf("panel URL = %q: the link must be the public one, not the upstream", got)
+	}
+
+	old, err := Load(writeConfig(t, "telegram:\n  token: t\n  chat_ids: [1]\nweb:\n  enabled: true\n  listen: 127.0.0.1:9478\n  password_hash: \"pbkdf2-sha256$310000$c2FsdA$a2V5\"\n"))
+	if err != nil {
+		t.Fatalf("a file without schema_version and with the old key: %v", err)
+	}
+	if old.Web.Listen != "127.0.0.1:9478" || old.SchemaVersion != 0 || old.Web.PublicHTTPSPort != 0 {
+		t.Errorf("old file: listen %q schema %d port %d", old.Web.Listen, old.SchemaVersion, old.Web.PublicHTTPSPort)
+	}
+}
+
+func TestPublicPortFromEnv(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("AUDITDSEC_TG_TOKEN", "t")
+	t.Setenv("AUDITDSEC_TG_CHAT_ID", "1")
+	t.Setenv("AUDITDSEC_WEB", "1")
+	t.Setenv("AUDITDSEC_WEB_UPSTREAM_LISTEN", "127.0.0.1:19477")
+	t.Setenv("AUDITDSEC_WEB_PUBLIC_HTTPS_PORT", "27431")
+	t.Setenv("AUDITDSEC_WEB_PUBLIC_URL", "https://[2001:db8::10]:27431")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Web.Listen != "127.0.0.1:19477" || c.Web.PublicHTTPSPort != 27431 {
+		t.Errorf("upstream %q, public port %d", c.Web.Listen, c.Web.PublicHTTPSPort)
+	}
+	for _, bad := range []string{"abc", "0x10", "70000", "-5"} {
+		t.Setenv("AUDITDSEC_WEB_PUBLIC_HTTPS_PORT", bad)
+		if _, err := Load(""); err == nil {
+			t.Errorf("AUDITDSEC_WEB_PUBLIC_HTTPS_PORT=%s was accepted", bad)
+		}
+	}
+}
+
+// A link whose port is not the public port would not open.
+func TestPublicURLMustMatchPublicPort(t *testing.T) {
+	base := func(port int, u string) *Config {
+		c := Defaults(ProfileSimple)
+		c.Telegram.Token, c.Telegram.ChatIDs = "t", []int64{1}
+		c.Web.Enabled, c.Web.PasswordHash = true, "pbkdf2-sha256$310000$c2FsdA$a2V5"
+		c.Web.PublicHTTPSPort, c.Web.PublicURL = port, u
+		return c
+	}
+	good := []struct {
+		port int
+		url  string
+	}{{443, "https://panel.example.com"}, {443, "https://panel.example.com:443"}, {27431, "https://203.0.113.10:27431"}, {0, "https://panel.example.com"}}
+	for _, g := range good {
+		if err := base(g.port, g.url).validate(); err != nil {
+			t.Errorf("port %d url %s refused: %v", g.port, g.url, err)
+		}
+	}
+	bad := []struct {
+		port int
+		url  string
+	}{{27431, "https://panel.example.com"}, {443, "https://panel.example.com:27431"}, {27431, "https://[2001:db8::10]:443"}}
+	for _, b := range bad {
+		if err := base(b.port, b.url).validate(); err == nil {
+			t.Errorf("port %d url %s accepted", b.port, b.url)
+		}
+	}
+}
+
+// A file written for a newer format is refused whether or not the panel is on.
+func TestNewerSchemaIsRefused(t *testing.T) {
+	clearEnv(t)
+	_, err := Load(writeConfig(t, "schema_version: 2\ntelegram:\n  token: t\n  chat_ids: [1]\n"))
+	if err == nil || !strings.Contains(err.Error(), "schema_version") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// Profiles stay readable as a deprecated preset: the named one sets the
+// starting values, and an explicit key still wins over it.
+func TestDeprecatedProfileIsAPresetNotAProduct(t *testing.T) {
+	clearEnv(t)
+	c, err := Load(writeConfig(t, "profile: pro\ntelegram:\n  token: t\n  chat_ids: [1]\n  min_severity: critical\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.ProfileExplicit || c.Profile != ProfilePro {
+		t.Errorf("profile %q explicit %t", c.Profile, c.ProfileExplicit)
+	}
+	if c.MinSeverity() != model.SevCritical {
+		t.Errorf("an explicit min_severity lost to the preset: %v", c.MinSeverity())
+	}
+	plain, err := Load(writeConfig(t, "telegram:\n  token: t\n  chat_ids: [1]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.ProfileExplicit {
+		t.Error("a file without profile was marked as asking for one")
+	}
+}
