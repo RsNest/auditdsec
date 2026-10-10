@@ -175,6 +175,9 @@ func (m *Mapper) MapVerbose(ev *parse.Event) (model.Event, string, bool) {
 			strings.Join(ev.Types(), ",")), false
 	}
 
+	if !ev.Complete {
+		out.Incomplete = ev.IncompleteReason
+	}
 	out.SummaryKey = "event." + string(out.Kind)
 	out.Args["user"] = out.User
 	out.Args["kind"] = string(out.Kind)
@@ -314,10 +317,8 @@ func ipOf(ev *parse.Event) string {
 }
 
 func pathOf(ev *parse.Event) string {
-	if p := ev.Paths(); len(p) > 0 {
-		// The last PATH record is the file that was opened; earlier ones are
-		// the parent directories auditd walked through.
-		return p[len(p)-1]
+	if p := ev.TargetPath(); p != "" {
+		return p
 	}
 	return ev.Field("name")
 }

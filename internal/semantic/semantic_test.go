@@ -14,12 +14,15 @@ func build(t *testing.T, lines ...string) *parse.Event {
 	t.Helper()
 	a := parse.NewAssembler(time.Second)
 	now := time.Unix(1760000000, 0)
+	var evs []*parse.Event
 	for _, l := range lines {
-		if _, err := a.Add(l, now); err != nil && !strings.Contains(err.Error(), "no record") {
+		done, err := a.Add(l, now)
+		if err != nil && !strings.Contains(err.Error(), "no record") {
 			t.Fatalf("Add(%q): %v", l, err)
 		}
+		evs = append(evs, done...)
 	}
-	evs := a.Flush()
+	evs = append(evs, a.Flush()...)
 	if len(evs) != 1 {
 		t.Fatalf("want 1 assembled event, got %d", len(evs))
 	}
