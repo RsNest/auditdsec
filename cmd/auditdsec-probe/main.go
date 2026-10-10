@@ -13,6 +13,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -36,6 +37,7 @@ func main() {
 	perTarget := flag.Int("rate-per-target", 6, "checks per minute for one target address")
 	active := flag.Int("max-active", 4, "checks running at once")
 	allowPrivate := flag.Bool("allow-private-targets", false, "TEST ONLY: allow loopback and private targets")
+	rootsFile := flag.String("roots", "", "verify the checked servers' certificates against this CA file instead of the system roots (a private or test CA)")
 	flag.Parse()
 
 	if *genToken {
@@ -69,8 +71,20 @@ func main() {
 			log.Fatal("without -cert/-key it may only listen on a loopback address: the token would cross the network in clear text")
 		}
 	}
+	var roots *x509.CertPool
+	if *rootsFile != "" {
+		b, err := os.ReadFile(*rootsFile)
+		if err != nil {
+			log.Fatalf("-roots: %v", err)
+		}
+		roots = x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(b) {
+			log.Fatalf("-roots: no certificate in %s", *rootsFile)
+		}
+		log.Printf("certificates are verified against %s, not the system roots", *rootsFile)
+	}
 	svc := &netcheck.Service{
-		Checker: &netcheck.Checker{AllowPrivate: *allowPrivate, Timeout: 8 * time.Second},
+		Checker: &netcheck.Checker{AllowPrivate: *allowPrivate, Roots: roots, Timeout: 8 * time.Second},
 		Token:   token, PerMinute: *perMin, PerTarget: *perTarget, MaxActive: *active,
 	}
 	srv := &http.Server{Addr: *listen, Handler: svc.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 60 * time.Second}

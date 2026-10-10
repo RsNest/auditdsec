@@ -56,7 +56,7 @@ func cmdNetCheck(args []string) error {
 	}
 	fs := flag.NewFlagSet("net-check", flag.ContinueOnError)
 	claimed := fs.String("public-ip", "", "this server's public address(es), if you know them")
-	noEgress := fs.Bool("no-egress", false, "do not ask an outside service which address this machine connects from")
+	noEgress := fs.Bool("no-egress", os.Getenv("PANEL_NO_EGRESS") == "1", "do not ask an outside service which address this machine connects from")
 	attempts := fs.Int("attempts", 3, "DNS rounds while answers are missing or disagree")
 	wait := fs.Duration("wait", 5*time.Second, "pause between DNS rounds")
 	resolvers := fs.String("resolvers", os.Getenv("PANEL_DNS_RESOLVERS"), "comma separated DNS servers host:port (default: three public ones)")
