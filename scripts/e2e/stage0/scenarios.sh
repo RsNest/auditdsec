@@ -24,7 +24,7 @@ expect()         { local d="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$d";
 LABEL=""
 inst() { # LABEL ARGS... — run the installer in the work copy, keep the output
     LABEL="$1"; shift
-    OUT="$(cd "$WORK" && ./install.sh --no-build --yes "$@" 2>&1)"; RC=$?
+    OUT="$(cd "$WORK" && ./install.sh --yes "$@" 2>&1)"; RC=$?
     printf '%s\n' "$OUT" > "$OUTDIR/$LABEL.log"
 }
 last_link() { grep -E '^  Link' <<<"$OUT" | tail -n 1; }
@@ -90,7 +90,7 @@ s_port_in_use() {
     step "a port given by hand is in use -> port_in_use, nothing replaced"
     reset
     AUDITDSEC_PROBE_NONCE=aaaaaaaaaaaaaaaaaaaaaaaa docker run -d --name lab-blocker --network host -e AUDITDSEC_PROBE_NONCE \
-        auditdsec:0.1.0 probe-listen -port 27500 -ttl 10m >/dev/null
+        "$LAB_IMAGE" probe-listen -port 27500 -ttl 10m >/dev/null
     sleep 1
     inst port_in_use --mode ip --site "$VPS" --public-ip "$VPS" --https-port 27500 "${PROBE[@]}"
     expect_rc 10
@@ -211,13 +211,149 @@ EOF
     expect_out_not "The panel is published"
 }
 
-ALL="ip_auto setup_persists manual_port port_in_use firewall_timeout auto_skips_blocked no_probe dns_mismatch domain challenge_blocked domain_alpn no_external persistence_fails"
 
-# The agent image, built once from the working copy.
-if ! docker image inspect auditdsec:0.1.0 >/dev/null 2>&1 || [ "${REBUILD:-}" = 1 ]; then
-    step "building the agent image"
-    (cd "$REPO" && AUDITDSEC_TG_TOKEN=x AUDITDSEC_TG_CHAT_ID=1 docker compose -f docker-compose.yml build -q auditdsec) || exit 1
+# ---------------------------------------------------------- images --
+
+LAB_IMAGE="$AUDITDSEC_IMAGE_REPO/auditdsec:sha-$LAB_COMMIT"
+
+# push_image COMMIT — publish the lab image under another commit's tag, as
+# GitHub Actions would after building that commit.
+push_image() {
+    docker tag "$LAB_IMAGE" "$AUDITDSEC_IMAGE_REPO/auditdsec:sha-$1"
+    docker push -q "$AUDITDSEC_IMAGE_REPO/auditdsec:sha-$1" >/dev/null
+}
+
+s_image_pulled() {
+    step "the installer downloads the image of its commit and never builds"
+    reset
+    docker image rm -f "$LAB_IMAGE" >/dev/null 2>&1 || true   # only the registry has it
+    inst image_pulled --mode ip --site "$VPS" --public-ip "$VPS" --https-port 27431 --no-external-check
+    expect_rc 0
+    expect_out "Downloading the agent image for commit ${LAB_COMMIT:0:12}"
+    expect_out_not "Building"
+    expect "the image was pulled from the registry" docker image inspect "$LAB_IMAGE"
+    expect ".env names the image of this commit" [ "$(env_val AUDITDSEC_IMAGE)" = "$LAB_IMAGE" ]
+    expect "the running agent is that image" sh -c "[ \"\$(docker inspect -f '{{.Config.Image}}' auditdsec)\" = '$LAB_IMAGE' ]"
+    expect "the agent in it is that commit" sh -c "docker run --rm '$LAB_IMAGE' version | grep -q 'commit $LAB_COMMIT'"
+    expect_out "commit $LAB_COMMIT"
+    expect_out "digest sha256:"
+    expect "no image was built on the server" sh -c '! docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^auditdsec:local"'
+}
+
+s_image_missing() {
+    step "no image for this commit -> image_unavailable, nothing changed"
+    reset
+    local other; other="$(printf other | sha1sum | cut -c1-40)"
+    printf '%s\n' "$other" > "$WORK/deploy/source-commit"
+    ghapi none
+    inst image_missing --mode ip --site "$VPS" --public-ip "$VPS" --https-port 27431 --no-external-check
+    expect_rc 19
+    expect_out "FAILED: image_unavailable"
+    expect_out "--build-local"
+    expect_out_not "Building"
+    expect "nothing was started" sh -c '! docker ps --format "{{.Names}}" | grep -qx auditdsec'
+}
+
+s_image_build_failed() {
+    step "the GitHub build of this commit failed -> image_unavailable at once"
+    reset
+    local other; other="$(printf failed | sha1sum | cut -c1-40)"
+    printf '%s\n' "$other" > "$WORK/deploy/source-commit"
+    ghapi completed failure
+    inst image_build_failed --mode ip --site "$VPS" --public-ip "$VPS" --https-port 27431 --no-external-check
+    expect_rc 19
+    expect_out "the build for this commit failed"
+}
+
+s_image_wait() {
+    step "the image is still being built -> a bounded wait, then it is used"
+    reset
+    local other; other="$(printf later | sha1sum | cut -c1-40)"
+    printf '%s\n' "$other" > "$WORK/deploy/source-commit"
+    ghapi in_progress
+    docker image rm -f "$AUDITDSEC_IMAGE_REPO/auditdsec:sha-$other" >/dev/null 2>&1 || true
+    ( sleep 30; push_image "$other"; ghapi completed success ) &
+    inst image_wait --mode ip --site "$VPS" --public-ip "$VPS" --https-port 27431 --no-external-check
+    wait
+    expect_rc 0
+    expect_out "still being built by GitHub Actions; waiting"
+    expect ".env names the later image" [ "$(env_val AUDITDSEC_IMAGE)" = "$AUDITDSEC_IMAGE_REPO/auditdsec:sha-$other" ]
+
+    step "... and gives up after the limit with a command to retry"
+    reset
+    other="$(printf never | sha1sum | cut -c1-40)"
+    printf '%s\n' "$other" > "$WORK/deploy/source-commit"
+    ghapi in_progress
+    AUDITDSEC_IMAGE_WAIT=40 inst image_wait_timeout --mode ip --site "$VPS" --public-ip "$VPS" --https-port 27431 --no-external-check
+    expect_rc 19
+    expect_out "still being built after"
+    expect_out "retry:    ./install.sh"
+}
+
+s_unstamped() {
+    step "a tree that cannot tell its commit -> refused, no guessing"
+    reset
+    printf '$Format:%%H$\n' > "$WORK/deploy/source-commit"
+    inst unstamped --mode ip --site "$VPS" --public-ip "$VPS" --https-port 27431 --no-external-check
+    expect_rc 1
+    expect_out "cannot tell which commit this code is"
+}
+
+# The previous release built its image on the server (auditdsec:0.1.0) and
+# wrote no image to .env. Updating must keep .env, the credentials, the
+# events and the certificates, and remember the old image for going back.
+s_update_from_legacy() {
+    step "update an installation made by the previous release"
+    reset
+    [ -d "$LAB/old" ] || { fail "no previous release in $LAB/old (lab sync copies it)"; return; }
+    rm -rf "$WORK"; mkdir -p "$WORK"; cp -a "$LAB/old/." "$WORK/"
+    printf "AUDITDSEC_TG_TOKEN='123:abc'\nAUDITDSEC_TG_CHAT_ID='42'\n" > "$WORK/.env"; chmod 600 "$WORK/.env"
+    LABEL=legacy_install
+    OUT="$(cd "$WORK" && AUDITDSEC_IMAGE_REPO='' ./install.sh --yes --mode ip --site "$VPS" --public-ip "$VPS" --https-port 27431 "${PROBE[@]}" 2>&1)"; RC=$?
+    printf '%s\n' "$OUT" > "$OUTDIR/$LABEL.log"
+    expect_rc 0
+    expect "the old release built auditdsec:0.1.0 here" docker image inspect auditdsec:0.1.0
+    local url="https://$VPS:27431" tok
+    tok="$(api POST "$url/api/v1/login" "" '{"login":"admin","password":"admin"}' | token_of)"
+    api POST "$url/api/v1/setup/complete" "$tok" '{"login":"owner","password":"Goodpass1","password_confirm":"Goodpass1","keep_admin_confirmed":false}' >/dev/null
+    printf 'type=USER_AUTH msg=audit(%s.000:4242): pid=1 uid=0 auid=4294967295 ses=4294967295 msg='"'"'op=PAM:authentication acct="root" exe="/usr/sbin/sshd" hostname=198.51.100.77 addr=198.51.100.77 terminal=ssh res=failed'"'"'\n' "$(date +%s)" >> "$E2E_AUDIT_DIR/audit.log"
+    sleep 4
+    local cert_before; cert_before="$(printf '' | openssl s_client -connect "$VPS:27431" 2>/dev/null | openssl x509 -noout -fingerprint -sha256)"
+    cp "$WORK/.env" "$LAB/legacy.env"
+
+    # The new code arrives next to the old .env, as `git pull` would do.
+    (cd "$REPO" && tar --exclude=.git -cf - .) | tar -xf - -C "$WORK"
+    printf '%s\n' "$LAB_COMMIT" > "$WORK/deploy/source-commit"
+    inst update --mode ip --site "$VPS" --public-ip "$VPS" --https-port 27431 "${PROBE[@]}"
+    expect_rc 0
+    expect "the Telegram settings were kept" grep -q "^AUDITDSEC_TG_TOKEN='123:abc'" "$WORK/.env"
+    expect ".env now names the published image" [ "$(env_val AUDITDSEC_IMAGE)" = "$LAB_IMAGE" ]
+    expect "the old image is remembered for going back" [ "$(env_val PANEL_IMAGE_PREVIOUS)" = "auditdsec:0.1.0" ]
+    expect_out "previous image (for going back): auditdsec:0.1.0"
+    expect_out_not "First login"
+    tok="$(api POST "$url/api/v1/login" "" '{"login":"owner","password":"Goodpass1"}' | token_of)"
+    expect "the owner's credentials survived the update" [ -n "$tok" ]
+    expect "admin/admin did not come back" sh -c "! curl -s --cacert '$LAB/root.pem' -X POST -H 'X-Requested-With: auditdsec' -H 'Content-Type: application/json' --data-binary '{\"login\":\"admin\",\"password\":\"admin\"}' '$url/api/v1/login' | grep -q token"
+    expect "the stored event survived the update" sh -c "curl -s --cacert '$LAB/root.pem' -H 'Authorization: Bearer $tok' '$url/api/v1/events?limit=50' | grep -q 198.51.100.77"
+    local cert_after; cert_after="$(printf '' | openssl s_client -connect "$VPS:27431" 2>/dev/null | openssl x509 -noout -fingerprint -sha256)"
+    expect "the certificate was reused, not issued again" sh -c "[ -n '$cert_before' ] && [ '$cert_before' = '$cert_after' ]"
+}
+
+ALL="image_pulled image_missing image_build_failed image_wait unstamped update_from_legacy ip_auto setup_persists manual_port port_in_use firewall_timeout auto_skips_blocked no_probe dns_mismatch domain challenge_blocked domain_alpn no_external persistence_fails"
+
+# The images, built once from this tree with the Dockerfile CI uses and
+# "published" to the lab registry under LAB_COMMIT, as GitHub Actions would.
+if ! docker manifest inspect --insecure "$LAB_IMAGE" >/dev/null 2>&1 || [ "${REBUILD:-}" = 1 ]; then
+    step "building and publishing the images to the lab registry"
+    for t in minimal enforce; do
+        name=auditdsec; [ "$t" = enforce ] && name=auditdsec-enforce
+        ref="$AUDITDSEC_IMAGE_REPO/$name:sha-$LAB_COMMIT"
+        (cd "$REPO" && docker build -q -f deploy/Dockerfile --target "$t" \
+            --build-arg VERSION="$(cat VERSION)-lab" --build-arg COMMIT="$LAB_COMMIT" -t "$ref" .) >/dev/null || exit 1
+        docker push -q "$ref" >/dev/null || exit 1
+    done
 fi
+docker pull -q "$LAB_IMAGE" >/dev/null
 
 # shellcheck disable=SC2048,SC2086
 for s in ${*:-$ALL}; do "s_$s"; done

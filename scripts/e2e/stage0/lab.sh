@@ -13,6 +13,9 @@
 #   pebble    Let's Encrypt's test ACME server, on https://localhost:14000.
 #             It validates HTTP-01 on port 80 and TLS-ALPN-01 on 443 of the
 #             address being certified, like the real CA.
+#   registry  a Docker registry on 127.0.0.1:5000 standing in for ghcr.io, and
+#             a fake GitHub API on 127.0.0.1:18080 whose answer the scenarios
+#             set (building / failed / none).
 #   probe     cmd/auditdsec-probe in a container on a SEPARATE Docker network
 #             ("outside"): its connections to the VPS come in through the
 #             VPS's network interface, so a firewall rule on the VPS's INPUT
@@ -27,6 +30,7 @@ REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 PEBBLE_IMAGE="${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.9.0}"
 COREDNS_IMAGE="${COREDNS_IMAGE:-coredns/coredns:1.12.1}"
 GO_IMAGE="${GO_IMAGE:-golang:1.24-alpine}"
+REGISTRY_IMAGE="${REGISTRY_IMAGE:-registry:2.8.3}"
 
 say() { printf '== %s\n' "$*"; }
 
@@ -116,11 +120,20 @@ EOF
     # The VPS resolves the test names too (the installer's own curl to https://panel.test).
     grep -q " panel.test$" /etc/hosts || echo "$ip panel.test" >> /etc/hosts
     docker network inspect outside -f '{{(index .IPAM.Config 0).Subnet}}' > "$LAB/outside-subnet"
+    say "image registry on 127.0.0.1:5000 (stands in for ghcr.io), fake GitHub API on 127.0.0.1:18080"
+    docker rm -f lab-registry >/dev/null 2>&1 || true
+    docker run -d --name lab-registry -p 127.0.0.1:5000:5000 "$REGISTRY_IMAGE" >/dev/null
+    mkdir -p "$LAB/ghapi/repos/RsNest/auditdsec/actions"
+    echo '{"total_count": 1, "workflow_runs": [{"status": "completed", "conclusion": "success"}]}' \
+        > "$LAB/ghapi/repos/RsNest/auditdsec/actions/runs"
+    [ ! -f "$LAB/ghapi.pid" ] || kill "$(cat "$LAB/ghapi.pid")" 2>/dev/null || true
+    (cd "$LAB/ghapi" && nohup python3 -m http.server 18080 --bind 127.0.0.1 >/dev/null 2>&1 & echo $! > "$LAB/ghapi.pid")
     say "ready: VPS address $ip, outside network $(cat "$LAB/outside-subnet")"
 }
 
 down() {
-    docker rm -f lab-dns lab-pebble lab-probe >/dev/null 2>&1 || true
+    docker rm -f lab-dns lab-pebble lab-probe lab-registry >/dev/null 2>&1 || true
+    [ ! -f "$LAB/ghapi.pid" ] || kill "$(cat "$LAB/ghapi.pid")" 2>/dev/null || true
 }
 
 case "${1:-}" in
