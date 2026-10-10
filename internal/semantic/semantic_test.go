@@ -408,3 +408,39 @@ func TestAuditSilentIsAWarningWithItsOwnText(t *testing.T) {
 		t.Errorf("unavailable: %+v", un)
 	}
 }
+
+func TestNonSSHAuthenticationIsNotAnSSHLogin(t *testing.T) {
+	cases := []struct {
+		name, line string
+		kind       model.Kind
+		sev        model.Severity
+		service    string
+	}{
+		{"failed sudo", `type=USER_AUTH msg=audit(1760000000.000:10): pid=1 uid=1000 auid=1000 msg='op=PAM:authentication acct="ruslan" exe="/usr/bin/sudo" hostname=? addr=? terminal=/dev/pts/0 res=failed'`, model.KindAuthFail, model.SevWarn, "sudo"},
+		{"failed su", `type=USER_AUTH msg=audit(1760000000.000:11): pid=1 uid=1000 msg='op=PAM:authentication acct="root" exe="/usr/bin/su" addr=? terminal=pts/1 res=failed'`, model.KindAuthFail, model.SevWarn, "su"},
+		{"console root login", `type=USER_LOGIN msg=audit(1760000000.000:12): pid=1 uid=0 auid=0 msg='op=login acct="root" exe="/usr/bin/login" hostname=? addr=? terminal=tty1 res=success'`, model.KindAuthOK, model.SevCritical, "login"},
+		{"failed console login", `type=USER_LOGIN msg=audit(1760000000.000:13): pid=1 uid=0 auid=4294967295 msg='op=login acct="x" exe="/usr/bin/login" hostname=? addr=? terminal=tty1 res=failed'`, model.KindAuthFail, model.SevWarn, "login"},
+		// A remote service that is not sshd is still not an SSH brute-force.
+		{"ftp with an address", `type=USER_AUTH msg=audit(1760000000.000:14): pid=1 uid=0 msg='op=PAM:authentication acct="bob" exe="/usr/sbin/vsftpd" hostname=198.51.100.9 addr=198.51.100.9 terminal=ftp res=failed'`, model.KindAuthFail, model.SevWarn, "vsftpd"},
+	}
+	m := New("web01")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, why, ok := m.MapVerbose(build(t, c.line))
+			if !ok {
+				t.Fatalf("dropped: %s", why)
+			}
+			if out.Kind != c.kind || out.Severity != c.sev || out.Args["service"] != c.service {
+				t.Errorf("got %s/%v service=%q", out.Kind, out.Severity, out.Args["service"])
+			}
+			if out.SrcIP != "" {
+				t.Errorf("a non-SSH authentication must not carry a source address: %q", out.SrcIP)
+			}
+			for _, lang := range i18n.Langs() {
+				if s := i18n.T(lang, out.SummaryKey, out.Args); strings.Contains(s, "{") {
+					t.Errorf("lang %s: %q", lang, s)
+				}
+			}
+		})
+	}
+}

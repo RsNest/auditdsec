@@ -54,6 +54,8 @@ type Kind string
 const (
 	KindSSHLoginOK           Kind = "ssh_login_ok"
 	KindSSHLoginFail         Kind = "ssh_login_fail"
+	KindAuthOK               Kind = "auth_ok"   // a login or authentication by another service (console, su, ...)
+	KindAuthFail             Kind = "auth_fail" // a failed one
 	KindLoginAfterBruteForce Kind = "login_after_bruteforce"
 	KindSudo                 Kind = "sudo"
 	KindUserChange           Kind = "user_change"
@@ -71,6 +73,8 @@ const (
 var AllKinds = []Kind{
 	KindSSHLoginOK,
 	KindSSHLoginFail,
+	KindAuthOK,
+	KindAuthFail,
 	KindLoginAfterBruteForce,
 	KindSudo,
 	KindUserChange,

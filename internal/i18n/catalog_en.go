@@ -5,6 +5,8 @@ var catalogEN = map[string]string{
 	// Event summaries.
 	"event.ssh_login_ok":           "Login: {user} from {ip}",
 	"event.ssh_login_fail":         "Failed login attempt: {user} from {ip}",
+	"event.auth_ok":                "Login via {service}: {user}",
+	"event.auth_fail":              "Failed authentication via {service}: {user}",
 	"event.login_after_bruteforce": "Successful login by {user} from {ip} after {fails} failed attempts",
 	"event.sudo":                   "{user} ran a command with elevated rights: {cmd}",
 	"event.user_change":            "Account change: {detail}",
@@ -27,6 +29,12 @@ var catalogEN = map[string]string{
 	"explain.ssh_login_ok": "What it is: somebody logged in successfully.\n" +
 		"Risk: a login is ordinary, but a root login or one from an unfamiliar address deserves a look — especially right after a burst of failures.\n" +
 		"What to do: if it was not you, rotate passwords and SSH keys now, inspect ~/.ssh/authorized_keys and check live sessions with who.",
+	"explain.auth_ok": "What it is: a successful login or authentication by a service other than SSH (a console login, su, a desktop manager).\n" +
+		"Risk: ordinary, unless it is root or you do not use the console.\n" +
+		"What to do: if it was not you, check who and last, and rotate credentials.",
+	"explain.auth_fail": "What it is: a failed authentication by a service other than SSH (sudo, su, a console login). It has no remote address and does not feed the SSH ban detector.\n" +
+		"Risk: a few mistyped passwords are normal; repeated failures for another account may be somebody trying to escalate.\n" +
+		"What to do: find out who was at the keyboard or in the session.",
 	"explain.ssh_login_fail": "What it is: a login attempt with wrong credentials.\n" +
 		"Risk: isolated misses are normal. Dozens per minute mean a brute-force attack.\n" +
 		"What to do: ban the address with the button under the message, then disable password logins (PasswordAuthentication no) and keep keys only.",

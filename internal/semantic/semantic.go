@@ -6,6 +6,7 @@ package semantic
 import (
 	"fmt"
 	"net"
+	"path"
 	"sort"
 	"strings"
 
@@ -105,6 +106,11 @@ func (m *Mapper) MapVerbose(ev *parse.Event) (model.Event, string, bool) {
 
 	case ev.Has("USER_LOGIN"):
 		ok := succeeded(ev)
+		if !viaSSH(ev) {
+			// A console or other local login is not an SSH login and has no
+			// remote address to attribute; it must not be labelled as one.
+			return localAuth(out, ev, ok, isRoot(ev)), "", true
+		}
 		out.Kind = model.KindSSHLoginFail
 		out.Severity = model.SevWarn
 		if ok {
@@ -123,6 +129,12 @@ func (m *Mapper) MapVerbose(ev *parse.Event) (model.Event, string, bool) {
 		// both would double-count every login.
 		if succeeded(ev) {
 			return model.Event{}, "successful USER_AUTH is reported through USER_LOGIN instead", false
+		}
+		if !viaSSH(ev) {
+			// sudo, su, cron and display managers also authenticate through
+			// PAM. Their failures are not SSH attacks and must not feed the
+			// SSH ban detector.
+			return localAuth(out, ev, false, false), "", true
 		}
 		out.Kind = model.KindSSHLoginFail
 		out.Severity = model.SevWarn
@@ -371,4 +383,53 @@ func PanelCertProblem(host, detail string) model.Event {
 		SummaryKey: "event." + string(model.KindPanelCert),
 		Args:       map[string]string{"detail": detail, "kind": string(model.KindPanelCert)},
 	}
+}
+
+// viaSSH reports whether an authentication record comes from sshd. The program
+// that wrote the record decides, not the presence of an address: a failed sudo
+// has none, and other network services (ftp, imap) have one.
+func viaSSH(ev *parse.Event) bool {
+	exe := ev.Field("exe")
+	if valid(exe) {
+		return strings.HasPrefix(path.Base(exe), "sshd")
+	}
+	// Records without exe: sshd sets terminal=ssh. Without either, a remote
+	// address is the only evidence left, and the old behaviour is kept.
+	if t := ev.Field("terminal"); valid(t) {
+		return t == "ssh"
+	}
+	return ipOf(ev) != ""
+}
+
+// serviceOf names the program behind a non-SSH authentication.
+func serviceOf(ev *parse.Event) string {
+	if exe := ev.Field("exe"); valid(exe) {
+		return path.Base(exe)
+	}
+	if t := ev.Field("terminal"); valid(t) {
+		return t
+	}
+	return "local"
+}
+
+// localAuth fills in an authentication that did not come from sshd. It carries
+// no SrcIP on purpose: the SSH detector and the suspect list key on it.
+func localAuth(out model.Event, ev *parse.Event, ok, root bool) model.Event {
+	out.Kind, out.Severity = model.KindAuthFail, model.SevWarn
+	if ok {
+		out.Kind, out.Severity = model.KindAuthOK, model.SevInfo
+		if root {
+			out.Severity = model.SevCritical
+		}
+	}
+	out.User = userOf(ev)
+	out.Args["service"] = serviceOf(ev)
+	out.Args["user"] = out.User
+	out.Args["kind"] = string(out.Kind)
+	out.SummaryKey = "event." + string(out.Kind)
+	if !ev.Complete {
+		out.Incomplete = ev.IncompleteReason
+	}
+	out.Raw = sanitize.AuditRaw(rawLines(ev), maxRaw)
+	return sanitize.Event(out)
 }
