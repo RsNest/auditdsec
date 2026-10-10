@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RsNest/auditdsec/internal/delivery"
 	"github.com/RsNest/auditdsec/internal/model"
 )
 
@@ -142,59 +143,78 @@ func (s *Store) AppendEvent(ev model.Event) error {
 // AppendEventOnce durably records an event, returning false for a stored ID.
 // Legacy events without an ID remain append-only.
 func (s *Store) AppendEventOnce(ev model.Event) (bool, error) {
+	commit, err := s.AppendEventWithPlan(ev, nil)
+	return commit.Added, err
+}
+
+type JournalCommit struct {
+	Added    bool
+	Position delivery.Position
+}
+type journalRecord struct {
+	model.Event
+	Plan *delivery.Plan `json:"notification_plan,omitempty"`
+}
+
+// AppendEventWithPlan makes the event and its notification policy one durable record.
+func (s *Store) AppendEventWithPlan(ev model.Event, plan *delivery.Plan) (JournalCommit, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.writeErr != nil {
-		return false, s.writeErr
+		return JournalCommit{}, s.writeErr
 	}
 	if ev.Time.IsZero() {
 		ev.Time = s.now()
 	}
 	f, err := s.fileFor(ev.Time)
 	if err != nil {
-		return false, err
+		return JournalCommit{}, err
 	}
 	var index *eventIndex
 	if ev.ID != "" {
 		if len(ev.ID) > 128 {
-			return false, fmt.Errorf("store: event ID is too long")
+			return JournalCommit{}, fmt.Errorf("store: event ID is too long")
 		}
 		index, err = s.indexFor(ev.Time.UTC().Format(dayLayout))
 		if err != nil {
-			return false, err
+			return JournalCommit{}, err
 		}
 		seen, err := s.containsEvent(index, ev.Time.UTC().Format(dayLayout), ev.ID)
 		if err != nil {
-			return false, err
+			return JournalCommit{}, err
 		}
 		if !seen && legacyKey(ev) != "" {
 			seen, err = s.containsEvent(index, ev.Time.UTC().Format(dayLayout), legacyKey(ev))
 			if err != nil {
-				return false, err
+				return JournalCommit{}, err
 			}
 		}
 		if seen {
 			if err := f.Sync(); err != nil {
 				s.writeErr = err
-				return false, err
+				return JournalCommit{}, err
 			}
-			return false, nil
+			return JournalCommit{}, nil
 		}
 	}
-	b, err := json.Marshal(ev)
+	b, err := json.Marshal(journalRecord{Event: ev, Plan: plan})
 	if err != nil {
-		return false, fmt.Errorf("store: encode event: %w", err)
+		return JournalCommit{}, fmt.Errorf("store: encode event: %w", err)
 	}
 	if len(b)+1 > maxJournalLine {
-		return false, fmt.Errorf("store: encoded event exceeds journal record limit")
+		return JournalCommit{}, fmt.Errorf("store: encoded event exceeds journal record limit")
+	}
+	start, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return JournalCommit{}, err
 	}
 	if _, err := f.Write(append(b, '\n')); err != nil {
 		s.writeErr = fmt.Errorf("store: write event: %w", err)
-		return false, s.writeErr
+		return JournalCommit{}, s.writeErr
 	}
 	if err := f.Sync(); err != nil {
 		s.writeErr = fmt.Errorf("store: sync event: %w", err)
-		return false, s.writeErr
+		return JournalCommit{}, s.writeErr
 	}
 	if index != nil {
 		index.add(ev.ID)
@@ -205,7 +225,7 @@ func (s *Store) AppendEventOnce(ev model.Event) (bool, error) {
 	if len(s.recent) > s.maxRecent {
 		s.recent = s.recent[len(s.recent)-s.maxRecent:]
 	}
-	return true, nil
+	return JournalCommit{Added: true, Position: delivery.Position{Day: ev.Time.UTC().Format(dayLayout), Start: start, End: start + int64(len(b)+1)}}, nil
 }
 
 // Recent returns up to n of the most recent events, newest last.
