@@ -250,6 +250,62 @@ start-up fails with an explicit error instead of resetting progress. If the dete
 disabled, nothing is consumed and retention applies as before; enabling it later resumes
 from the stored cursor (or starts at the end if it was never initialized).
 
+## Session context
+
+Events about processes (sudo, account changes, watched-file changes, exec from temporary
+directories, log tampering) carry an additive `context` (`model.Context`): the **login
+identity** (audit `auid`, which survives sudo), the **identity the action ran as** (`acct`
+of a `USER_CMD`, else `euid`/`uid`), the kernel **session ID** (`ses`), PID, PPID, the
+executable and the sanitized command, and a **session reference** (remote address, port,
+source, confidence, ended flag, note). Authentication events do not get one; their address
+is `SrcIP`. The session address is never copied into `SrcIP`, and nothing in the context
+is read by the detector or the decision service: process activity cannot ban anyone.
+
+Evidence and confidence:
+
+| Confidence | Meaning |
+|---|---|
+| `observed` | sshd's own PAM record (`LOGIN`/`USER_START`/`USER_LOGIN`) for that session ID carried the address, and the action's `ses` and `auid` match the session. |
+| `correlated` | The audit records of the session had no address; a journal line `Accepted … from <ip> port <n>` was joined by sshd PID, user and a start within 30 s, and exactly one distinct address fit. Inferred, shown as such. |
+| `unknown` | Anything else, with a note: session not seen, login uid differs (ID reuse), the action predates the recorded session, not an sshd session, sshd session without an address, ambiguous journal candidates. |
+
+Never used for attribution: a shared user name, closeness in time alone, or an address
+found in another session. `ended` marks an action that ran after the session's close
+record (a process that outlived its login).
+
+`session.Tracker` (`internal/session`) is a bounded table: at most 2048 sessions (least
+recently used evicted), closed sessions kept 24 h, idle ones 30 days, 1024 learned names,
+1024 journal lines kept 48 h. It learns from every assembled audit event, including those
+never reported, and is idempotent under replay. It is saved atomically (`sessions.json`)
+before the source cursor moves past the records it was learned from, so after a crash it
+is either restored or learned again from the held cursor. Audit session IDs restart at
+boot: the table is discarded when the saved boot ID differs from `/proc/sys/kernel/random/boot_id`
+and cleared by a `SYSTEM_BOOT` record. Event IDs do not depend on the context, so replay
+deduplication, held cursors and detection checkpoints are unchanged.
+
+**Optional journald enrichment** (`session.journald`, default on): a background follower
+runs `journalctl --no-pager -o json -n N --since @T _UID=0 _COMM=sshd _COMM=sshd-session`
+at most every 30 s (5 s timeout, 4 MiB output cap, 2000 lines, 24 h first lookback,
+exponential backoff to 5 min). Lines are accepted only when journald's own, unforgeable
+fields say root's sshd wrote them (a local `logger -t sshd` is rejected), when they come
+from the current boot, and when they match the strict `Accepted <method> for <user> from
+<ip> port <n>` form; only user, address, port and PID are kept, never the message. No
+journalctl, no permission or no mount only disables it; ingestion, detection and delivery
+never wait for it.
+
+Display: Web UI event details (login vs. ran-as identity, session and its basis, ID,
+process, command), Telegram alert line `🔑 alice → root · SSH 203.0.113.9`, event API
+`context`. All strings exist in Russian and English; unknown values say "unknown".
+
+Limitations: account names are known only for UIDs the agent saw log in through sshd (and
+`root`); otherwise `uid N` is shown. Sessions that began before the agent first read the
+audit log are unknown unless the log is read from the start. Auditd rules are not changed:
+only records auditd already writes are used, so a command that auditd does not record has
+no context. A `USER_CMD` without `acct` has no known effective user. The session table
+does not follow `su`/`sudo -u` chains beyond what each record's `auid` and `ses` say.
+Attribution is evidence for a person, not proof; an attacker with root can alter audit
+records before they are written only by stopping auditd, which the health checks report.
+
 ## Bans
 
 `action.Banner` is the interface; `action.Nftables` the implementation. Everything lives
@@ -609,9 +665,9 @@ not a bound on total process memory. See [DELIVERY.md](DELIVERY.md).
 
 ## Target architecture
 
-**Partly implemented.** The recovery boundary, assembler, bounded correlation and
-notification outbox are implemented. The unified sanitizer, incident store and decision
-reconciler remain targets; the diagram does not claim those remaining stages are complete.
+**Mostly implemented.** The recovery boundary, assembler, bounded correlation, the unified
+sanitizer, the decision reconciler, durable detection recovery and the
+notification outbox are implemented. The incident store remains a target; the diagram does not claim it.
 
 ```text
 audit.log / optional journald
@@ -667,7 +723,7 @@ Interfaces only where there are already two clients, a retry or two implementati
 - **Stage 0** (done, branch `wip/acme-staging-production`): public HTTPS panel on a domain
   or IP and a chosen port, DNS / port / certificate checks from outside, installer error
   codes, mandatory first-time setup from `admin` / `admin`.
-- **Stage 1** (in progress), in this order:
+- **Stage 1** (done), in this order:
   1. **implemented** — assembler: many open events keyed by source, timestamp and serial; close on EOE or
      timeout; caps with an `incomplete` event instead of silent loss; PATH chosen by
      `item` / `nametype`;
@@ -676,12 +732,16 @@ Interfaces only where there are already two clients, a retry or two implementati
      and rate share, per-recipient retries and real delivery counters;
   4. **implemented** — brute-force: bounded correlation history kept apart from the ban
      cooldown, recent failures restored from the journal;
-  5. one sanitizer before storage, logs, API and messages (PROCTITLE, EXECVE argv);
-  6. `DecisionService`: canonical addresses, desired vs observed state, reconciler,
+  5. **implemented** — one sanitizer before storage, logs, API and messages (PROCTITLE, EXECVE argv);
+  6. **implemented** — `DecisionService`: canonical addresses, desired vs observed state, reconciler,
      nftables timeout refresh; first-login auto-allowlist off for new installations;
-  7. audit rules and health: SSH vs other auth, log tampering only for truncate / unlink
+  7. **implemented** — audit rules and health: SSH vs other auth, log tampering only for truncate / unlink
      / rename, mandatory audit keys checked, `audit_unavailable` vs `audit_silent`.
-- **Stage 2**: `auditdsec doctor`, SSH session context from journald, scoped exceptions and
+  8. **implemented** — durable detection recovery: the event journal is the queue between
+     ingestion and detection, and decisions commit atomically with the detection cursor
+     (see "Detection recovery").
+- **Stage 2** (in progress): `auditdsec doctor` (**implemented**, docs/DOCTOR.md), SSH session
+  context (**implemented**, see "Session context"), scoped exceptions and
   incident handling, file-change details (FIM), saved filters, export, Telegram roles.
 - **Stage 3**: CrowdSec adapter, webhook / ntfy, `/metrics`, external heartbeat, CI.
 - **Stage 4**: multi-host, learning mode, hardening report, an indexed store when the load

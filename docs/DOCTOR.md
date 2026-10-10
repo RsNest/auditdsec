@@ -17,6 +17,7 @@ the notification queue is inspected on a temporary copy, and `state.json` is onl
 | Firewall | backend, dry run, `nft` present, `nft list table inet <table>` | `nft` missing | table not readable (no privilege / not created yet); INFO for backend `none` and dry run |
 | Ban decisions and detection | bans by observed state, unconfirmed unblocks, owed notices, detector enabled, detection backlog | `state.json` damaged | failed/pending bans, unconfirmed unblocks, detector disabled |
 | Notification queue | Telegram configured, queue pending/failed/overflow | queue file damaged | permanent failures (last reason shown), overflow |
+| SSH session context | journal readable for the optional enrichment | – | journal unreadable (INFO when journalctl is absent or the option is off) |
 | Web panel | answers on `web.listen`, first-login setup, `public_url` scheme | nothing answers | `public_url` not HTTPS |
 
 Each finding has a *what* line and, when action is needed, a *fix* line with the command or

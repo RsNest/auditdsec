@@ -274,3 +274,32 @@ and the journal append are still two writes (a crash between them re-reads the l
 deduplication makes that safe); a failed state write stops the agent instead of degrading;
 `state.json` is rewritten whole on every decision, which is acceptable for the expected
 decision rate but not for a very large ban table; notifications remain at least once.
+
+## SSH session context verification
+
+Offline fixtures, fake clocks and an injected journal reader (`internal/session`, pipeline,
+semantic, Telegram, API and panel checks):
+
+- two concurrent SSH sessions, each sudo attributed to its own session and address, with the
+  login identity separate from root; the sudo command is sanitized;
+- unseen session ID, unset session, same user with an address elsewhere: `unknown`, never
+  borrowed from another session;
+- identifier reuse (same ID, new login or another login uid), action before the recorded
+  start, action after logout (`ended`), console login (not shown as SSH);
+- restart: table saved and restored, replay of the same records idempotent, different boot
+  ID discards the table, `SYSTEM_BOOT` clears it;
+- bounds: sessions, names and journal lines stay inside their limits; expired lines dropped;
+- journal: real-format JSON lines (sshd and sshd-session, IPv6, binary MESSAGE, a failure
+  line mentioning "Accepted", a line forged with `logger`), same-boot filter, unique-join
+  only, near misses and ambiguity stay unknown, unreadable journal reported and ingestion
+  unaffected, a hanging reader blocks nothing, the journalctl command is a plain filtered
+  read and stops at its limits, parsed fields only are kept;
+- pipeline end to end: stored context, restart with only the later command, replay adds no
+  event, no ban and no tracked address, secret masked; old events without `context` decode;
+  API exposes `context` and masks an old stored secret; panel rows distinguish observed,
+  inferred and unknown; Telegram line in both languages with HTML escaping.
+
+Not verified: a real auditd/sshd/journald (the record and journal formats are written from
+the documented layouts of auditd 3.x and OpenSSH 8–9; other versions or distributions may
+differ), a real reboot, and a privileged live lab. The web asset budget (160 KiB) is nearly
+exhausted by this change.
