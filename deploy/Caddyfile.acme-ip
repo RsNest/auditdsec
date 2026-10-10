@@ -10,8 +10,9 @@
 # From the environment:
 #   PANEL_SITE      this server's address, bare (no brackets around IPv6)
 #   PANEL_UPSTREAM  where the agent listens, 127.0.0.1:9477
+#   PANEL_HSTS      Strict-Transport-Security; max-age=0 while on the staging CA
 #
-# Port 443 serves the panel. Port 80 is left free for Certbot, which answers
+# The panel is served on PANEL_HTTPS_PORT (default 443). Port 80 is left free for Certbot, which answers
 # the challenge there every few days; it has to stay open and unused.
 #
 # The certificate files are written by the certbot container, which then asks
@@ -19,19 +20,28 @@
 
 {
 	admin 127.0.0.1:2019
+	# HTTP/3 would need the same port over UDP as well, and a firewall rule for it.
+	# The panel does not need it.
+	servers {
+		protocols h1 h2
+	}
+	# A browser sends no server name when the URL is an IP address, and Caddy
+	# would then pick the certificate by the address the client connected to,
+	# which is wrong behind NAT and when probing 127.0.0.1. Name it explicitly.
+	default_sni {$PANEL_SITE}
 	# Caddy would otherwise open port 80 to redirect to HTTPS, and then the
 	# certbot container could not bind it to answer the challenge when it
 	# renews. Port 80 has to stay free for certbot.
 	auto_https disable_redirects
 }
 
-https://{$PANEL_SITE} {
+https://{$PANEL_SITE_ADDR}:{$PANEL_HTTPS_PORT:443} {
 	tls /certs/fullchain.pem /certs/privkey.pem
 
 	encode zstd gzip
 
 	header {
-		Strict-Transport-Security "max-age=31536000"
+		Strict-Transport-Security "{$PANEL_HSTS:max-age=31536000}"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"

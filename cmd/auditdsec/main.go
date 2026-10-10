@@ -113,6 +113,10 @@ func resolveHost(configured, mounted string) string {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		var code exitCode
+		if errors.As(err, &code) {
+			os.Exit(int(code))
+		}
 		if err.Error() != "" {
 			fmt.Fprintf(os.Stderr, "auditdsec: %v\n", err)
 		}
@@ -134,6 +138,18 @@ func run(args []string) error {
 		return cmdExplain(args)
 	case "hash-password":
 		return cmdHashPassword(args)
+	case "net-check":
+		return cmdNetCheck(args)
+	case "port-plan":
+		return cmdPortPlan(args)
+	case "port-check":
+		return cmdPortCheck(args)
+	case "probe-listen":
+		return cmdProbeListen(args)
+	case "remote-check":
+		return cmdRemoteCheck(args)
+	case "reset-credentials":
+		return cmdResetCredentials(args)
 	case "check-site", "check-domain":
 		return cmdCheckSite(args)
 	case "version":
@@ -157,6 +173,10 @@ Usage:
   auditdsec check-config [-config F] load the settings and report problems
   auditdsec explain KIND [-lang ru]  explain one kind of event
   auditdsec hash-password [-stdin]   hash a panel password for the web panel
+  auditdsec reset-credentials -yes   forget the panel login and password (local recovery)
+  auditdsec net-check domain NAME | ip   does public DNS lead to this server? which public addresses does it have?
+  auditdsec port-plan | port-check PORT  candidate ports for the panel / can this port be bound?
+  auditdsec remote-check ...             ask a RemoteProbe provider to connect to this server from outside
   auditdsec check-site NAME|IP       can this address get a certificate?
   auditdsec version                  print the build version
 
@@ -196,6 +216,31 @@ func configPath(flagValue string) string {
 		return defaultConfigPath
 	}
 	return ""
+}
+
+// cmdResetCredentials is the local way back when the saved panel login and
+// password are lost or damaged: it removes them, and the next start of the
+// panel offers first-time setup (admin / admin, then a forced change) again.
+// Running it on the server is the proof of ownership; there is no web reset.
+func cmdResetCredentials(args []string) error {
+	fs := flag.NewFlagSet("reset-credentials", flag.ContinueOnError)
+	path := fs.String("config", "", "path to the configuration file")
+	yes := fs.Bool("yes", false, "do it without asking")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(configPath(*path))
+	if err != nil {
+		return err
+	}
+	if !*yes {
+		return errors.New("this REMOVES the panel login and password (the panel returns to admin / admin with a forced change); add -yes to confirm")
+	}
+	if err := api.ResetCredentials(cfg.StateDir); err != nil {
+		return fmt.Errorf("cannot reset: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "The saved panel login and password were removed. Restart the agent so it starts first-time setup.")
+	return nil
 }
 
 func cmdCheckConfig(args []string) error {
@@ -263,8 +308,9 @@ func cmdHashPassword(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len([]rune(password)) < minPasswordLen {
-		return fmt.Errorf("use at least %d characters", minPasswordLen)
+	if reasons := api.CheckPassword(password, ""); len(reasons) > 0 {
+		return fmt.Errorf("the password is not acceptable (%s): use at least %d characters with a lower-case and an upper-case letter, and not a common password",
+			strings.Join(reasons, ", "), api.MinPasswordRunes)
 	}
 
 	hash, err := api.HashPassword(password)
@@ -277,9 +323,6 @@ func cmdHashPassword(args []string) error {
 		"  auditdsec.yaml: web.password_hash: \"<the line above>\"\n")
 	return nil
 }
-
-// minPasswordLen matches what the configuration will accept.
-const minPasswordLen = 12
 
 func readPassword(fromStdin bool) (string, error) {
 	in := bufio.NewReader(os.Stdin)
@@ -323,8 +366,16 @@ func readPassword(fromStdin bool) (string, error) {
 }
 
 // printPanelBanner says where the panel is, in the form the person will type.
-func printPanelBanner(w io.Writer, cfg *config.Config) {
-	fmt.Fprintf(w, "\n  panel:  %s\n  sign in as:  %s\n", cfg.PanelURL(), cfg.Web.Login)
+func printPanelBanner(w io.Writer, cfg *config.Config, setup string) {
+	fmt.Fprintf(w, "\n  panel:  %s\n", cfg.PanelURL())
+	switch setup {
+	case api.StateBootstrap:
+		fmt.Fprintf(w, "  first sign-in:  admin / admin  (it opens only the screen where the owner chooses a login and password)\n")
+	case api.StateLocked:
+		fmt.Fprintf(w, "  sign-in is STOPPED: the saved credentials cannot be used; see the log above\n")
+	default:
+		fmt.Fprintf(w, "  sign in with the login and password chosen at setup\n")
+	}
 	if cfg.PanelIsLoopbackOnly() {
 		_, port, err := net.SplitHostPort(cfg.Web.Listen)
 		if err != nil {
@@ -459,6 +510,8 @@ func cmdRun(args []string) error {
 		Detector:                detector,
 		Banner:                  banner,
 		AutoAllowlistFirstLogin: cfg.Ban.AutoAllowlist == config.AutoAllowFirstLogin,
+		PanelURL:                panelCertURL(cfg),
+		PanelCertTrust:          cfg.Web.CertCheck != "expiry",
 		Store:                   st,
 		Notifier:                bot,
 		Logger:                  log,
@@ -521,12 +574,13 @@ func cmdRun(args []string) error {
 		if err != nil {
 			return err
 		}
-		log.Info("web panel enabled", "listen", cfg.Web.Listen, "login", cfg.Web.Login,
+		log.Info("web panel enabled", "public_url", cfg.PanelURL(), "upstream_listen", cfg.Web.Listen,
+			"setup", panel.SetupState(),
 			"session_ttl", cfg.Web.SessionTTL, "trusted_proxies", cfg.Web.TrustedProxies)
 		// The link is the one thing the person actually needs after
 		// installing, and hunting for it in a log line of key=value pairs is
 		// a poor way to find it.
-		printPanelBanner(os.Stdout, cfg)
+		printPanelBanner(os.Stdout, cfg, panel.SetupState())
 	}
 
 	var wg sync.WaitGroup
@@ -579,4 +633,16 @@ func cmdRun(args []string) error {
 	default:
 	}
 	return nil
+}
+
+// panelCertURL is the link whose served certificate the agent watches: the
+// public https URL of an enabled panel, unless the check is switched off.
+func panelCertURL(cfg *config.Config) string {
+	if !cfg.Web.Enabled || cfg.Web.CertCheck == "off" {
+		return ""
+	}
+	if u := cfg.PanelURL(); strings.HasPrefix(u, "https://") {
+		return u
+	}
+	return ""
 }

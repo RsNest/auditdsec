@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -120,6 +121,7 @@ func TestSetupWritesJSON(t *testing.T) {
 
 // An unwritable log path must not stop the agent: it keeps logging to stdout.
 func TestSetupSurvivesUnwritableFile(t *testing.T) {
+	skipOnWindows(t)
 	log, closer, err := Setup(Options{File: "/proc/definitely/not/writable/a.log", Level: "info"})
 	if err != nil {
 		t.Fatalf("Setup should not fail: %v", err)
@@ -144,5 +146,14 @@ func TestParseLevel(t *testing.T) {
 		if got := ParseLevel(in); got != want {
 			t.Errorf("ParseLevel(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// The agent reads the Linux audit log; these tests rely on POSIX semantics
+// (renaming or truncating a file that is still open, /proc paths).
+func skipOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file semantics required")
 	}
 }

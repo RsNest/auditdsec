@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -103,6 +104,7 @@ func TestTailerSkipsHistoryByDefault(t *testing.T) {
 }
 
 func TestTailerHandlesRotation(t *testing.T) {
+	skipOnWindows(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")
 	if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
@@ -121,6 +123,7 @@ func TestTailerHandlesRotation(t *testing.T) {
 }
 
 func TestTailerHandlesTruncation(t *testing.T) {
+	skipOnWindows(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")
 	if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
@@ -207,4 +210,13 @@ func TestTailerEmitsOnlyCompleteLines(t *testing.T) {
 	}
 	f.Close()
 	expectLines(t, lines, "partial without newline finished")
+}
+
+// The agent reads the Linux audit log; these tests rely on POSIX semantics
+// (renaming or truncating a file that is still open, /proc paths).
+func skipOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file semantics required")
+	}
 }

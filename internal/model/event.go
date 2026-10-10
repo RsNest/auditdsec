@@ -63,6 +63,7 @@ const (
 	KindLogTamper            Kind = "log_tamper"
 	KindSuspiciousExec       Kind = "suspicious_exec"
 	KindAuditdStopped        Kind = "auditd_stopped"
+	KindPanelCert            Kind = "panel_cert"
 )
 
 // AllKinds lists every kind the agent can produce, in rough order of how
@@ -79,6 +80,7 @@ var AllKinds = []Kind{
 	KindLogTamper,
 	KindSuspiciousExec,
 	KindAuditdStopped,
+	KindPanelCert,
 }
 
 // ValidKind reports whether k is a kind this build knows about.

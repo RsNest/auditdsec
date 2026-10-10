@@ -7,6 +7,11 @@
 # Environment variables override this file. The parser accepts the YAML subset
 # used below: nested keys by indentation, scalars, lists and # comments.
 
+# The format of this file. Files without it are read as version 1.
+schema_version: 1
+
+# DEPRECATED as a choice: there is one product. A profile is only a preset of
+# starting values (any key set below still wins), kept so older files work.
 # simple — one VPS: only important alerts (warn and above), 14 days of history.
 # pro    — several servers: every event, 90 days, more messages per minute.
 profile: simple
@@ -105,17 +110,27 @@ ban:
 
 # Web panel: the same information as the bot, in a browser. Off by default.
 #
-# Reachable on 127.0.0.1 only, which is what you want: open it over an SSH
-# tunnel (ssh -L 9477:127.0.0.1:9477 server), or behind Caddy on a domain or
-# public IP; ./install.sh sets either up and checks it. Do not listen on a
-# public address or 0.0.0.0 — the panel would then be answering strangers over
-# plain HTTP, and the agent refuses to start that way.
+# The agent itself speaks plain HTTP on loopback only (the upstream). The
+# panel reaches the internet through a reverse proxy with TLS, on the public
+# HTTPS port you chose; ./install.sh sets that up, checks DNS and the port from
+# outside, and prints the link. Starting the agent never opens a port by
+# itself, and it refuses a public address or 0.0.0.0 here.
+#
+# A new installation has no password: the first sign-in is admin / admin, and
+# it opens only the screen where the owner chooses a login and a password
+# (8+ characters, a lower-case and an upper-case letter). Those are kept,
+# hashed, in <state_dir>/panel-credentials.json and win over this file.
 web:
   enabled: false
-  listen: 127.0.0.1:9477
+  # The agent's own port, for the proxy. `listen` is the older name of the same key.
+  upstream_listen: 127.0.0.1:9477
+  # The public HTTPS port of the proxy (0 = 443). Must match the port in public_url.
+  public_https_port: 0
+  # The link a person opens, with the real port (":443" may be left out).
+  public_url: ""
+  # An older way to set the password: a hash from `auditdsec hash-password`.
+  # It is moved into the managed credentials at the first start.
   login: admin
-  # Make the hash with `auditdsec hash-password` (or let ./install.sh do it); the password itself is never
-  # stored. The agent refuses to start the panel without one.
   password_hash: ""
   # How long a sign-in lasts. A restart ends every session regardless.
   session_ttl: 12h
@@ -123,6 +138,9 @@ web:
   # from these, so nobody else can forge the address the sign-in limiter counts
   # and the log records. With the bundled Caddy this is loopback.
   trusted_proxies: []
+  # What the agent watches in the certificate served at public_url: verify
+  # (chain and expiry, hourly), expiry (staging, self-signed, a private CA) or off.
+  cert_check: verify
 
 # CrowdSec integration — arrives in v0.3.
 crowdsec:

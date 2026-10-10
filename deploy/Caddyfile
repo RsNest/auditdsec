@@ -6,24 +6,39 @@
 #   PANEL_EMAIL     where Let's Encrypt sends expiry warnings
 #   PANEL_UPSTREAM  where the agent listens, 127.0.0.1:9477
 #
-# Ports 80 and 443 must be open: 80 answers the certificate challenge and
-# redirects to HTTPS, 443 serves the panel.
+#   PANEL_ACME_URL  the ACME directory; Let's Encrypt production when unset.
+#                   ./install.sh --staging points it at the staging CA.
+#   PANEL_HSTS      the Strict-Transport-Security value. Staging certificates
+#                   are untrusted, and HSTS would take away the browser's
+#                   "continue anyway" button, so staging sets max-age=0.
+#
+# The panel is served on PANEL_HTTPS_PORT (443 unless the installer chose
+# another; that is the PUBLIC port, not the agent's own). Port 80 must be open
+# for the certificate challenge and redirects to the panel's address; with the
+# panel on 443 the challenge can also arrive there. PANEL_SITE_ADDR is the name
+# as it is written in an address (an IPv6 address in brackets).
 #
 # ./install.sh writes all of this; it is here to be read and edited, not
 # copied by hand.
 
 {
 	email {$PANEL_EMAIL}
+	acme_ca {$PANEL_ACME_URL:https://acme-v02.api.letsencrypt.org/directory}
 	admin 127.0.0.1:2019
+	# HTTP/3 would need the same port over UDP as well, and a firewall rule for it.
+	# The panel does not need it.
+	servers {
+		protocols h1 h2
+	}
 }
 
-{$PANEL_SITE} {
+{$PANEL_SITE_ADDR}:{$PANEL_HTTPS_PORT:443} {
 	encode zstd gzip
 
 	header {
 		# Served over TLS from here on, so the browser should never try plain
 		# HTTP for this name again.
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		Strict-Transport-Security "{$PANEL_HSTS:max-age=31536000}"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"

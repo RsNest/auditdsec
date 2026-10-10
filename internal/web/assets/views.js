@@ -82,6 +82,15 @@
         err.hidden = true;
         A.api.login(login, pass.value).then(function (res) {
           if (!res || !res.token) { throw new Error("no token"); }
+          if (res.setup) {
+            /* admin / admin: this is a setup session. It reaches the setup
+               screen and nothing else (the server enforces that), and it is
+               kept in memory only: a reload starts from the sign-in again. */
+            S.token = res.token;
+            pass.value = "";
+            showSetup();
+            return;
+          }
           S.token = res.token;
           A.put("sessionStorage", "ads.token", res.token);
           pass.value = "";
@@ -97,6 +106,105 @@
     }, [logo("wm"), fieldOf(t("login.user"), user), fieldOf(t("login.pass"), pass), err, submit]);
 
     add(host, form);
+    user.focus();
+  }
+
+  /* ---------------- first sign-in: replace admin / admin ---------------- */
+
+  var COMMON = { admin: 1, password: 1, qwerty: 1, "12345678": 1 };
+
+  function passwordFacts(pw, login) {
+    var len = Array.from(pw).length;
+    var lower = pw !== pw.toUpperCase();
+    var upper = pw !== pw.toLowerCase();
+    var low = pw.toLowerCase();
+    return {
+      len: len >= 8 && len <= 128, lower: lower, upper: upper,
+      notDefault: low !== "admin" && !COMMON[low] && low !== String(login || "").toLowerCase(),
+      digit: /[0-9]/.test(pw), symbol: /[^\p{L}\p{N}]/u.test(pw), length: len
+    };
+  }
+  /* 0 below the minimum, 1 the minimum but weak, 2 better, 3 strong. The
+     minimum is a floor, not a proof of strength, and the text says so. */
+  function strengthOf(f) {
+    if (!(f.len && f.lower && f.upper && f.notDefault)) { return 0; }
+    var extra = (f.length >= 12 ? 1 : 0) + (f.digit ? 1 : 0) + (f.symbol ? 1 : 0) + (f.length >= 16 ? 1 : 0);
+    return extra <= 1 ? 1 : extra === 2 ? 2 : 3;
+  }
+
+  function showSetup() {
+    stopAll();
+    $("#shell").hidden = true;
+    var host = clear($("#gate"));
+    host.hidden = false;
+
+    var user = el("input", { class: "in", type: "text", name: "username", value: "admin", autocomplete: "username", autocapitalize: "none", spellcheck: "false", maxlength: "64", required: true });
+    var keep = el("input", { type: "checkbox", id: "keepadmin" });
+    var keepRow = el("label", { class: "tick", for: "keepadmin", hidden: true }, [keep, el("span", { text: t("setup.keep") })]);
+    var pass = el("input", { class: "in", type: "password", name: "new-password", autocomplete: "new-password", maxlength: "128", required: true });
+    var again = el("input", { class: "in", type: "password", name: "new-password-again", autocomplete: "new-password", maxlength: "128", required: true });
+    var toggle = el("button", { class: "lnk", type: "button", "aria-pressed": "false", text: t("setup.show") });
+    var rules = el("ul", { class: "rules", "aria-live": "polite" });
+    var meter = el("p", { class: "hint", role: "status" });
+    var err = el("p", { class: "err", role: "alert", hidden: true });
+    var submit = el("button", { class: "pill pill-solid", type: "submit", text: t("setup.submit") });
+
+    toggle.onclick = function () {
+      var shown = pass.type === "password";
+      pass.type = again.type = shown ? "text" : "password";
+      toggle.textContent = shown ? t("setup.hide") : t("setup.show");
+      toggle.setAttribute("aria-pressed", shown ? "true" : "false");
+    };
+
+    function evaluate() {
+      var login = user.value.trim();
+      var f = passwordFacts(pass.value, login);
+      keepRow.hidden = login.toLowerCase() !== "admin";
+      if (keepRow.hidden) { keep.checked = false; }
+      var list = [
+        [f.len, t("setup.rule.len")], [f.lower, t("setup.rule.lower")], [f.upper, t("setup.rule.upper")],
+        [f.notDefault, t("setup.rule.notdefault")], [pass.value !== "" && pass.value === again.value, t("setup.rule.same")]
+      ];
+      clear(rules);
+      list.forEach(function (r) { add(rules, el("li", { class: r[0] ? "yes" : "no", text: (r[0] ? "✓ " : "• ") + r[1] })); });
+      var lvl = pass.value ? strengthOf(f) : -1;
+      meter.textContent = lvl < 0 ? "" : t("setup.strength." + lvl);
+      return list.every(function (r) { return r[0]; });
+    }
+    [user, pass, again].forEach(function (n) { n.addEventListener("input", evaluate); });
+
+    var form = el("form", {
+      class: "gate-form",
+      onsubmit: function (ev) {
+        ev.preventDefault();
+        err.hidden = true;
+        var login = user.value.trim();
+        if (!evaluate() || !login) { err.textContent = t("setup.fix"); err.hidden = false; return; }
+        if (login.toLowerCase() === "admin" && !keep.checked) { err.textContent = t("reason.login_admin_unconfirmed"); err.hidden = false; return; }
+        submit.disabled = true;
+        A.api.setupComplete({ login: login, password: pass.value, password_confirm: again.value, keep_admin_confirmed: keep.checked }).then(function () {
+          S.token = null;
+          A.put("sessionStorage", "ads.token", null);
+          pass.value = again.value = "";
+          showGate();
+          var f0 = $("#gate").firstChild;
+          f0.insertBefore(el("p", { class: "ok", role: "status", text: t("setup.done") }), f0.firstChild.nextSibling);
+        }, function (e) {
+          var why = (e.reasons || []).map(function (r) { return t("reason." + r); }).filter(Boolean);
+          err.textContent = e.code === "throttled" ? t("login.throttled") : e.code === "offline" ? t("err.offline") :
+            why.length ? why.join(" ") : e.code === "unauthorized" ? t("setup.expired") : t("setup.failed");
+          err.hidden = false;
+          submit.disabled = false;
+        });
+      }
+    }, [logo("wm"), el("p", { class: "hint", text: t("setup.intro") }),
+      fieldOf(t("setup.login"), user), keepRow,
+      fieldOf(t("setup.pass"), pass), fieldOf(t("setup.again"), again),
+      toggle, rules, meter, err, submit]);
+
+    add(host, form);
+    evaluate();
+    user.select();
     user.focus();
   }
 

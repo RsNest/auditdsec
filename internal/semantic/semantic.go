@@ -383,3 +383,16 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+// PanelCertProblem builds the event reported when the certificate the panel
+// actually serves is about to expire or no longer verifies. A renewal that
+// failed quietly would otherwise only show when browsers start refusing.
+func PanelCertProblem(host, detail string) model.Event {
+	return model.Event{
+		Host:       host,
+		Kind:       model.KindPanelCert,
+		Severity:   model.SevWarn,
+		SummaryKey: "event." + string(model.KindPanelCert),
+		Args:       map[string]string{"detail": detail, "kind": string(model.KindPanelCert)},
+	}
+}

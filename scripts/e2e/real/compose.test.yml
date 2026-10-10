@@ -1,0 +1,13 @@
+# Only for the real-Docker scenarios (scripts/e2e/real). Added by install.sh
+# through PANEL_COMPOSE_EXTRA.
+#
+# - the image is the locally built one, never built or pulled here
+# - no Telegram: the agent talks to a closed port, which it logs and survives
+# - an empty audit log, so the agent has something to open
+services:
+  auditdsec:
+    pull_policy: never
+    environment:
+      AUDITDSEC_TG_API_BASE: http://127.0.0.1:1
+    volumes:
+      - ${E2E_AUDIT_DIR:?}:/var/log/audit:ro

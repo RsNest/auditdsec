@@ -10,13 +10,13 @@
   var KINDS = [
     "ssh_login_ok", "ssh_login_fail", "login_after_bruteforce", "sudo",
     "user_change", "authorized_keys_change", "persistence", "config_change",
-    "log_tamper", "suspicious_exec", "auditd_stopped"
+    "log_tamper", "suspicious_exec", "auditd_stopped", "panel_cert"
   ];
   var KIND_SEV = {
     ssh_login_ok: "info", ssh_login_fail: "warn", login_after_bruteforce: "critical",
     sudo: "info", user_change: "warn", authorized_keys_change: "critical",
     persistence: "critical", config_change: "warn", log_tamper: "critical",
-    suspicious_exec: "warn", auditd_stopped: "critical"
+    suspicious_exec: "warn", auditd_stopped: "critical", panel_cert: "warn"
   };
   var SEVS = ["info", "warn", "critical"];
   var SEV_RANK = { info: 0, warn: 1, critical: 2 };
@@ -264,7 +264,11 @@
       return res.text().then(function (raw) {
         var data = null;
         if (raw) { try { data = JSON.parse(raw); } catch (e) { data = null; } }
-        if (!res.ok) { throw fail((data && data.error) || String(res.status), (data && data.message) || t("err.generic")); }
+        if (!res.ok) {
+          var failure = fail((data && data.error) || String(res.status), (data && data.message) || t("err.generic"));
+          failure.reasons = (data && data.reasons) || [];
+          throw failure;
+        }
         return data;
       });
     }, function () {
@@ -275,6 +279,7 @@
 
   var api = {
     login: function (login, password) { return request("POST", "/login", { login: login, password: password }); },
+    setupComplete: function (p) { return request("POST", "/setup/complete", p); },
     status: function () { return request("GET", "/status"); },
     events: function (query) { return request("GET", "/events" + (query ? "?" + query : "")); },
     explain: function (kind) { return request("GET", "/explain/" + kind + "?lang=" + state.lang); },

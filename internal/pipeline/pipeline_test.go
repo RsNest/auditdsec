@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -710,4 +713,39 @@ func banCountOf(st *store.Store, ip string) int {
 		}
 	}
 	return 0
+}
+
+// The certificate the panel serves is watched: one that does not verify is
+// reported once per cooldown and shown in the diagnostics; with only the
+// expiry watched (staging, a private CA) the same certificate is fine.
+func TestPanelCertificateIsWatched(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	for _, trust := range []bool{true, false} {
+		dir := t.TempDir()
+		log := filepath.Join(dir, "audit.log")
+		appendLines(t, log)
+		p, notifier, _, _ := startPipeline(t, Options{
+			AuditLog: log, StateDir: filepath.Join(dir, "state"),
+			PanelURL: srv.URL, PanelCertEvery: 20 * time.Millisecond, PanelCertTrust: trust,
+		})
+		deadline := time.Now().Add(5 * time.Second)
+		for p.PanelCertStatus() == "not checked yet" && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		time.Sleep(200 * time.Millisecond)
+		alerts := 0
+		for _, e := range notifier.all() {
+			if e.Kind == model.KindPanelCert {
+				alerts++
+			}
+		}
+		status := p.PanelCertStatus()
+		if trust && (alerts != 1 || !strings.HasPrefix(status, "PROBLEM: does not verify")) {
+			t.Errorf("trust checked: %d alerts, status %q; want 1 and a problem", alerts, status)
+		}
+		if !trust && (alerts != 0 || !strings.HasPrefix(status, "ok, valid until")) {
+			t.Errorf("expiry only: %d alerts, status %q; want none and ok", alerts, status)
+		}
+	}
 }

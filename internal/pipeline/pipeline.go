@@ -20,6 +20,7 @@ import (
 	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/detect"
 	"github.com/RsNest/auditdsec/internal/model"
+	"github.com/RsNest/auditdsec/internal/netcheck"
 	"github.com/RsNest/auditdsec/internal/parse"
 	"github.com/RsNest/auditdsec/internal/redact"
 	"github.com/RsNest/auditdsec/internal/semantic"
@@ -82,6 +83,15 @@ type Options struct {
 	// agent. It is what stops the detector locking its owner out.
 	AutoAllowlistFirstLogin bool
 
+	// PanelURL is the panel's public https link. When set, the certificate the
+	// proxy actually serves there is checked every PanelCertEvery (default an
+	// hour); a certificate close to its end, or one that does not verify when
+	// PanelCertTrust is on, is reported. Staging and self-signed setups turn
+	// PanelCertTrust off, so only the expiry is watched.
+	PanelURL       string
+	PanelCertEvery time.Duration
+	PanelCertTrust bool
+
 	Store    *store.Store
 	Notifier Notifier
 	Logger   *slog.Logger
@@ -105,6 +115,11 @@ type Pipeline struct {
 	banned          atomic.Uint64
 	heartbeatFiring bool
 	heartbeatAt     time.Time
+
+	certMu     sync.Mutex
+	certStatus string // for diagnostics: "ok, until ...", the problem, or "not checked yet"
+	certFiring bool
+	certAt     time.Time
 }
 
 // New validates the options and returns a pipeline.
@@ -129,6 +144,9 @@ func New(o Options) (*Pipeline, error) {
 	}
 	if o.PurgeEvery <= 0 {
 		o.PurgeEvery = time.Hour
+	}
+	if o.PanelCertEvery <= 0 {
+		o.PanelCertEvery = time.Hour
 	}
 	statePath := ""
 	if o.StateDir != "" {
@@ -186,6 +204,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	p.purgeOldEvents()
 	p.reapplyBans(ctx)
 
+	certs := make(chan certResult, 1)
+	if strings.HasPrefix(p.opt.PanelURL, "https://") {
+		go p.watchPanelCert(ctx, certs)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -210,6 +233,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 		case <-purge.C:
 			p.purgeOldEvents()
+
+		case r := <-certs:
+			p.judgePanelCert(ctx, r)
 
 		case <-counters.C:
 			processed, reported, skipped := p.Counters()
@@ -493,7 +519,7 @@ func (p *Pipeline) Diagnostics() []DiagItem {
 			fi.Size(), p.now().Sub(fi.ModTime()).Round(time.Second))
 	}
 
-	return []DiagItem{
+	items := []DiagItem{
 		{Key: "ui.diag.events", Value: strconv.FormatUint(processed, 10)},
 		{Key: "ui.diag.alerts", Value: strconv.FormatUint(reported, 10)},
 		{Key: "ui.diag.skipped", Value: strconv.FormatUint(skipped, 10)},
@@ -503,6 +529,10 @@ func (p *Pipeline) Diagnostics() []DiagItem {
 		{Key: "ui.diag.banner", Value: bannerName(p.opt.Banner)},
 		{Key: "ui.diag.bans", Value: strconv.FormatUint(p.Banned(), 10)},
 	}
+	if s := p.PanelCertStatus(); s != "" {
+		items = append(items, DiagItem{Key: "ui.diag.panel_cert", Value: s})
+	}
+	return items
 }
 
 // optionalTicker is a ticker that can be switched off, so a select can always
@@ -525,4 +555,97 @@ func (o optionalTicker) Stop() {
 	if o.on {
 		o.t.Stop()
 	}
+}
+
+// certResult is one look at the certificate the panel serves.
+type certResult struct {
+	cert netcheck.ServedCert
+	err  error
+}
+
+// watchPanelCert looks at the served certificate a minute after the start
+// (the proxy may still be getting it) and then every PanelCertEvery. The TLS
+// handshake runs here, off the main loop, so a slow or dead port never holds
+// up reading the audit log.
+func (p *Pipeline) watchPanelCert(ctx context.Context, out chan<- certResult) {
+	wait := time.Minute
+	if p.opt.PanelCertEvery < wait {
+		wait = p.opt.PanelCertEvery
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = p.opt.PanelCertEvery
+		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		c, err := netcheck.CheckServed(cctx, p.opt.PanelURL, nil)
+		cancel()
+		select {
+		case out <- certResult{c, err}:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// judgePanelCert turns a look at the certificate into a status line and, when
+// something is wrong, one alert per cooldown.
+func (p *Pipeline) judgePanelCert(ctx context.Context, r certResult) {
+	now := p.now()
+	problem, status := "", ""
+	if r.err != nil {
+		// Not reachable from this machine says little about the outside, and a
+		// proxy being restarted is normal: noted, not alerted.
+		status = "unknown: " + r.err.Error()
+		p.log.Warn("cannot inspect the panel certificate", "url", p.opt.PanelURL, "error", r.err)
+	} else {
+		problem = netcheck.CertProblem(r.cert, now, p.opt.PanelCertTrust)
+		status = fmt.Sprintf("ok, valid until %s (%s left)", r.cert.NotAfter.UTC().Format(time.RFC3339),
+			r.cert.NotAfter.Sub(now).Round(time.Minute))
+		if problem != "" {
+			status = "PROBLEM: " + problem
+		}
+	}
+	p.certMu.Lock()
+	p.certStatus = status
+	firing, at := p.certFiring, p.certAt
+	p.certMu.Unlock()
+	if r.err != nil {
+		return
+	}
+	if problem == "" {
+		if firing {
+			p.log.Info("the panel certificate is fine again", "status", status)
+			p.certMu.Lock()
+			p.certFiring = false
+			p.certMu.Unlock()
+		}
+		return
+	}
+	if firing && now.Sub(at) < 6*time.Hour {
+		return
+	}
+	p.certMu.Lock()
+	p.certFiring, p.certAt = true, now
+	p.certMu.Unlock()
+	p.log.Warn("panel certificate problem", "url", p.opt.PanelURL, "problem", problem)
+	ev := semantic.PanelCertProblem(p.opt.Host, problem)
+	ev.Time = now
+	p.deliver(ctx, ev)
+}
+
+// PanelCertStatus is the last verdict on the served certificate, for the
+// diagnostics; empty when the panel is not published over https.
+func (p *Pipeline) PanelCertStatus() string {
+	if !strings.HasPrefix(p.opt.PanelURL, "https://") {
+		return ""
+	}
+	p.certMu.Lock()
+	defer p.certMu.Unlock()
+	if p.certStatus == "" {
+		return "not checked yet"
+	}
+	return p.certStatus
 }

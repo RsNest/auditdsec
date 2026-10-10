@@ -1,20 +1,22 @@
-# binaries
-/auditdsec
-/bin/
-*.exe
-# state and secrets
-/state/
-agent.pid
-*.db
-config.yaml
-.env
-# go
-*.test
-*.out
-vendor/
+
 # IDE
+# binaries
+# go
+# panel preview build
+# state and secrets
+*.db
+*.exe
+*.out
+*.pyc
+*.test
+.env
 .idea/
 .vscode/
-
-# panel preview build
+/auditdsec
+/bin/
 /preview.html
+/state/
+__pycache__/
+agent.pid
+config.yaml
+vendor/

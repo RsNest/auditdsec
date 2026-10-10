@@ -55,18 +55,18 @@ type Options struct {
 
 // Server is the panel's HTTP server.
 type Server struct {
-	opt      Options
-	log      *slog.Logger
-	now      func() time.Time
-	hash     parsedHash
-	dummy    parsedHash
-	login    [32]byte
-	proxies  proxySet
-	sessions *sessions
-	limit    *limiter
-	hashing  chan struct{} // bounds concurrent password hashing
-	static   http.Handler
-	mux      *http.ServeMux
+	opt        Options
+	log        *slog.Logger
+	now        func() time.Time
+	cred       credState
+	global     *limiter
+	finalizeMu sync.Mutex
+	proxies    proxySet
+	sessions   *sessions
+	limit      *limiter
+	hashing    chan struct{} // bounds concurrent password hashing
+	static     http.Handler
+	mux        *http.ServeMux
 
 	statMu  sync.Mutex
 	statAt  time.Time
@@ -86,42 +86,23 @@ func New(o Options) (*Server, error) {
 	if o.Logger == nil {
 		o.Logger = slog.Default()
 	}
-	encoded := w.PasswordHash
-	if encoded == "" {
-		if w.Password == "" {
-			return nil, errors.New("api: no password configured")
-		}
-		var err error
-		if encoded, err = HashPassword(w.Password); err != nil {
-			return nil, err
-		}
-	}
-	h, err := parseHash(encoded)
-	if err != nil {
-		return nil, fmt.Errorf("api: web.password_hash: %w", err)
-	}
-	// A hash of a password nobody knows, verified when the login name is wrong
-	// so that a wrong name costs the same time as a wrong password and cannot
-	// be told apart by a stopwatch. It must not share the real key.
-	dummy, err := decoyHash(h)
-	if err != nil {
-		return nil, err
-	}
-
 	proxies, err := parseProxies(w.TrustedProxies)
 	if err != nil {
 		return nil, err
 	}
 
 	s := &Server{
-		opt: o, log: o.Logger, now: o.Now, hash: h, dummy: dummy,
+		opt: o, log: o.Logger, now: o.Now,
 		proxies:  proxies,
-		login:    sha256.Sum256([]byte(w.Login)),
 		sessions: newSessions(w.SessionTTL, o.Now),
 		limit:    newLimiter(o.Now),
+		global:   newLimiterN(o.Now, globalFailLimit),
 		hashing:  make(chan struct{}, 2),
 		static:   web.Handler(),
 		mux:      http.NewServeMux(),
+	}
+	if err := s.loadCreds(); err != nil {
+		return nil, err
 	}
 	s.routes()
 	return s, nil
@@ -184,7 +165,9 @@ func (s *Server) routes() {
 		s.mux.Handle(pattern, s.guard(auth, h))
 	}
 	api("POST /api/v1/login", false, s.handleLogin)
-	api("POST /api/v1/logout", true, s.handleLogout)
+	api("POST /api/v1/logout", false, s.handleLogout)
+	api("GET /api/v1/setup/state", false, s.handleSetupState)
+	api("POST /api/v1/setup/complete", false, s.handleSetupComplete) // checks for a setup session itself
 	api("GET /api/v1/status", true, s.handleStatus)
 	api("GET /api/v1/events", true, s.handleEvents)
 	api("GET /api/v1/explain/{kind}", true, s.handleExplain)
@@ -344,12 +327,20 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusTooManyRequests, "throttled", "too many attempts, try later")
 		return
 	}
-	var in struct{ Login, Password string }
+	var in struct {
+		Login    string `json:"login"`
+		Password string `json:"password"`
+	}
 	if !decode(w, r, &in) {
 		return
 	}
-	if len(in.Password) > 256 || len(in.Login) > 128 {
+	if len(in.Password) > 512 || len(in.Login) > 128 {
 		fail(w, http.StatusBadRequest, "bad_request", "too long")
+		return
+	}
+	snap := s.cred.snapshot()
+	if !snap.ready {
+		s.bootstrapLogin(w, ip, in.Login, in.Password)
 		return
 	}
 	select {
@@ -362,10 +353,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	got := sha256.Sum256([]byte(in.Login))
-	loginOK := subtle.ConstantTimeCompare(got[:], s.login[:]) == 1
-	h := s.hash
+	loginOK := subtle.ConstantTimeCompare(got[:], snap.sum[:]) == 1
+	h := snap.hash
 	if !loginOK {
-		h = s.dummy
+		h = snap.dummy
 	}
 	passOK := h.verify(in.Password)
 	if !loginOK || !passOK {
@@ -719,6 +710,8 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 				out["detector"] = it.Value
 			case "ui.diag.banner":
 				out["banner"] = it.Value
+			case "ui.diag.panel_cert":
+				out["panel_cert"] = it.Value
 			}
 		}
 	}
