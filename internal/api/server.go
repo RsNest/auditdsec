@@ -58,9 +58,7 @@ type Server struct {
 	opt      Options
 	log      *slog.Logger
 	now      func() time.Time
-	hash     parsedHash
-	dummy    parsedHash
-	login    [32]byte
+	cred     credState
 	proxies  proxySet
 	sessions *sessions
 	limit    *limiter
@@ -86,42 +84,22 @@ func New(o Options) (*Server, error) {
 	if o.Logger == nil {
 		o.Logger = slog.Default()
 	}
-	encoded := w.PasswordHash
-	if encoded == "" {
-		if w.Password == "" {
-			return nil, errors.New("api: no password configured")
-		}
-		var err error
-		if encoded, err = HashPassword(w.Password); err != nil {
-			return nil, err
-		}
-	}
-	h, err := parseHash(encoded)
-	if err != nil {
-		return nil, fmt.Errorf("api: web.password_hash: %w", err)
-	}
-	// A hash of a password nobody knows, verified when the login name is wrong
-	// so that a wrong name costs the same time as a wrong password and cannot
-	// be told apart by a stopwatch. It must not share the real key.
-	dummy, err := decoyHash(h)
-	if err != nil {
-		return nil, err
-	}
-
 	proxies, err := parseProxies(w.TrustedProxies)
 	if err != nil {
 		return nil, err
 	}
 
 	s := &Server{
-		opt: o, log: o.Logger, now: o.Now, hash: h, dummy: dummy,
+		opt: o, log: o.Logger, now: o.Now,
 		proxies:  proxies,
-		login:    sha256.Sum256([]byte(w.Login)),
 		sessions: newSessions(w.SessionTTL, o.Now),
 		limit:    newLimiter(o.Now),
 		hashing:  make(chan struct{}, 2),
 		static:   web.Handler(),
 		mux:      http.NewServeMux(),
+	}
+	if err := s.loadCreds(); err != nil {
+		return nil, err
 	}
 	s.routes()
 	return s, nil
@@ -185,6 +163,7 @@ func (s *Server) routes() {
 	}
 	api("POST /api/v1/login", false, s.handleLogin)
 	api("POST /api/v1/logout", true, s.handleLogout)
+	api("POST /api/v1/account", true, s.handleAccount)
 	api("GET /api/v1/status", true, s.handleStatus)
 	api("GET /api/v1/events", true, s.handleEvents)
 	api("GET /api/v1/explain/{kind}", true, s.handleExplain)
@@ -225,6 +204,10 @@ func (s *Server) guard(auth bool, next http.HandlerFunc) http.Handler {
 		}
 		if auth && !s.sessions.valid(bearer(r)) {
 			fail(w, http.StatusUnauthorized, "unauthorized", "sign in first")
+			return
+		}
+		if auth && s.cred.mustChange() && r.URL.Path != "/api/v1/account" && r.URL.Path != "/api/v1/logout" {
+			fail(w, http.StatusForbidden, "password_change_required", "replace the default login and password first")
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
@@ -362,10 +345,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	got := sha256.Sum256([]byte(in.Login))
-	loginOK := subtle.ConstantTimeCompare(got[:], s.login[:]) == 1
-	h := s.hash
+	snap := s.cred.snapshot()
+	loginOK := subtle.ConstantTimeCompare(got[:], snap.loginSum[:]) == 1
+	h := snap.hash
 	if !loginOK {
-		h = s.dummy
+		h = snap.dummy
 	}
 	passOK := h.verify(in.Password)
 	if !loginOK || !passOK {
@@ -377,7 +361,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.limit.ok(ip)
 	token, exp := s.sessions.create()
 	s.log.Info("panel sign-in", "ip", ip)
-	writeJSON(w, http.StatusOK, map[string]any{"token": token, "expires": exp.UTC().Format(time.RFC3339)})
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "expires": exp.UTC().Format(time.RFC3339), "must_change": snap.mustReset})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

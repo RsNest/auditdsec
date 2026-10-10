@@ -6,7 +6,7 @@
 #   lab.sh up && scenarios.sh              # everything
 #   scenarios.sh ip_promote untrusted      # some
 #
-# Scenarios: tunnel selfsigned ip_promote domain_promote ip_change domain_to_ip
+# Scenarios: tunnel default_account selfsigned ip_promote domain_promote ip_change domain_to_ip
 #            domain_to_ip_fails restore untrusted reuse renew_and_reload
 # shellcheck disable=SC2016
 set -u
@@ -90,6 +90,45 @@ s_tunnel() {
     expect "the panel does not answer on the machine's other address" not_on_lan 19477
     expect ".env is mode 600" test "$(stat -c %a "$WORK/.env")" = 600
     expect "the hash in .env keeps its dollar signs" hash_intact
+}
+
+s_default_account() {
+    step "no password given: admin/admin, changed at the first sign-in (real daemon)"
+    reset
+    DEFAULT_ACCOUNT=1 run_inst default --mode tunnel --port 19478
+    local u=http://127.0.0.1:19478 tok body new='a-brand-new-password-1'
+    expect "installer succeeds without a password" test "$RC" = 0
+    expect_out "the installer says the default account answers" "the default account answers"
+    expect_out "the summary shows the default login" "Login:    admin   Password:  admin"
+    expect_out "the summary says it must be replaced" "asks you to replace both"
+    expect "no password hash was written to .env" test -z "$(env_val AUDITDSEC_WEB_PASSWORD_HASH)"
+    api() { curl -sS --noproxy '*' -o /dev/stderr -w '%{http_code}' -X "$1" -H 'X-Requested-With: auditdsec' \
+        -H 'Content-Type: application/json' ${3:+-H "Authorization: Bearer $3"} ${4:+--data-binary "$4"} "$u$2" 2>/dev/null; }
+    body="$(curl -sS --noproxy '*' -X POST -H 'X-Requested-With: auditdsec' -H 'Content-Type: application/json' \
+        --data-binary '{"login":"admin","password":"admin"}' "$u/api/v1/login")"
+    tok="$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' <<<"$body")"
+    expect "admin/admin signs in and is told to change" grep -q '"must_change":true' <<<"$body"
+    expect "status is refused before the change" test "$(api GET /api/v1/status "$tok")" = 403
+    expect "bans are refused before the change" test "$(api GET /api/v1/bans "$tok")" = 403
+    expect "keeping login admin is refused" test "$(api POST /api/v1/account "$tok" '{"current_password":"admin","login":"admin","password":"'"$new"'"}')" = 400
+    expect "keeping password admin is refused" test "$(api POST /api/v1/account "$tok" '{"current_password":"admin","login":"owner","password":"admin"}')" = 400
+    expect "a new login and password are accepted" test "$(api POST /api/v1/account "$tok" '{"current_password":"admin","login":"owner","password":"'"$new"'"}')" = 204
+    expect "admin/admin no longer signs in" test "$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' -X POST -H 'X-Requested-With: auditdsec' -H 'Content-Type: application/json' --data-binary '{"login":"admin","password":"admin"}' "$u/api/v1/login")" = 401
+    docker restart auditdsec >/dev/null
+    expect "the panel is back after a restart" wait_for 40 curl -fsS --noproxy '*' "$u/"
+    expect "the default does not come back after a restart" test "$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' -X POST -H 'X-Requested-With: auditdsec' -H 'Content-Type: application/json' --data-binary '{"login":"admin","password":"admin"}' "$u/api/v1/login")" = 401
+    body="$(curl -sS --noproxy '*' -X POST -H 'X-Requested-With: auditdsec' -H 'Content-Type: application/json' --data-binary '{"login":"owner","password":"'"$new"'"}' "$u/api/v1/login")"
+    tok="$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' <<<"$body")"
+    expect "the new account signs in without a forced change" bash -c '! grep -q must_change.:true <<<"$1"' _ "$body"
+    expect "and reaches the status page" test "$(api GET /api/v1/status "$tok")" = 200
+    expect "the credentials file is mode 600" bash -c 'docker cp auditdsec:/var/lib/auditdsec/panel-credentials.json - | tar -tvf - | grep -q "^-rw------- "'
+    expect "the credentials file holds a hash and no password" bash -c \
+        'f="$(docker cp auditdsec:/var/lib/auditdsec/panel-credentials.json - | tar -xOf -)"; grep -q "pbkdf2-sha256" <<<"$f" && ! grep -q "$1" <<<"$f"' _ "$new"
+    # a second run of the installer keeps the chosen account
+    DEFAULT_ACCOUNT=1 run_inst default2 --mode tunnel --port 19478
+    expect "a re-run succeeds" test "$RC" = 0
+    expect_out "the re-run notices the account was already replaced" "the default account is gone"
+    expect "the chosen account still signs in after the re-run" test "$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' -X POST -H 'X-Requested-With: auditdsec' -H 'Content-Type: application/json' --data-binary '{"login":"owner","password":"'"$new"'"}' "$u/api/v1/login")" = 200
 }
 
 s_selfsigned() {
@@ -359,7 +398,7 @@ s_secrets() {
 
 # ------------------------------------------------------------------- main --
 
-ALL="tunnel selfsigned ip_promote domain_promote ip_change domain_to_ip domain_to_ip_fails restore untrusted reuse renew_and_reload"
+ALL="tunnel default_account selfsigned ip_promote domain_promote ip_change domain_to_ip domain_to_ip_fails restore untrusted reuse renew_and_reload"
 want=("$@"); [ ${#want[@]} -gt 0 ] || read -r -a want <<<"$ALL"
 for n in "${want[@]}"; do
     "s_$n" || true

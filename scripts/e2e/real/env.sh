@@ -28,6 +28,13 @@ reset() {
     chmod 600 "$WORK/.env"
 }
 
-inst() { (cd "$WORK" && ./install.sh --no-build --yes --no-enforce --password-file "$PW_FILE" "$@"); }
+# DEFAULT_ACCOUNT=1 leaves the password out, as a person who just runs ./install.sh does.
+inst() {
+    if [ "${DEFAULT_ACCOUNT:-}" = 1 ]; then
+        (cd "$WORK" && ./install.sh --no-build --yes --no-enforce "$@")
+    else
+        (cd "$WORK" && ./install.sh --no-build --yes --no-enforce --password-file "$PW_FILE" "$@")
+    fi
+}
 
 dc() { (cd "$WORK" && docker compose "$@"); }

@@ -156,6 +156,7 @@ button { font: inherit; color: inherit; }
   background-size: 5px 5px; background-repeat: no-repeat; }
 .sel option { background: var(--bg2); color: var(--ink); }
 .err { color: var(--red); font-size: 13px; }
+.ok { color: var(--green, #5fb878); font-size: 13px; }
 
 /* ---------- gate: the login form and nothing else ---------- */
 

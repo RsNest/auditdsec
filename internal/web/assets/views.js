@@ -82,6 +82,14 @@
         err.hidden = true;
         A.api.login(login, pass.value).then(function (res) {
           if (!res || !res.token) { throw new Error("no token"); }
+          if (res.must_change) {
+            /* The default account: nothing else works until it is replaced.
+               The token is kept in memory only, never in sessionStorage. */
+            S.token = res.token;
+            showChange(pass.value);
+            pass.value = "";
+            return;
+          }
           S.token = res.token;
           A.put("sessionStorage", "ads.token", res.token);
           pass.value = "";
@@ -95,6 +103,54 @@
         });
       }
     }, [logo("wm"), fieldOf(t("login.user"), user), fieldOf(t("login.pass"), pass), err, submit]);
+
+    add(host, form);
+    user.focus();
+  }
+
+  /* ---------------- first sign-in: replace admin / admin ---------------- */
+
+  function showChange(current) {
+    stopAll();
+    $("#shell").hidden = true;
+    var host = clear($("#gate"));
+    host.hidden = false;
+
+    var user = el("input", { class: "in", type: "text", name: "username", autocomplete: "username", autocapitalize: "none", spellcheck: "false", required: true });
+    var pass = el("input", { class: "in", type: "password", name: "new-password", autocomplete: "new-password", minlength: "12", required: true });
+    var again = el("input", { class: "in", type: "password", name: "new-password-again", autocomplete: "new-password", minlength: "12", required: true });
+    var err = el("p", { class: "err", role: "alert", hidden: true });
+    var submit = el("button", { class: "pill pill-solid", type: "submit", text: t("change.submit") });
+
+    var form = el("form", {
+      class: "gate-form",
+      onsubmit: function (ev) {
+        ev.preventDefault();
+        var login = user.value.trim();
+        err.hidden = true;
+        var problem = "";
+        if (!login || login.toLowerCase() === "admin") { problem = t("change.login"); }
+        else if (pass.value.length < 12 || pass.value.toLowerCase() === "admin") { problem = t("change.short"); }
+        else if (pass.value !== again.value) { problem = t("change.mismatch"); }
+        if (problem) { err.textContent = problem; err.hidden = false; return; }
+        submit.disabled = true;
+        A.api.account(current, login, pass.value).then(function () {
+          S.token = null;
+          A.put("sessionStorage", "ads.token", null);
+          current = "";
+          pass.value = again.value = "";
+          showGate();
+          var note = el("p", { class: "ok", role: "status", text: t("change.done") });
+          $("#gate").firstChild.insertBefore(note, $("#gate").firstChild.firstChild.nextSibling);
+        }, function (e) {
+          err.textContent = e.code === "throttled" ? t("login.throttled") : e.code === "offline" ? t("err.offline") :
+            e.code === "weak_credentials" ? t("change.weak") : t("change.failed");
+          err.hidden = false;
+          submit.disabled = false;
+        });
+      }
+    }, [logo("wm"), el("p", { class: "hint", text: t("change.intro") }),
+      fieldOf(t("change.newlogin"), user), fieldOf(t("change.newpass"), pass), fieldOf(t("change.again"), again), err, submit]);
 
     add(host, form);
     user.focus();

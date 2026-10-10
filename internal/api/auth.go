@@ -82,6 +82,12 @@ func (s *sessions) revoke(token string) {
 	s.mu.Unlock()
 }
 
+func (s *sessions) revokeAll() {
+	s.mu.Lock()
+	s.m = map[[32]byte]session{}
+	s.mu.Unlock()
+}
+
 func (s *sessions) sweepLocked() {
 	now := s.now()
 	for k, v := range s.m {

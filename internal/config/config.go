@@ -107,9 +107,10 @@ type CrowdSecConfig struct {
 	APIKey  string
 }
 
-// WebConfig is the panel. It is off unless asked for, and it refuses to start
-// without credentials: a panel that lists bans and audit events must never be
-// reachable with a default password.
+// WebConfig is the panel. It is off unless asked for. Without a configured
+// password it starts with the account admin / admin, which can do nothing but
+// replace itself: every other call is refused until the login and the password
+// have both been changed.
 type WebConfig struct {
 	Enabled bool
 	Listen  string
@@ -582,11 +583,9 @@ func (c *Config) validateWeb(add func(string, ...any)) {
 		add("web.login: must not be empty")
 	}
 	switch {
-	case w.PasswordHash == "" && w.Password == "":
-		add("web: set web.password_hash (see `auditdsec hash-password`) or AUDITDSEC_WEB_PASSWORD; the panel never starts without a password")
 	case w.PasswordHash != "" && !strings.HasPrefix(w.PasswordHash, "pbkdf2-sha256$"):
 		add("web.password_hash: not a hash made by `auditdsec hash-password`")
-	case w.PasswordHash == "" && len([]rune(w.Password)) < minPasswordLen:
+	case w.PasswordHash == "" && w.Password != "" && len([]rune(w.Password)) < minPasswordLen:
 		add("AUDITDSEC_WEB_PASSWORD: use at least %d characters", minPasswordLen)
 	}
 	host, _, err := net.SplitHostPort(w.Listen)
@@ -713,7 +712,10 @@ func (c *Config) Redacted() string {
 		c.Ban.Backend, c.Ban.DryRun, orDefault(c.Ban.AutoAllowlist, AutoAllowOff))
 	if c.Web.Enabled {
 		pw := "hash"
-		if c.Web.PasswordHash == "" {
+		switch {
+		case c.Web.PasswordHash == "" && c.Web.Password == "":
+			pw = "default admin/admin until changed in the panel"
+		case c.Web.PasswordHash == "":
 			pw = "plain (hashed in memory)"
 		}
 		proxies := "none"

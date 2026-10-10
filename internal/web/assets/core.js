@@ -275,6 +275,9 @@
 
   var api = {
     login: function (login, password) { return request("POST", "/login", { login: login, password: password }); },
+    account: function (current, login, password) {
+      return request("POST", "/account", { current_password: current, login: login, password: password });
+    },
     status: function () { return request("GET", "/status"); },
     events: function (query) { return request("GET", "/events" + (query ? "?" + query : "")); },
     explain: function (kind) { return request("GET", "/explain/" + kind + "?lang=" + state.lang); },

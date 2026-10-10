@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -433,17 +434,142 @@ func TestPasswordHashing(t *testing.T) {
 	}
 }
 
-// The agent must not start a panel that anyone can sign into.
-func TestServerRefusesWithoutAPassword(t *testing.T) {
+// newDefaultServer starts a panel with no configured password: the admin/admin
+// account that may only replace itself.
+func newDefaultServer(t *testing.T) (*Server, string) {
+	t.Helper()
 	cfg := config.Defaults(config.ProfileSimple)
 	cfg.Web.Enabled = true
+	cfg.StateDir = t.TempDir()
 	st, err := store.Open(store.Options{Dir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
-	if _, err := New(Options{Config: cfg, Store: st}); err == nil {
-		t.Fatal("the server started with no password")
+	t.Cleanup(func() { st.Close() })
+	s, err := New(Options{Config: cfg, Store: st, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, cfg.StateDir
+}
+
+func tokenOf(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var out struct {
+		Token      string `json:"token"`
+		MustChange bool   `json:"must_change"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Token == "" {
+		t.Fatalf("no token in %d %s", rec.Code, rec.Body)
+	}
+	return out.Token
+}
+
+// With no password configured the panel opens with admin/admin, and that
+// account can do nothing except change itself.
+func TestDefaultAccountMustChangeBeforeAnythingElse(t *testing.T) {
+	s, dir := newDefaultServer(t)
+	rec := do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "admin"})
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"must_change":true`) {
+		t.Fatalf("login: %d %s", rec.Code, rec.Body)
+	}
+	tok := tokenOf(t, rec)
+	for _, p := range []string{"/api/v1/status", "/api/v1/events", "/api/v1/bans", "/api/v1/config", "/api/v1/diagnostics", "/api/v1/allowlist"} {
+		r := do(t, s, "GET", p, tok, nil)
+		if r.Code != 403 || !strings.Contains(r.Body.String(), "password_change_required") {
+			t.Errorf("GET %s before the change = %d %s, want 403 password_change_required", p, r.Code, r.Body)
+		}
+	}
+	if r := do(t, s, "POST", "/api/v1/bans", tok, map[string]string{"ip": "203.0.113.5"}); r.Code != 403 {
+		t.Errorf("POST bans before the change = %d", r.Code)
+	}
+
+	bad := []map[string]string{
+		{"current_password": "admin", "login": "admin", "password": "a-long-new-password"},
+		{"current_password": "admin", "login": "ADMIN", "password": "a-long-new-password"},
+		{"current_password": "admin", "login": "owner", "password": "admin"},
+		{"current_password": "admin", "login": "owner", "password": "short"},
+		{"current_password": "admin", "login": "owner", "password": "owner"},
+		{"current_password": "admin", "login": "my owner", "password": "a-long-new-password"},
+		{"current_password": "admin", "login": "", "password": "a-long-new-password"},
+	}
+	for _, b := range bad {
+		if r := do(t, s, "POST", "/api/v1/account", tok, b); r.Code != 400 {
+			t.Errorf("account %v = %d %s, want 400", b, r.Code, r.Body)
+		}
+	}
+	if r := do(t, s, "POST", "/api/v1/account", tok, map[string]string{"current_password": "nope", "login": "owner", "password": "a-long-new-password"}); r.Code != 400 || !strings.Contains(r.Body.String(), "wrong_password") {
+		t.Errorf("wrong current password = %d %s", r.Code, r.Body)
+	}
+	if _, err := os.Stat(dir + "/" + credFile); err == nil {
+		t.Fatal("a refused change was saved")
+	}
+
+	good := map[string]string{"current_password": "admin", "login": "owner", "password": "a-long-new-password"}
+	if r := do(t, s, "POST", "/api/v1/account", tok, good); r.Code != 204 {
+		t.Fatalf("change = %d %s", r.Code, r.Body)
+	}
+	// The old session and the old account are gone.
+	if r := do(t, s, "GET", "/api/v1/status", tok, nil); r.Code != 401 {
+		t.Errorf("old session after change = %d, want 401", r.Code)
+	}
+	if r := do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "admin"}); r.Code != 401 {
+		t.Errorf("admin/admin after change = %d, want 401", r.Code)
+	}
+	rec = do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "owner", "password": "a-long-new-password"})
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), `"must_change":true`) {
+		t.Fatalf("new login: %d %s", rec.Code, rec.Body)
+	}
+	if r := do(t, s, "GET", "/api/v1/status", tokenOf(t, rec), nil); r.Code != 200 {
+		t.Errorf("status after the change = %d", r.Code)
+	}
+
+	// The file holds a hash only, with owner-only access.
+	raw, err := os.ReadFile(dir + "/" + credFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "a-long-new-password") || !strings.Contains(string(raw), "pbkdf2-sha256$") {
+		t.Errorf("credentials file = %s", raw)
+	}
+	if fi, _ := os.Stat(dir + "/" + credFile); fi.Mode().Perm() != 0o600 {
+		t.Errorf("credentials file mode = %v", fi.Mode().Perm())
+	}
+}
+
+// A restart keeps the chosen credentials, and the default does not come back.
+func TestChangedCredentialsSurviveRestart(t *testing.T) {
+	s, dir := newDefaultServer(t)
+	tok := tokenOf(t, do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "admin"}))
+	if r := do(t, s, "POST", "/api/v1/account", tok, map[string]string{"current_password": "admin", "login": "owner", "password": "a-long-new-password"}); r.Code != 204 {
+		t.Fatal(r.Code)
+	}
+	cfg := s.opt.Config
+	cfg.StateDir = dir
+	s2, err := New(Options{Config: cfg, Store: s.opt.Store, Logger: s.log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := do(t, s2, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "admin"}); r.Code != 401 {
+		t.Errorf("default after restart = %d", r.Code)
+	}
+	if r := do(t, s2, "POST", "/api/v1/login", "", map[string]string{"login": "owner", "password": "a-long-new-password"}); r.Code != 200 {
+		t.Errorf("chosen account after restart = %d", r.Code)
+	}
+}
+
+// A configured password is not the default account: no forced change.
+func TestConfiguredPasswordIsNotForcedToChange(t *testing.T) {
+	s, _, _ := newServer(t)
+	rec := do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": testPassword})
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), `"must_change":true`) {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if do(t, s, "GET", "/api/v1/status", tokenOf(t, rec), nil).Code != 200 {
+		t.Error("status refused")
+	}
+	if do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "admin"}).Code != 401 {
+		t.Error("admin/admin accepted next to a configured password")
 	}
 }
 

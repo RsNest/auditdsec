@@ -424,7 +424,7 @@ EOF
 }
 
 ask_login() {
-    LOGIN="${LOGIN:-$(ask 'Panel login name' "$(env_get AUDITDSEC_WEB_LOGIN)")}"
+    LOGIN="${LOGIN:-$(env_get AUDITDSEC_WEB_LOGIN)}"
     LOGIN="${LOGIN:-admin}"
 }
 
@@ -473,21 +473,12 @@ ask_password() {
         fi
     fi
 
-    while [ -z "$PASSWORD" ]; do
-        interactive || die "no password given; use --password-file"
-        local again
-        PASSWORD="$(ask_secret 'Panel password')"
-        again="$(ask_secret 'Again')"
-        if [ "$PASSWORD" != "$again" ]; then
-            warn "they do not match."
-            PASSWORD=""
-            continue
-        fi
-        if [ "${#PASSWORD}" -lt 12 ]; then
-            warn "use at least 12 characters."
-            PASSWORD=""
-        fi
-    done
+    # Nothing is asked. With no password set the panel opens with the account
+    # admin / admin, and that account can do only one thing: replace itself.
+    # The first sign-in in the browser makes a person pick a new login and a
+    # new password (12+ characters); every other call is refused until then.
+    # Pass --password-file to skip that and install your own password.
+    return 0
 }
 
 # ----------------------------------------------------------- writing config --
@@ -980,6 +971,14 @@ verify_stack() {
     # when a $ is lost on the way. WHERE it is sent depends on trust: over the
     # public address only when its certificate verified; otherwise to the
     # agent's loopback address on this machine, which never leaves it.
+    local default_probe=no
+    if [ -z "$PASSWORD" ] && [ -z "$(env_get AUDITDSEC_WEB_PASSWORD_HASH)" ]; then
+        # The default account: ask whether it still answers. It is not a secret
+        # (the whole point is that it must be replaced), but it goes through
+        # the same trust rules as a real password.
+        default_probe=yes
+        LOGIN="admin"; PASSWORD="admin"
+    fi
     if [ -n "$PASSWORD" ]; then
         local target reply
         case "$MODE" in
@@ -997,7 +996,21 @@ verify_stack() {
         esac
         reply="$(post_login "$target" ${ROUTE[@]+"${ROUTE[@]}"} "${trust[@]}")"
         case "$reply" in
+            *'"must_change":true'*)
+                LOGIN_STATE="the default account answers; the panel will force a new login and password at the first sign-in"
+                ok "$LOGIN_STATE" ;;
             *'"token"'*) LOGIN_STATE="signed in with the chosen password"; ok "$LOGIN_STATE, $LOGIN_ROUTE" ;;
+            *'"bad_credentials"'*)
+                if [ "$default_probe" = yes ]; then
+                    # Normal on a re-run: the owner already replaced admin/admin.
+                    LOGIN_STATE="the default account is gone (credentials were changed earlier); not tested"
+                    ok "$LOGIN_STATE"
+                else
+                    LOGIN_STATE="SIGN-IN FAILED"
+                    FAIL_REASON="the panel is up but refused the password that was just set"
+                    warn "$FAIL_REASON."
+                    return 1
+                fi ;;
             *)
                 LOGIN_STATE="SIGN-IN FAILED"
                 FAIL_REASON="the panel is up but refused the password that was just set"
@@ -1009,6 +1022,7 @@ verify_stack() {
     else
         LOGIN_STATE="not tested (the earlier password was kept)"
     fi
+    if [ "$default_probe" = yes ]; then PASSWORD=""; fi
 
     # In address mode the renewal loop owns the certificate. Ask it whether
     # the file it manages is the one port 443 serves right now.
@@ -1090,7 +1104,14 @@ summary() {
     else
         printf '  Link:     %s%s%s\n' "$B" "$PANEL_URL" "$N"
     fi
-    printf '  Login:    %s   (and the password you set; only its hash is stored)\n' "$LOGIN"
+    if [ -n "$(env_get AUDITDSEC_WEB_PASSWORD_HASH)" ]; then
+        printf '  Login:    %s   (and the password you set; only its hash is stored)\n' "$LOGIN"
+    else
+        printf '  Login:    %sadmin%s   Password:  %sadmin%s\n' "$B" "$N" "$B" "$N"
+        printf '            The first sign-in asks you to replace both (a login other than admin,\n'
+        printf '            a password of 12+ characters). Until then the panel shows nothing else,\n'
+        printf '            but do it right away: whoever opens the link first can choose them.\n'
+    fi
     printf '  Page:     %s\n' "${PAGE_STATE:-not checked}"
     printf '  Sign-in:  %s\n' "${LOGIN_STATE:-not checked}"
     [ -z "$LOGIN_ROUTE" ] || printf '            sent %s\n' "$LOGIN_ROUTE"
