@@ -214,8 +214,8 @@ func Defaults(profile string) *Config {
 		Store:     StoreConfig{RetentionDays: 14, MaxRecent: 200},
 		Heartbeat: HeartbeatConfig{Enabled: true, StaleAfter: 6 * time.Hour, CheckEvery: time.Minute},
 		Detect: DetectConfig{
-			Enabled: true, Window: 10 * time.Minute, FailThreshold: 10,
-			SuccessAfterFailures: 10, MaxTracked: 10000,
+			Enabled: true, Window: 10 * time.Minute, FailThreshold: 6,
+			SuccessAfterFailures: 6, MaxTracked: 10000,
 		},
 		Ban: BanConfig{
 			Backend:       BanBackendNone,
@@ -227,7 +227,6 @@ func Defaults(profile string) *Config {
 	}
 	if profile == ProfilePro {
 		c.Telegram.MinSeverity = "info"
-		c.Detect.FailThreshold = 5
 		c.Detect.Window = 5 * time.Minute
 		c.Telegram.DedupWindow = 5 * time.Minute
 		c.Telegram.RatePerMinute = 30

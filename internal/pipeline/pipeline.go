@@ -406,7 +406,7 @@ func (p *Pipeline) applyDecision(ctx context.Context, d action.Decision) {
 		return
 	}
 
-	ban, err := p.opt.Store.RecordBan(d.IP, d.Reason, d.Until)
+	ban, created, err := p.opt.Store.EnsureBan(d.IP, d.Reason, d.Until)
 	if err != nil {
 		if errors.Is(err, store.ErrAllowlisted) {
 			p.log.Info("ban refused: the address is allowlisted", "ip", d.IP, "reason", d.Reason)
@@ -415,15 +415,22 @@ func (p *Pipeline) applyDecision(ctx context.Context, d action.Decision) {
 		p.log.Error("cannot record the ban", "ip", d.IP, "error", err)
 		return
 	}
+	if !created {
+		return // an active decision is not another offence
+	}
 	p.banned.Add(1)
 
 	var applyErr error
+	d = action.Decision{IP: ban.IP, Until: ban.Until, Reason: ban.Reason}
 	if p.opt.Banner != nil {
 		applyErr = p.opt.Banner.Ban(ctx, d)
 		if applyErr != nil {
 			p.log.Error("the firewall refused the ban", "ip", d.IP, "error", applyErr)
 		} else if err := p.opt.Store.MarkBanApplied(d.IP); err != nil {
+			applyErr = err
 			p.log.Warn("cannot mark the ban as applied", "ip", d.IP, "error", err)
+		} else {
+			ban.Applied = true
 		}
 	}
 	p.log.Warn("address banned",
@@ -486,10 +493,16 @@ func (p *Pipeline) reapplyBans(ctx context.Context) {
 		err := p.opt.Banner.Ban(ctx, action.Decision{IP: b.IP, Until: b.Until, Reason: b.Reason})
 		if err != nil {
 			failed++
+			if saveErr := p.opt.Store.MarkBanUnapplied(b.IP); saveErr != nil {
+				p.log.Warn("cannot clear the failed ban confirmation", "ip", b.IP, "error", saveErr)
+			}
 			p.log.Warn("cannot reapply a ban", "ip", b.IP, "error", err)
 			continue
 		}
 		applied++
+		if err := p.opt.Store.MarkBanApplied(b.IP); err != nil {
+			p.log.Warn("cannot save the reapplied ban state", "ip", b.IP, "error", err)
+		}
 	}
 	if applied > 0 || failed > 0 {
 		p.log.Info("bans reapplied to the firewall", "applied", applied, "failed", failed)

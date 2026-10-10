@@ -271,24 +271,31 @@ func (c *Client) handleCallback(ctx context.Context, q *callbackQuery, chat int6
 // blocks the address. The reply says which of the two happened: "banned" and
 // "noted that it should be banned" are very different outcomes.
 func (c *Client) applyBan(ctx context.Context, ip string) string {
-	if net.ParseIP(ip) == nil {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
 		return c.tr("ui.err.bad_ip", map[string]string{"value": ip})
 	}
+	ip = parsed.String()
 	until := c.now().Add(manualBanDuration)
-	if _, err := c.opt.Store.RecordBan(ip, "manual ban from Telegram", until); err != nil {
+	ban, _, err := c.opt.Store.EnsureBan(ip, "manual ban from Telegram", until)
+	if err != nil {
 		if errors.Is(err, store.ErrAllowlisted) {
 			return c.tr("ui.ban.allowlisted", map[string]string{"ip": ip})
 		}
 		c.log.Warn("cannot record the ban", "error", err)
 		return c.tr("ui.err.unknown_cmd", nil)
 	}
+	until = ban.Until
 
 	text := c.tr("ui.ban.recorded", map[string]string{"ip": ip, "until": c.fmtTime(until)})
 	if c.opt.Enforcer == nil {
 		return text + "\n\n" + c.tr("ui.ban.no_backend", nil)
 	}
+	if ban.Applied {
+		return text
+	}
 	if err := c.opt.Enforcer.Ban(ctx, action.Decision{
-		IP: ip, Until: until, Reason: "manual ban from Telegram",
+		IP: ip, Until: until, Reason: ban.Reason,
 	}); err != nil {
 		c.log.Error("the firewall refused the ban", "ip", ip, "error", err)
 		return text + "\n\n" + c.tr("ui.ban.not_applied", map[string]string{

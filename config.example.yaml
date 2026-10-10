@@ -80,11 +80,11 @@ heartbeat:
 detect:
   enabled: true
   window: 10m
-  fail_threshold: 10
+  fail_threshold: 6
   # How many failures from one address make a later success from it suspicious.
   # That success is the signal that matters most — it is what a guessed
   # password looks like — and it is reported as critical. Zero switches it off.
-  success_after_failures: 10
+  success_after_failures: 6
   # Cap on addresses remembered, so a spray from thousands of sources cannot
   # grow the agent's memory.
   max_tracked: 10000

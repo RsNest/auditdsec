@@ -63,6 +63,7 @@ type Server struct {
 	cred       credState
 	global     *limiter
 	finalizeMu sync.Mutex
+	actionMu   sync.Mutex // serializes panel ban/unban/allow operations
 	proxies    proxySet
 	sessions   *sessions
 	limit      *limiter
@@ -174,6 +175,7 @@ func (s *Server) routes() {
 	api("GET /api/v1/events", true, s.handleEvents)
 	api("GET /api/v1/explain/{kind}", true, s.handleExplain)
 	api("GET /api/v1/bans", true, s.handleBans)
+	api("GET /api/v1/suspects", true, s.handleSuspects)
 	api("POST /api/v1/bans", true, s.handleBan)
 	api("DELETE /api/v1/bans/{ip}", true, s.handleUnban)
 	api("GET /api/v1/allowlist", true, s.handleAllowlist)
@@ -541,7 +543,9 @@ func (s *Server) activeBans() []banJSON {
 	out := []banJSON{}
 	for _, b := range s.opt.Store.Bans() {
 		if b.Active(now) {
-			out = append(out, toBanJSON(b))
+			item := toBanJSON(b)
+			item.Applied = item.Applied && s.opt.Enforcer != nil
+			out = append(out, item)
 		}
 	}
 	return out
@@ -804,7 +808,9 @@ func (s *Server) handleBan(w http.ResponseWriter, r *http.Request) {
 	if extra := cleanReason(in.Reason); extra != "" {
 		reason += ": " + extra
 	}
-	b, err := s.opt.Store.RecordBan(ip.String(), reason, until)
+	s.actionMu.Lock()
+	defer s.actionMu.Unlock()
+	b, created, err := s.opt.Store.EnsureBan(ip.String(), reason, until)
 	if errors.Is(err, store.ErrAllowlisted) {
 		fail(w, http.StatusConflict, "allowlisted", "the address is on the allowlist")
 		return
@@ -815,17 +821,28 @@ func (s *Server) handleBan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("panel: ban", "ip", ip, "until", until, "by", s.clientIP(r))
-	if s.opt.Enforcer != nil {
-		if err := s.opt.Enforcer.Ban(r.Context(), action.Decision{IP: ip.String(), Until: until, Reason: reason}); err != nil {
+	if s.opt.Enforcer != nil && !b.Applied {
+		if err := s.opt.Enforcer.Ban(r.Context(), action.Decision{IP: b.IP, Until: b.Until, Reason: b.Reason}); err != nil {
 			s.log.Error("the firewall refused the ban", "ip", ip, "error", err)
+			fail(w, http.StatusBadGateway, "firewall", "the decision was recorded, but the firewall refused the ban")
+			return
 		} else if err := s.opt.Store.MarkBanApplied(ip.String()); err == nil {
 			b.Applied = true
+		} else {
+			fail(w, http.StatusInternalServerError, "internal", "the firewall accepted the ban, but its state could not be saved")
+			return
 		}
 	}
-	writeJSON(w, http.StatusOK, toBanJSON(b))
+	b.Applied = b.Applied && s.opt.Enforcer != nil
+	writeJSON(w, http.StatusOK, struct {
+		banJSON
+		AlreadyBanned bool `json:"already_banned"`
+	}{toBanJSON(b), !created})
 }
 
 func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
+	s.actionMu.Lock()
+	defer s.actionMu.Unlock()
 	ip, ok := parseIP(r.PathValue("ip"))
 	if !ok {
 		fail(w, http.StatusBadRequest, "bad_ip", "not an address")
@@ -846,6 +863,8 @@ func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAllow(w http.ResponseWriter, r *http.Request) {
+	s.actionMu.Lock()
+	defer s.actionMu.Unlock()
 	var in struct{ IP string }
 	if !decode(w, r, &in) {
 		return

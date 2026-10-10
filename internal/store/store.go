@@ -307,31 +307,75 @@ var ErrAllowlisted = fmt.Errorf("store: address is allowlisted")
 func (s *Store) RecordBan(ip, reason string, until time.Time) (Ban, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.recordBanLocked(ip, reason, until)
+}
+
+// EnsureBan creates a decision only when there is no active ban. Repeated
+// requests retain the original duration, reason and repeat count. The check
+// and persistence share the store lock, including across different callers.
+func (s *Store) EnsureBan(ip, reason string, until time.Time) (Ban, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.state.Allowlist[ip]; ok {
+		return Ban{}, false, ErrAllowlisted
+	}
+	if b, ok := s.state.Bans[ip]; ok && b.Active(s.now()) {
+		return b, false, nil
+	}
+	b, err := s.recordBanLocked(ip, reason, until)
+	return b, err == nil, err
+}
+
+func (s *Store) recordBanLocked(ip, reason string, until time.Time) (Ban, error) {
 	if _, ok := s.state.Allowlist[ip]; ok {
 		return Ban{}, ErrAllowlisted
 	}
-	b := s.state.Bans[ip]
+	previous, existed := s.state.Bans[ip]
+	b := previous
 	b.IP = ip
 	b.CreatedAt = s.now()
 	b.Until = until
 	b.Reason = reason
 	b.Count++
+	b.Applied = false
 	s.state.Bans[ip] = b
-	return b, s.saveStateLocked()
+	if err := s.saveStateLocked(); err != nil {
+		if existed {
+			s.state.Bans[ip] = previous
+		} else {
+			delete(s.state.Bans, ip)
+		}
+		return Ban{}, err
+	}
+	return b, nil
 }
 
 // MarkBanApplied records that a Banner actually enforced the decision on the
 // host, which v0.1 never does and v0.2 will.
 func (s *Store) MarkBanApplied(ip string) error {
+	return s.setBanApplied(ip, true)
+}
+
+// MarkBanUnapplied clears stale confirmation when startup enforcement fails.
+func (s *Store) MarkBanUnapplied(ip string) error {
+	return s.setBanApplied(ip, false)
+}
+
+func (s *Store) setBanApplied(ip string, applied bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.state.Bans[ip]
 	if !ok {
 		return nil
 	}
-	b.Applied = true
+	previous := b
+	b.Applied = applied
 	s.state.Bans[ip] = b
-	return s.saveStateLocked()
+	if err := s.saveStateLocked(); err != nil {
+		s.state.Bans[ip] = previous
+		return err
+	}
+	return nil
 }
 
 // Bans returns every recorded ban, newest first.
@@ -532,6 +576,36 @@ func (s *Store) saveStateLocked() error {
 
 // maxScanDays bounds how far back Scan walks when no start is given.
 const maxScanDays = 120
+
+// WalkEvents streams committed records over a bounded date range without
+// loading whole day files. Ordering within each day is append order; callers
+// that aggregate by IP must compare timestamps rather than assume chronology.
+func (s *Store) WalkEvents(from, to time.Time, fn func(model.Event) bool) error {
+	now := s.now().UTC()
+	if to.IsZero() || to.After(now) {
+		to = now
+	}
+	if from.IsZero() || from.Before(to.AddDate(0, 0, -maxScanDays)) {
+		from = to.AddDate(0, 0, -maxScanDays)
+	}
+	stopped := false
+	for d := to.UTC().Truncate(24 * time.Hour); !d.Before(from.UTC().Truncate(24 * time.Hour)); d = d.AddDate(0, 0, -1) {
+		err := s.walkDay(d.Format(dayLayout), func(ev model.Event) bool {
+			if !ev.Time.After(from) || ev.Time.After(to) {
+				return true
+			}
+			if !fn(ev) {
+				stopped = true
+				return false
+			}
+			return true
+		})
+		if err != nil || stopped {
+			return err
+		}
+	}
+	return nil
+}
 
 // Scan walks stored events newest first, between from and to (zero values mean
 // "as far as retention goes" and "now"). Each event comes with an id of the

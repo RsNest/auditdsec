@@ -71,8 +71,9 @@ type BruteForce struct {
 }
 
 type tracker struct {
-	fails    []time.Time
-	bannedAt time.Time
+	fails      []time.Time
+	bannedAt   time.Time
+	correlated bool
 }
 
 // NewBruteForce returns a detector with sane defaults for a small VPS.
@@ -81,7 +82,7 @@ func NewBruteForce(o Options) *BruteForce {
 		o.Window = 10 * time.Minute
 	}
 	if o.FailThreshold <= 0 {
-		o.FailThreshold = 10
+		o.FailThreshold = 6
 	}
 	if o.MaxTracked <= 0 {
 		o.MaxTracked = 10000
@@ -122,11 +123,17 @@ func (d *BruteForce) onFailure(ev model.Event, ip string) Result {
 	d.mu.Lock()
 	t := d.track(ip, now)
 	t.fails = append(prune(t.fails, now.Add(-d.opt.Window)), now)
+	// Retain enough evidence for both policies without letting one noisy IP
+	// grow its timestamp slice for the entire cooldown window.
+	capacity := max(d.opt.FailThreshold, d.opt.SuccessAfterFailures)
+	if len(t.fails) > capacity {
+		t.fails = t.fails[len(t.fails)-capacity:]
+	}
+	t.correlated = false
 	count := len(t.fails)
 	banned := !t.bannedAt.IsZero() && now.Sub(t.bannedAt) < d.opt.Window
 	if count >= d.opt.FailThreshold && !banned {
 		t.bannedAt = now
-		t.fails = nil
 	} else {
 		count = 0 // not a decision point
 	}
@@ -170,11 +177,13 @@ func (d *BruteForce) onSuccess(ev model.Event, ip string) Result {
 	fails := 0
 	if ok {
 		t.fails = prune(t.fails, now.Add(-d.opt.Window))
-		fails = len(t.fails)
+		if !t.correlated {
+			fails = len(t.fails)
+		}
 		if fails >= d.opt.SuccessAfterFailures {
 			// Reported once: the owner does not need it again for every
 			// command in the session that follows.
-			t.fails = nil
+			t.correlated = true
 		}
 	}
 	d.mu.Unlock()
