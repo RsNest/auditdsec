@@ -8,27 +8,8 @@
 #            domain_alpn no_external persistence_fails
 # shellcheck disable=SC2016
 set -u
-HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO="$(cd "$HERE/../../.." && pwd)"
-LAB="${LAB:-/lab}"
-WORK="$LAB/work"
-OUTDIR="$LAB/out"; mkdir -p "$OUTDIR"
-
-export COMPOSE_PROJECT_NAME=e2e NO_COLOR=1
-export E2E_AUDIT_DIR="$LAB/audit"
-export PANEL_COMPOSE_EXTRA="$WORK/scripts/e2e/real/compose.test.yml"
-export PANEL_ACME_URL_PRODUCTION="https://localhost:14000/dir"
-export PANEL_ACME_URL_STAGING="https://localhost:14000/dir"
-export PANEL_ACME_CA_ROOT="$LAB/acme-ca.pem"
-export PANEL_CACERT="$LAB/root.pem"
-export PANEL_DNS_RESOLVERS="127.0.0.1:1053"
-export PANEL_NO_EGRESS=1
-export PANEL_RECONCILE_SECONDS=5
-
-VPS="$(cat "$LAB/vps-ip")"
-OUTSIDE="$(cat "$LAB/outside-subnet")"
-PROBE=(--probe-url https://127.0.0.1:8443 --probe-token-file "$LAB/probe-token" --probe-cacert "$LAB/probe-ca.pem")
-TOKEN="$(cat "$LAB/probe-token")"
+# shellcheck source=env.sh
+source "$(dirname "$0")/env.sh"
 
 PASS=0; FAIL=0; RC=0; OUT=""
 pass() { PASS=$((PASS + 1)); printf '  PASS  %s\n' "$1"; }
@@ -48,26 +29,6 @@ inst() { # LABEL ARGS... — run the installer in the work copy, keep the output
 }
 last_link() { grep -E '^  Link' <<<"$OUT" | tail -n 1; }
 env_val() { grep -E "^$1=" "$WORK/.env" | tail -n 1 | cut -d= -f2- | tr -d "'"; }
-
-# A firewall on the VPS for traffic from the "outside" network only.
-fw_reset() {
-    iptables -N LABFW 2>/dev/null || true
-    iptables -F LABFW
-    iptables -C INPUT -s "$OUTSIDE" -j LABFW 2>/dev/null || iptables -I INPUT -s "$OUTSIDE" -j LABFW
-}
-fw_drop() { iptables -A LABFW -p tcp --dport "$1" -j DROP; }
-
-reset() {
-    docker ps -aq --filter name=auditdsec | xargs -r docker rm -f >/dev/null 2>&1 || true
-    docker rm -f lab-blocker >/dev/null 2>&1 || true
-    docker volume ls -q --filter name=e2e_ | xargs -r docker volume rm -f >/dev/null 2>&1 || true
-    fw_reset
-    rm -rf "$WORK"; mkdir -p "$WORK" "$E2E_AUDIT_DIR"
-    : > "$E2E_AUDIT_DIR/audit.log"
-    (cd "$REPO" && tar --exclude=.git -cf - .) | tar -xf - -C "$WORK"
-    printf "AUDITDSEC_TG_TOKEN='123:abc'\nAUDITDSEC_TG_CHAT_ID='42'\n" > "$WORK/.env"
-    chmod 600 "$WORK/.env"
-}
 
 api() { # METHOD URL [TOKEN] [JSON]
     curl -sS --noproxy '*' --cacert "$LAB/root.pem" -X "$1" -H 'X-Requested-With: auditdsec' \
