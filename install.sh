@@ -44,7 +44,12 @@ ORIG_ARGS=("$@")
 ENV_FILE="${ENV_FILE:-.env}"
 DOCKER="${DOCKER:-docker}"
 COMPOSE_BASE="docker-compose.yml"
-IMAGE_TAG="auditdsec:${AUDITDSEC_VERSION:-0.1.0}"
+# Where the published images live (a mirror or a test registry may replace it),
+# the GitHub repository whose Actions build them, and how long to wait for a
+# build that is still running.
+IMAGE_REPO="${AUDITDSEC_IMAGE_REPO:-ghcr.io/rsnest}"
+IMAGE_GITHUB_REPO="${AUDITDSEC_IMAGE_GITHUB_REPO-RsNest/auditdsec}"
+IMAGE_WAIT="${AUDITDSEC_IMAGE_WAIT:-900}"
 
 MODE=""           # domain | ip | selfsigned | tunnel
 SITE=""
@@ -66,6 +71,7 @@ DO_VERIFY=yes
 ACME=""           # staging | production (domain and ip modes)
 CACERT="${PANEL_CACERT:-}"   # a CA file to verify the panel's certificate against
 NO_BUILD=no
+BUILD_LOCAL=no
 RESTORE=no
 PORT_DEPRECATED=no
 PORT_RANGE_LO="${PANEL_PORT_RANGE_LO:-}"
@@ -135,7 +141,9 @@ Technical modes (never reported as "published and ready")
                                        browser warns
   --no-start                           write the configuration and stop
   --no-verify                          start, but do not check the panel answers
-  --no-build                           use the image that exists, do not build
+  --no-build                           use the image already here; download nothing
+  --build-local                        DEVELOPERS: build the images from this tree on this
+                                       machine instead of downloading the published ones
   --restore                            put back the last configuration that was verified
   --yes                                ask nothing that already has an answer
   -h, --help                           this text
@@ -152,6 +160,7 @@ first failure:
   16 tls_validation_failed       the panel's certificate does not verify
   17 service_start_failed        the containers did not start or the page is silent
   18 bootstrap_persistence_failed the panel cannot save its credentials
+  19 image_unavailable           the image for this commit cannot be downloaded
    1 anything else (bad input, Docker missing, ...)
 EOF
 }
@@ -178,6 +187,7 @@ while [ $# -gt 0 ]; do
         --cacert) CACERT="${2:-}"; shift 2 ;;
         --restore) RESTORE=yes; shift ;;
         --no-build) NO_BUILD=yes; shift ;;
+        --build-local) BUILD_LOCAL=yes; shift ;;
         --yes|-y) ASSUME_YES=yes; shift ;;
         --no-start) DO_START=no; shift ;;
         --no-verify) DO_VERIFY=no; shift ;;
@@ -236,6 +246,7 @@ code_status() {
         tls_validation_failed) echo 16 ;;
         service_start_failed) echo 17 ;;
         bootstrap_persistence_failed) echo 18 ;;
+        image_unavailable) echo 19 ;;
         *) echo 1 ;;
     esac
 }
@@ -387,26 +398,181 @@ preflight() {
     ensure_image
 }
 
-# ensure_image builds the agent image first: the DNS and port checks below run
-# inside it, so they work the same with or without Go on this machine.
+# --------------------------------------------------------------- the image --
+#
+# The images are built by GitHub Actions, one per commit, and published as
+# ghcr.io/rsnest/auditdsec:sha-<commit>. The installer takes the one whose
+# commit is the code it was run from, so the scripts next to it and the agent
+# inside it are the same version. It never compiles anything on the server.
+# --build-local (developers) builds from this tree instead; a failed download
+# never falls back to building.
+
+IMAGE=""          # the agent image in use
+ENFORCE_IMAGE=""  # the enforcing variant of the same commit
+SOURCE_COMMIT=""
+
+# source_commit — the commit of this tree: from git when it is a clone, else
+# from deploy/source-commit, which GitHub fills in when it builds a source
+# archive. A tree whose agent code has local changes has no published image.
+source_commit() {
+    local c=""
+    if [ -d .git ] && command -v git >/dev/null 2>&1; then
+        c="$(git rev-parse HEAD 2>/dev/null || true)"
+        if [ -n "$c" ] && [ "$BUILD_LOCAL" = no ] \
+                && [ -n "$(git status --porcelain -- cmd internal go.mod deploy/Dockerfile 2>/dev/null)" ]; then
+            die "the agent's source code here has local changes, so no published image matches it. Use --build-local, or undo the changes (git stash)."
+        fi
+    fi
+    if [ -z "$c" ] && [ -r deploy/source-commit ]; then
+        c="$(tr -d ' \n\r' < deploy/source-commit)"
+    fi
+    case "$c" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+        *) c="" ;;
+    esac
+    [ ${#c} = 40 ] || c=""
+    printf '%s' "$c"
+}
+
+# github_run_state COMMIT — what GitHub Actions says about building that
+# commit: building | failed | none | unknown. Public API, no token needed.
+github_run_state() {
+    local json
+    json="$(curl -fsS --max-time 10 -H 'Accept: application/vnd.github+json' \
+        "${AUDITDSEC_GITHUB_API:-https://api.github.com}/repos/${IMAGE_GITHUB_REPO}/actions/runs?head_sha=$1&per_page=10" 2>/dev/null)" \
+        || { echo unknown; return; }
+    case "$json" in
+        *'"total_count": 0'*|*'"total_count":0'*) echo none ;;
+        *'"status": "queued"'*|*'"status":"queued"'*|*'"status": "in_progress"'*|*'"status":"in_progress"'*|*'"status": "waiting"'*|*'"status":"waiting"'*|*'"status": "pending"'*|*'"status":"pending"'*)
+            echo building ;;
+        *'"conclusion": "failure"'*|*'"conclusion":"failure"'*|*'"conclusion": "cancelled"'*|*'"conclusion":"cancelled"'*)
+            echo failed ;;
+        *) echo unknown ;;
+    esac
+}
+
+# pull_image REF — downloads REF without any login. When the image for this
+# commit is still being built, waits a bounded time; never builds instead.
+pull_image() {
+    local ref="$1" out waited=0 state
+    while :; do
+        if out="$($DOCKER pull --quiet "$ref" 2>&1)"; then
+            return 0
+        fi
+        case "$out" in
+            *denied*|*unauthorized*|*"authentication required"*)
+                abort image_unavailable "$ref" "docker pull without credentials" \
+                    "the registry refused anonymous access: the package is not public" \
+                    "the repository owner must make the package public (GitHub → Packages → Package settings → Change visibility). Nothing was changed on this server." ;;
+            *"manifest unknown"*|*"not found"*|*"manifest for"*)
+                ;;
+            *)
+                abort image_unavailable "$ref" "docker pull" \
+                    "the download failed: $(printf '%s' "$out" | tail -n 1)" \
+                    "check this server's internet access and DNS, then run again. Nothing was changed on this server." ;;
+        esac
+        state=unknown
+        [ -z "$IMAGE_GITHUB_REPO" ] || state="$(github_run_state "$SOURCE_COMMIT")"
+        case "$state" in
+            building)
+                if [ "$waited" -ge "$IMAGE_WAIT" ]; then
+                    abort image_unavailable "$ref" "waiting for GitHub Actions to publish the image" \
+                        "the image for commit ${SOURCE_COMMIT:0:12} is still being built after $((IMAGE_WAIT / 60)) minutes" \
+                        "wait for the build at https://github.com/${IMAGE_GITHUB_REPO}/actions to finish, then run again. Nothing was changed on this server."
+                fi
+                [ "$waited" -gt 0 ] || say "The image for commit ${SOURCE_COMMIT:0:12} is still being built by GitHub Actions; waiting (at most $((IMAGE_WAIT / 60)) minutes)..."
+                sleep 20; waited=$((waited + 20)) ;;
+            failed)
+                abort image_unavailable "$ref" "GitHub Actions build of commit ${SOURCE_COMMIT:0:12}" \
+                    "the build for this commit failed, so no image was published" \
+                    "use the code of a commit whose build succeeded (git checkout <commit>), or --build-local. Nothing was changed on this server." ;;
+            *)
+                abort image_unavailable "$ref" "docker pull" \
+                    "no image is published for commit ${SOURCE_COMMIT:0:12} (images are published for commits on main and for release tags)" \
+                    "run the installer from a commit on main or a release (git checkout main && git pull), or use --build-local for your own changes. Nothing was changed on this server." ;;
+        esac
+    done
+}
+
+# ensure_image gets the agent image before anything else: the DNS and port
+# checks below run inside it.
 ensure_image() {
-    if [ "$NO_BUILD" = yes ]; then
-        $DOCKER image inspect "$IMAGE_TAG" >/dev/null 2>&1 \
-            || die "--no-build was given but the image $IMAGE_TAG does not exist"
+    if [ "$BUILD_LOCAL" = yes ]; then
+        build_local minimal
         return 0
     fi
-    say "Building the agent image (the checks run inside it)..."
-    local log
+    if [ "$NO_BUILD" = yes ]; then
+        # The image this installation already uses, or the one for this commit
+        # if it is present; nothing is downloaded.
+        IMAGE="$(env_get AUDITDSEC_IMAGE)"
+        SOURCE_COMMIT="$(source_commit)"
+        [ -n "$IMAGE" ] || [ -z "$SOURCE_COMMIT" ] || IMAGE="${IMAGE_REPO}/auditdsec:sha-${SOURCE_COMMIT}"
+        [ -n "$IMAGE" ] && $DOCKER image inspect "$IMAGE" >/dev/null 2>&1 \
+            || die "--no-build: no image is present here (${IMAGE:-none}); run without --no-build to download it"
+        ENFORCE_IMAGE="$(env_get AUDITDSEC_ENFORCE_IMAGE)"
+        [ -n "$ENFORCE_IMAGE" ] || ENFORCE_IMAGE="${IMAGE%/auditdsec:*}/auditdsec-enforce:${IMAGE##*:}"
+        return 0
+    fi
+    SOURCE_COMMIT="$(source_commit)"
+    [ -n "$SOURCE_COMMIT" ] || die "cannot tell which commit this code is (no git checkout, and deploy/source-commit is not filled in). Download the code with git clone or as a GitHub archive, or use --build-local."
+    IMAGE="${IMAGE_REPO}/auditdsec:sha-${SOURCE_COMMIT}"
+    ENFORCE_IMAGE="${IMAGE_REPO}/auditdsec-enforce:sha-${SOURCE_COMMIT}"
+    say "Downloading the agent image for commit ${SOURCE_COMMIT:0:12}..."
+    pull_image "$IMAGE"
+    ok "image $IMAGE"
+}
+
+# build_local TARGET — the developer's path: builds this tree here.
+build_local() {
+    local target="$1" c tag log
+    c="$(source_commit)"; c="${c:-unknown}"
+    if [ -d .git ] && [ -n "$(git status --porcelain -- cmd internal go.mod deploy/Dockerfile 2>/dev/null)" ]; then
+        tag="local-${c:0:12}-dirty"
+    else
+        tag="local-${c:0:12}"
+    fi
+    case "$target" in
+        minimal) IMAGE="auditdsec:$tag"; ENFORCE_IMAGE="auditdsec-enforce:$tag"; set -- "$IMAGE" ;;
+        enforce) set -- "$ENFORCE_IMAGE" ;;
+    esac
+    say "Building $1 from this tree (--build-local)..."
     log="$(mktemp)"
-    if ! compose_build >"$log" 2>&1; then
+    if ! $DOCKER build -f deploy/Dockerfile --target "$target" -t "$1" \
+            --build-arg VERSION="$(cat VERSION 2>/dev/null || echo dev)-local" \
+            --build-arg COMMIT="$c" . >"$log" 2>&1; then
         tail -n 30 "$log" >&2; rm -f "$log"
         die "the image did not build"
     fi
     rm -f "$log"
-    ok "image $IMAGE_TAG ready"
+    ok "built $1"
 }
 
-compose_build() { $DOCKER compose -f "$COMPOSE_BASE" build auditdsec; }
+# ensure_enforce_image: the nftables variant, only when blocking is on.
+ensure_enforce_image() {
+    [ "$ENFORCE" = yes ] || return 0
+    $DOCKER image inspect "$ENFORCE_IMAGE" >/dev/null 2>&1 && return 0
+    if [ "$BUILD_LOCAL" = yes ]; then build_local enforce; return 0; fi
+    [ "$NO_BUILD" = no ] || die "--no-build: the enforcing image $ENFORCE_IMAGE is not present here"
+    pull_image "$ENFORCE_IMAGE"
+}
+
+# legacy_image — the image an installation from before published images used
+# (built here as auditdsec:<version>), if it is still present.
+legacy_image() {
+    local ref="auditdsec:$(env_get AUDITDSEC_VERSION)"
+    [ "$ref" != "auditdsec:" ] || ref="auditdsec:0.1.0"
+    $DOCKER image inspect "$ref" >/dev/null 2>&1 && printf "%s" "$ref"
+    return 0
+}
+
+# image_facts REF — "version, commit, digest" of an image, for the summary.
+image_facts() {
+    local v c d
+    v="$($DOCKER image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' "$1" 2>/dev/null || true)"
+    c="$($DOCKER image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$1" 2>/dev/null || true)"
+    d="$($DOCKER image inspect -f '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' "$1" 2>/dev/null || true)"
+    printf '%s|%s|%s' "${v:-?}" "${c:-?}" "${d##*@}"
+}
 
 # agent ARGS... — runs one of the agent's own commands in the image, in the
 # host's network namespace so it sees this server's addresses and ports. Only
@@ -414,7 +580,7 @@ compose_build() { $DOCKER compose -f "$COMPOSE_BASE" build auditdsec; }
 # process list.
 AGENT_ENV=()
 agent() {
-    $DOCKER run --rm --network host ${AGENT_ENV[@]+"${AGENT_ENV[@]}"} "$IMAGE_TAG" "$@"
+    $DOCKER run --rm --network host ${AGENT_ENV[@]+"${AGENT_ENV[@]}"} "$IMAGE" "$@"
 }
 
 # kv KEY TEXT — the value of KEY=... in the agent's output.
@@ -661,7 +827,7 @@ start_listener() {
     PROBE_NONCE="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     export AUDITDSEC_PROBE_NONCE="$PROBE_NONCE"
     $DOCKER run -d --rm --name "$PROBE_CONTAINER" --network host -e AUDITDSEC_PROBE_NONCE \
-        "$IMAGE_TAG" probe-listen -port "$port" -ttl 3m >/dev/null 2>&1 || return 1
+        "$IMAGE" probe-listen -port "$port" -ttl 3m >/dev/null 2>&1 || return 1
     while [ "$tries" -lt 20 ]; do
         tries=$((tries + 1))
         if curl -sS --noproxy '*' --max-time 2 "http://127.0.0.1:$port/.well-known/auditdsec-probe/$PROBE_NONCE" 2>/dev/null | grep -q "$PROBE_NONCE"; then
@@ -1039,6 +1205,16 @@ write_config() {
     env_set PANEL_ENFORCE "$ENFORCE"
     env_set PANEL_UPSTREAM_PORT "$PORT"
     env_unset PANEL_PORT
+    # The images of this run. The one the installation used before is kept, so
+    # going back is one line in .env (and .env.last-good holds it as well).
+    local prev
+    prev="$(env_get AUDITDSEC_IMAGE)"
+    [ -n "$prev" ] || prev="$(legacy_image)"
+    if [ -n "$prev" ] && [ "$prev" != "$IMAGE" ]; then env_set PANEL_IMAGE_PREVIOUS "$prev"; fi
+    env_set AUDITDSEC_IMAGE "$IMAGE"
+    env_set AUDITDSEC_ENFORCE_IMAGE "$ENFORCE_IMAGE"
+    env_set AUDITDSEC_COMMIT "${SOURCE_COMMIT:-unknown}"
+    env_unset AUDITDSEC_VERSION
     env_set AUDITDSEC_WEB 1
     env_set AUDITDSEC_WEB_LOGIN "$LOGIN"
     if [ "$ENFORCE" = yes ]; then env_set AUDITDSEC_BAN_BACKEND nftables; else env_unset AUDITDSEC_BAN_BACKEND; fi
@@ -1113,7 +1289,7 @@ hash_password() {
     step "Hashing the password"
     local hash errfile
     errfile="$(mktemp)"
-    if ! hash="$(printf '%s\n' "$PASSWORD" | $DOCKER run --rm -i "$IMAGE_TAG" hash-password -stdin 2>"$errfile")"; then
+    if ! hash="$(printf '%s\n' "$PASSWORD" | $DOCKER run --rm -i "$IMAGE" hash-password -stdin 2>"$errfile")"; then
         warn "the agent refused the password: $(head -c 300 "$errfile")"
         rm -f "$errfile"
         return 1
@@ -1222,7 +1398,7 @@ start_stack() {
     issue_ip_certificate || return 1
     if [ "$DO_START" != yes ]; then say "(--no-start: not starting)"; return 0; fi
     local up=(up -d --remove-orphans)
-    [ "$NO_BUILD" = yes ] && up+=(--no-build)
+    up+=(--no-build)   # images are downloaded (or built) before, never here
     if ! compose "${up[@]}"; then
         report service_start_failed "$(compose_prefix)" "docker compose up" \
             "the containers did not start (Docker's message is above)" \
@@ -1263,6 +1439,7 @@ load_state_from_env() {
     PROBE_TOKEN_FILE="$(env_get PANEL_PROBE_TOKEN_FILE)"
     PROBE_CACERT="$(env_get PANEL_PROBE_CACERT)"
     PASSWORD=""
+    IMAGE="$(env_get AUDITDSEC_IMAGE)"
     TARGETS=()
     [ -z "$SITE" ] || [ "$MODE" = domain ] || TARGETS=("$SITE $(family_of "$SITE")")
     compute_panel_url
@@ -1281,9 +1458,14 @@ restore_last_good() {
     fi
     cp "$LAST_GOOD" "$ENV_FILE"
     chmod 0600 "$ENV_FILE"
+    # A configuration saved before images were published names none: it ran
+    # the locally built one, which is what it gets back.
+    if [ -z "$(env_get AUDITDSEC_IMAGE)" ] && [ -n "$(legacy_image)" ]; then
+        env_set AUDITDSEC_IMAGE "$(legacy_image)"
+    fi
     load_state_from_env
     local up=(up -d --remove-orphans)
-    [ "$NO_BUILD" = yes ] && up+=(--no-build)
+    up+=(--no-build)   # images are downloaded (or built) before, never here
     compose "${up[@]}" || { warn "could not start the previous configuration either"; return 1; }
     STACK_STARTED=yes
     STOPPED_OWN=()
@@ -1719,6 +1901,15 @@ summary() {
     printf '    %s logs --tail 80 auditdsec\n' "$(compose_prefix)"
     case "$MODE" in domain|ip|selfsigned) printf '    %s logs --tail 40 caddy\n' "$(compose_prefix)" ;; esac
     [ "$MODE" != ip ] || printf '    %s exec certbot python3 /hooks/certtool.py status\n' "$(compose_prefix)"
+    local img facts
+    img="${IMAGE:-$(env_get AUDITDSEC_IMAGE)}"
+    if [ -n "$img" ]; then
+        facts="$(image_facts "$img")"
+        printf '  Image:     %s\n' "$img"
+        printf '             version %s, commit %s\n' "${facts%%|*}" "$(printf '%s' "$facts" | cut -d'|' -f2)"
+        printf '             digest %s\n' "${facts##*|}"
+        [ -z "$(env_get PANEL_IMAGE_PREVIOUS)" ] || printf '             previous image (for going back): %s\n' "$(env_get PANEL_IMAGE_PREVIOUS)"
+    fi
     printf '  Run ./install.sh again to change anything: data, certificates and credentials are kept.\n'
     [ ! -s "$LAST_GOOD" ] || printf '  Back to the last verified configuration: ./install.sh --restore\n'
 
@@ -1774,6 +1965,7 @@ main() {
     ask_login
     ask_enforce
     ask_password
+    ensure_enforce_image              # before anything is written
 
     write_config                      # 6. configure and start
     build_compose_files
