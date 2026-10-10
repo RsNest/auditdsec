@@ -206,6 +206,8 @@ func (c *Client) handleCommand(ctx context.Context, m *tgMessage) {
 		c.cmdUnallow(ctx, chat, args)
 	case "/allowlist":
 		c.reply(ctx, chat, c.allowlistText())
+	case "/incidents":
+		c.cmdIncidents(ctx, chat)
 	case "/bans":
 		c.reply(ctx, chat, c.bansText())
 	case "/unban":
@@ -239,6 +241,8 @@ func (c *Client) handleCallback(ctx context.Context, q *callbackQuery, chat int6
 		answer = c.applyUnban(ctx, chat, arg)
 	case "allow":
 		answer = c.applyAllow(ctx, chat, arg)
+	case "inc":
+		answer = c.applyIncident(arg, chat)
 	case "mute":
 		hours, err := strconv.Atoi(arg)
 		if err != nil || hours <= 0 {

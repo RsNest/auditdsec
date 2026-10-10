@@ -866,3 +866,63 @@ func TestEventsExposeSessionContextAndMaskOldSecrets(t *testing.T) {
 		t.Errorf("an event without context must stay without: %+v", without)
 	}
 }
+
+func TestIncidentsAPI(t *testing.T) {
+	s, st, clock := newServer(t)
+	if _, err := st.InitDetection(); err != nil {
+		t.Fatal(err)
+	}
+	ev := model.Event{ID: "e1", Time: *clock, Host: "test-host", Kind: model.KindSSHLoginFail, Severity: model.SevWarn, SrcIP: "198.51.100.7", User: "root"}
+	c, err := st.AppendEventWithPlan(ev, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CommitDetectionEvent(c.Position, []store.DetectBan{{IP: "198.51.100.7", Reason: "6 failed logins within 10m", Until: clock.Add(time.Hour)}}, &ev); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := do(t, s, http.MethodGet, "/api/v1/incidents", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("incidents need a session: %d", rec.Code)
+	}
+	token := signIn(t, s)
+
+	var list struct {
+		Items []incidentJSON `json:"items"`
+	}
+	rec := do(t, s, http.MethodGet, "/api/v1/incidents", token, nil)
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list.Items) != 1 {
+		t.Fatalf("%v %s", err, rec.Body.String())
+	}
+	in := list.Items[0]
+	if in.State != "new" || in.SrcIP != "198.51.100.7" || !strings.Contains(in.Reason, "198.51.100.7") || strings.Contains(in.Reason, "incident.reason") {
+		t.Errorf("%+v", in)
+	}
+
+	rec = do(t, s, http.MethodPost, "/api/v1/incidents/"+in.ID, token, map[string]string{"action": "ack"})
+	var got incidentJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got.State != "acknowledged" || len(got.Notes) != 1 || len(got.Events) != 1 {
+		t.Fatalf("ack: %d %s", rec.Code, rec.Body.String())
+	}
+	// Repeating an action is harmless; unknown actions and IDs are refused.
+	if rec = do(t, s, http.MethodPost, "/api/v1/incidents/"+in.ID, token, map[string]string{"action": "ack"}); rec.Code != http.StatusOK {
+		t.Errorf("repeat: %d", rec.Code)
+	}
+	if rec = do(t, s, http.MethodPost, "/api/v1/incidents/"+in.ID, token, map[string]string{"action": "delete"}); rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown action: %d", rec.Code)
+	}
+	if rec = do(t, s, http.MethodPost, "/api/v1/incidents/inc-999", token, map[string]string{"action": "ack"}); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown id: %d", rec.Code)
+	}
+	do(t, s, http.MethodPost, "/api/v1/incidents/"+in.ID, token, map[string]string{"action": "resolve"})
+	rec = do(t, s, http.MethodGet, "/api/v1/incidents", token, nil)
+	if json.Unmarshal(rec.Body.Bytes(), &list); len(list.Items) != 0 {
+		t.Errorf("a resolved incident is not open: %d", len(list.Items))
+	}
+	rec = do(t, s, http.MethodGet, "/api/v1/incidents?state=all", token, nil)
+	if json.Unmarshal(rec.Body.Bytes(), &list); len(list.Items) != 1 || list.Items[0].State != "resolved" {
+		t.Errorf("all: %+v", list.Items)
+	}
+	if rec = do(t, s, http.MethodGet, "/api/v1/incidents?state=bogus", token, nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("bad state: %d", rec.Code)
+	}
+}

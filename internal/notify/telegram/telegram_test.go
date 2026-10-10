@@ -1154,3 +1154,42 @@ func TestAlertShowsLoginIdentityApartFromEffectiveAndSession(t *testing.T) {
 		t.Errorf("names must be escaped: %q", got)
 	}
 }
+
+func TestIncidentsCommandAndButtons(t *testing.T) {
+	f := newClient(t, nil)
+	if _, err := f.store.InitDetection(); err != nil {
+		t.Fatal(err)
+	}
+	ev := model.Event{ID: "e1", Time: f.now, Host: "web01", Kind: model.KindSSHLoginFail, Severity: model.SevWarn, SrcIP: "198.51.100.7"}
+	c, err := f.store.AppendEventWithPlan(ev, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.CommitDetectionEvent(c.Position, []store.DetectBan{{IP: "198.51.100.7", Reason: "<b>6 failed</b>", Until: f.now.Add(time.Hour)}}, &ev); err != nil {
+		t.Fatal(err)
+	}
+
+	f.api.reset()
+	f.client.handleUpdate(context.Background(), update{Message: &tgMessage{Chat: tgChat{ID: 100}, Text: "/incidents"}})
+	sent := f.api.sent()
+	if len(sent) != 1 || !strings.Contains(sent[0].Text, "inc-1") || !strings.Contains(sent[0].Text, "198.51.100.7") {
+		t.Fatalf("%+v", sent)
+	}
+	if strings.Contains(sent[0].Text, "<b>6 failed</b>") {
+		t.Errorf("audit-derived text must be escaped: %q", sent[0].Text)
+	}
+	if text := press(f, "inc:ack:inc-1"); !strings.Contains(text, "inc-1") || !strings.Contains(text, "принят") {
+		t.Errorf("ack: %q", text)
+	}
+	if in, _ := f.store.Incident("inc-1"); in.State != "acknowledged" || len(in.Notes) != 1 || !strings.HasPrefix(in.Notes[0].Actor, "telegram:") {
+		t.Errorf("%+v", in)
+	}
+	if text := press(f, "inc:resolve:inc-9"); !strings.Contains(text, "inc-9") {
+		t.Errorf("unknown: %q", text)
+	}
+	press(f, "inc:resolve:inc-1")
+	f.client.handleUpdate(context.Background(), update{Message: &tgMessage{Chat: tgChat{ID: 100}, Text: "/incidents"}})
+	if s := f.api.sent(); len(s) == 0 || !strings.Contains(s[len(s)-1].Text, "нет") {
+		t.Errorf("nothing open: %+v", s)
+	}
+}

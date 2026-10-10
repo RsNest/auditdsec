@@ -10,7 +10,7 @@
   var S = A.state;
 
   var R = {};
-  var model = { status: null, events: [], bans: [], allow: [], suspects: null, cfg: null, diag: null };
+  var model = { status: null, events: [], incidents: [], bans: [], allow: [], suspects: null, cfg: null, diag: null };
   var pendingBans = Object.create(null), modelRevision = 0;
   var deck = null, journal = null, engine = null, poll = null, observer = null, uid = 0;
 
@@ -251,7 +251,7 @@
 
   /* ---------------- the bar ---------------- */
 
-  var SECTIONS = [["overview", "nav.overview"], ["events", "nav.events"], ["addresses", "nav.addresses"], ["alerts", "nav.alerts"], ["system", "nav.system"]];
+  var SECTIONS = [["overview", "nav.overview"], ["events", "nav.events"], ["incidents", "nav.incidents"], ["addresses", "nav.addresses"], ["alerts", "nav.alerts"], ["system", "nav.system"]];
 
   function setLang() {
     S.lang = S.lang === "ru" ? "en" : "ru";
@@ -380,6 +380,10 @@
     R.roster = el("div", { class: "roster rv" });
     R.rosterSec = section("kinds", "sec", [head(t("roster.label"), t("roster.title"), el("p", { class: "callout rv", text: t("roster.hint") })), R.roster]);
 
+    /* incidents */
+    R.incTbl = el("div", { class: "tbl-wrap rv" });
+    R.incSec = section("incidents", "sec", [head(t("inc.label"), t("inc.title"), el("p", { class: "callout rv", text: t("inc.lede") })), R.incTbl]);
+
     /* addresses */
     R.bansTbl = el("div");
     R.allowTbl = el("div");
@@ -428,7 +432,7 @@
       R.bigWm = el("div", { class: "big-wm", "aria-hidden": "true" }, ["auditdsec", el("i", { text: "." })])
     ]);
 
-    add(main, [R.hero, R.fold, R.events, R.journal, R.rosterSec, R.addr, R.alertSec, R.system, R.close]);
+    add(main, [R.hero, R.fold, R.events, R.journal, R.rosterSec, R.incSec, R.addr, R.alertSec, R.system, R.close]);
     setupReveals();
   }
 
@@ -718,6 +722,33 @@
     ]));
   }
 
+  function paintIncidents() {
+    if (!R.incTbl) { return; }
+    clear(R.incTbl);
+    if (!model.incidents.length) { add(R.incTbl, el("div", { class: "tbl-empty", text: t("inc.empty") })); return; }
+    var act = function (id, action) {
+      A.api.incidentAction(id, action).then(function () { A.toast(t("inc.state." + (action === "ack" ? "acknowledged" : action === "resolve" ? "resolved" : "new")), "ok"); refresh(); },
+        function (e) { A.toast(errText(e), "err"); });
+    };
+    var btn = function (i, name, action) { return el("button", { class: "pill pill-quiet pill-sm", type: "button", text: t("inc.act." + name), onclick: function () { act(i.id, action); } }); };
+    add(R.incTbl, el("table", { class: "tbl" }, [
+      el("thead", null, el("tr", null, [el("th", { text: t("inc.col.reason") }), el("th", { text: t("inc.col.sev") }), el("th", { text: t("inc.col.state") }), el("th", { text: t("inc.col.events") }), el("th", { class: "r" })])),
+      el("tbody", null, model.incidents.map(function (i) {
+        var kinds = Object.keys(i.kinds || {}).map(function (k) { return t("kind." + k) + " ×" + i.kinds[k]; }).join(" · ");
+        return el("tr", null, [
+          cell(t("inc.col.reason"), [i.reason, el("small", { text: A.relative(i.last_seen) + (kinds ? " · " + kinds : "") + ((i.bans || []).length ? " · " + t("inc.bans") + " " + i.bans.join(", ") : "") })]),
+          cell(t("inc.col.sev"), A.feed.sevTag(i.severity)),
+          cell(t("inc.col.state"), t("inc.state." + i.state)),
+          cell(t("inc.col.events"), A.num(i.total)),
+          el("td", { class: "r" }, [
+            i.state === "new" ? btn(i, "acknowledged", "ack") : null,
+            i.state !== "resolved" ? btn(i, "resolved", "resolve") : btn(i, "new", "reopen")
+          ])
+        ]);
+      }))
+    ]));
+  }
+
   function paintBans() {
     if (!R.bansTbl) { return; }
     clear(R.bansTbl);
@@ -869,7 +900,7 @@
   function paintAll() {
     model.status = S.status;
     if (R.telegram) { A.Telegram.paint(R.telegram, model.telegram); }
-    paintHero(); paintFold(); paintRoster(); paintSuspects(); paintBans(); paintAllow(); paintAlerts(); paintSystem(); paintClose();
+    paintHero(); paintFold(); paintRoster(); paintSuspects(); paintIncidents(); paintBans(); paintAllow(); paintAlerts(); paintSystem(); paintClose();
     paintDeck(false);
     syncBanButtons();
   }
@@ -884,6 +915,7 @@
       return Promise.all([
         A.api.events("limit=200&since=" + encodeURIComponent(since)).then(function (p) { model.events = (p && p.items) || []; A.announceCritical(model.events); }, function () { }),
         A.api.bans().then(function (v) { if (current()) { model.bans = v || []; } }, function () { }),
+        A.api.incidents().then(function (v) { if (current()) { model.incidents = (v && v.items) || []; } }, function () { }),
         A.api.allowlist().then(function (v) { if (current()) { model.allow = v || []; } }, function () { }),
         A.api.suspects().then(function (v) { if (current()) { model.suspects = v; model.suspectsError = false; } },
           function () { if (current()) { model.suspectsError = true; } }),
@@ -941,7 +973,7 @@
     }
 
     var current = "";
-    [["overview", "overview"], ["events", "events"], ["journal", "events"], ["kinds", "events"], ["addresses", "addresses"], ["alerts", "alerts"], ["system", "system"]].forEach(function (pair) {
+    [["overview", "overview"], ["events", "events"], ["journal", "events"], ["kinds", "events"], ["incidents", "incidents"], ["addresses", "addresses"], ["alerts", "alerts"], ["system", "system"]].forEach(function (pair) {
       var node = document.getElementById(pair[0]);
       if (node && node.getBoundingClientRect().top <= vh * 0.4) { current = pair[1]; }
     });

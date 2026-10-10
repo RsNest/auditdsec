@@ -3,26 +3,41 @@ package i18n
 // catalogEN mirrors catalogRU key for key, placeholder for placeholder.
 var catalogEN = map[string]string{
 	// Event summaries.
-	"event.ssh_login_ok":           "Login: {user} from {ip}",
-	"event.ssh_login_fail":         "Failed login attempt: {user} from {ip}",
-	"event.auth_ok":                "Login via {service}: {user}",
-	"event.auth_fail":              "Failed authentication via {service}: {user}",
-	"ui.ctx.ssh":                   "SSH {addr}",
-	"ui.ctx.ssh_inferred":          "SSH {addr} (inferred)",
-	"ui.ctx.ssh_unknown":           "SSH address unknown",
-	"ui.ctx.ended":                 "session closed",
-	"event.login_after_bruteforce": "Successful login by {user} from {ip} after {fails} failed attempts",
-	"event.sudo":                   "{user} ran a command with elevated rights: {cmd}",
-	"event.user_change":            "Account change: {detail}",
-	"event.authorized_keys_change": "SSH key file {path} changed by {user}",
-	"event.persistence":            "Startup object {path} changed by {user}",
-	"event.config_change":          "Configuration file {path} changed by {user}",
-	"event.log_tamper":             "Logs or audit rules tampered with: {detail}, user {user}",
-	"event.suspicious_exec":        "Program executed from a temporary directory: {path}, user {user}",
-	"event.auditd_stopped":         "Audit service unavailable: {detail}",
-	"event.audit_silent":           "Audit log is silent: {detail}",
-	"event.panel_cert":             "Panel certificate: {detail}",
-	"event.unknown":                "Event {kind}",
+	"event.ssh_login_ok":                     "Login: {user} from {ip}",
+	"event.ssh_login_fail":                   "Failed login attempt: {user} from {ip}",
+	"event.auth_ok":                          "Login via {service}: {user}",
+	"event.auth_fail":                        "Failed authentication via {service}: {user}",
+	"ui.inc.none":                            "No open incidents.",
+	"ui.inc.more":                            "…and {n} more open incidents (see the panel).",
+	"ui.inc.line":                            "<b>{id}</b> · {sev} · {state}\n{reason}\nEvents: {total} · last <code>{last}</code>",
+	"ui.inc.btn.ack":                         "Acknowledge",
+	"ui.inc.btn.resolve":                     "Resolve",
+	"ui.inc.done":                            "{id}: {state}.",
+	"ui.inc.missing":                         "No incident {id}.",
+	"ui.inc.state.new":                       "new",
+	"ui.inc.state.acknowledged":              "acknowledged",
+	"ui.inc.state.resolved":                  "resolved",
+	"incident.reason.bruteforce_ban":         "{ip} was blocked after repeated failed logins ({detail})",
+	"incident.reason.login_after_bruteforce": "A login from {ip} succeeded right after a burst of failed attempts",
+	"incident.reason.action_in_session":      "A {kind} action by {user} in an SSH session from {ip}",
+	"incident.reason.audit":                  "The audit log became unavailable or silent",
+	"incident.reason.action":                 "A {kind} event by {user} needs attention",
+	"ui.ctx.ssh":                             "SSH {addr}",
+	"ui.ctx.ssh_inferred":                    "SSH {addr} (inferred)",
+	"ui.ctx.ssh_unknown":                     "SSH address unknown",
+	"ui.ctx.ended":                           "session closed",
+	"event.login_after_bruteforce":           "Successful login by {user} from {ip} after {fails} failed attempts",
+	"event.sudo":                             "{user} ran a command with elevated rights: {cmd}",
+	"event.user_change":                      "Account change: {detail}",
+	"event.authorized_keys_change":           "SSH key file {path} changed by {user}",
+	"event.persistence":                      "Startup object {path} changed by {user}",
+	"event.config_change":                    "Configuration file {path} changed by {user}",
+	"event.log_tamper":                       "Logs or audit rules tampered with: {detail}, user {user}",
+	"event.suspicious_exec":                  "Program executed from a temporary directory: {path}, user {user}",
+	"event.auditd_stopped":                   "Audit service unavailable: {detail}",
+	"event.audit_silent":                     "Audit log is silent: {detail}",
+	"event.panel_cert":                       "Panel certificate: {detail}",
+	"event.unknown":                          "Event {kind}",
 
 	// Severity labels.
 	"sev.info":     "info",
@@ -92,6 +107,7 @@ var catalogEN = map[string]string{
 		"/allowlist — show the allowlist\n" +
 		"/ban &lt;IP&gt; — block an address\n" +
 		"/bans — ban decisions\n" +
+		"/incidents — open incidents\n" +
 		"/unban &lt;IP&gt; — lift a ban\n" +
 		"/mute [hours] — mute alerts\n" +
 		"/unmute — unmute alerts\n" +

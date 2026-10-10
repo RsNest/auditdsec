@@ -4,26 +4,41 @@ package i18n
 // catalogEN with the same placeholders (enforced by i18n_test.go).
 var catalogRU = map[string]string{
 	// Event summaries.
-	"event.ssh_login_ok":           "Вход в систему: {user} с адреса {ip}",
-	"event.ssh_login_fail":         "Неудачная попытка входа: {user} с адреса {ip}",
-	"event.auth_ok":                "Вход через {service}: {user}",
-	"event.auth_fail":              "Неудачная аутентификация через {service}: {user}",
-	"ui.ctx.ssh":                   "SSH {addr}",
-	"ui.ctx.ssh_inferred":          "SSH {addr} (выведено)",
-	"ui.ctx.ssh_unknown":           "адрес SSH неизвестен",
-	"ui.ctx.ended":                 "сессия закрыта",
-	"event.login_after_bruteforce": "Успешный вход {user} с адреса {ip} после {fails} неудачных попыток",
-	"event.sudo":                   "{user} выполнил команду с повышением прав: {cmd}",
-	"event.user_change":            "Изменение учётных записей: {detail}",
-	"event.authorized_keys_change": "Изменён файл SSH-ключей {path}, пользователь {user}",
-	"event.persistence":            "Изменён объект автозапуска {path}, пользователь {user}",
-	"event.config_change":          "Изменён файл настроек {path}, пользователь {user}",
-	"event.log_tamper":             "Вмешательство в журналы или правила аудита: {detail}, пользователь {user}",
-	"event.suspicious_exec":        "Запуск программы из временного каталога: {path}, пользователь {user}",
-	"event.auditd_stopped":         "Служба аудита недоступна: {detail}",
-	"event.audit_silent":           "Журнал аудита молчит: {detail}",
-	"event.panel_cert":             "Сертификат панели: {detail}",
-	"event.unknown":                "Событие {kind}",
+	"event.ssh_login_ok":                     "Вход в систему: {user} с адреса {ip}",
+	"event.ssh_login_fail":                   "Неудачная попытка входа: {user} с адреса {ip}",
+	"event.auth_ok":                          "Вход через {service}: {user}",
+	"event.auth_fail":                        "Неудачная аутентификация через {service}: {user}",
+	"ui.inc.none":                            "Открытых инцидентов нет.",
+	"ui.inc.more":                            "…и ещё открытых инцидентов: {n} (см. панель).",
+	"ui.inc.line":                            "<b>{id}</b> · {sev} · {state}\n{reason}\nСобытий: {total} · последнее <code>{last}</code>",
+	"ui.inc.btn.ack":                         "Принять",
+	"ui.inc.btn.resolve":                     "Закрыть",
+	"ui.inc.done":                            "{id}: {state}.",
+	"ui.inc.missing":                         "Инцидента {id} нет.",
+	"ui.inc.state.new":                       "новый",
+	"ui.inc.state.acknowledged":              "принят",
+	"ui.inc.state.resolved":                  "закрыт",
+	"incident.reason.bruteforce_ban":         "{ip} заблокирован после повторных неудачных входов ({detail})",
+	"incident.reason.login_after_bruteforce": "Вход с {ip} удался сразу после серии неудачных попыток",
+	"incident.reason.action_in_session":      "Действие {kind} пользователя {user} в SSH-сессии с {ip}",
+	"incident.reason.audit":                  "Журнал аудита стал недоступен или молчит",
+	"incident.reason.action":                 "Событие {kind} пользователя {user} требует внимания",
+	"ui.ctx.ssh":                             "SSH {addr}",
+	"ui.ctx.ssh_inferred":                    "SSH {addr} (выведено)",
+	"ui.ctx.ssh_unknown":                     "адрес SSH неизвестен",
+	"ui.ctx.ended":                           "сессия закрыта",
+	"event.login_after_bruteforce":           "Успешный вход {user} с адреса {ip} после {fails} неудачных попыток",
+	"event.sudo":                             "{user} выполнил команду с повышением прав: {cmd}",
+	"event.user_change":                      "Изменение учётных записей: {detail}",
+	"event.authorized_keys_change":           "Изменён файл SSH-ключей {path}, пользователь {user}",
+	"event.persistence":                      "Изменён объект автозапуска {path}, пользователь {user}",
+	"event.config_change":                    "Изменён файл настроек {path}, пользователь {user}",
+	"event.log_tamper":                       "Вмешательство в журналы или правила аудита: {detail}, пользователь {user}",
+	"event.suspicious_exec":                  "Запуск программы из временного каталога: {path}, пользователь {user}",
+	"event.auditd_stopped":                   "Служба аудита недоступна: {detail}",
+	"event.audit_silent":                     "Журнал аудита молчит: {detail}",
+	"event.panel_cert":                       "Сертификат панели: {detail}",
+	"event.unknown":                          "Событие {kind}",
 
 	// Severity labels.
 	"sev.info":     "обычное",
@@ -93,6 +108,7 @@ var catalogRU = map[string]string{
 		"/allowlist — показать белый список\n" +
 		"/ban &lt;IP&gt; — заблокировать адрес\n" +
 		"/bans — решения о блокировках\n" +
+		"/incidents — открытые инциденты\n" +
 		"/unban &lt;IP&gt; — снять блокировку\n" +
 		"/mute [часы] — заглушить оповещения\n" +
 		"/unmute — включить оповещения\n" +
