@@ -59,18 +59,12 @@ All stages pass `model.Event`. After an event is delivered it goes to `detect`, 
 `Result` carries two things: ban decisions for `action`, and events the detector derived
 itself. A derived event is delivered but never fed back, so one cannot trigger another.
 
-Durable boundaries today: the source offset (`tail.json`), the day files of events and
+Durable boundaries today: the acknowledged source cursor (`tail.json`), the day files of events and
 `state.json`. Everything between them — the line channel, the assembler, the alert policy,
 the detector — is memory only.
 
-**Known defects, fixed in stage 1** (see **Target architecture**; nothing below is claimed
-as solved):
+**Remaining stage 1 defects** (see **Target architecture**):
 
-- the assembler closes every other open event when a record with another serial arrives,
-  so interleaved records (`SYSCALL(A) SYSCALL(B) PATH(A) EOE(A) ...`) are split;
-- the cursor is a bare offset: a file rotated while the agent was stopped is read from the
-  old offset, and the offset is saved once lines reach a channel, before the event is
-  assembled and stored — a crash in between loses those lines;
 - delivery is synchronous: a slow Telegram delays detection and reading; one rate limit
   covers critical and routine alerts; a dedup group is recorded before the send succeeds;
 - the brute-force tracker clears its failure history on a ban, so a successful login right
@@ -86,6 +80,39 @@ stays readable with `grep` and `jq`, which matters for a tool whose job is expla
 what happened. State that must be read back — allowlist, bans, mute deadline, the
 Telegram update offset — lives in `state_dir/state.json`, written atomically
 (temp file plus rename). A half-written last line after a crash is skipped on read.
+
+### Implemented recovery boundary (stage 1.1–1.2)
+
+The assembler tracks interleaved events independently and exposes the first byte of each
+open event. The pipeline saves its cursor only up to the earliest open event, after
+completed events have been appended and synced. Shutdown leaves unfinished events for
+replay. A journal failure stops the pipeline and agent rather than acknowledging input.
+
+Cursor schema 2 records the absolute path, file identity, random generation, byte offset
+and bounded head/anchor fingerprints. Live rename rotation drains the old descriptor;
+restart recovery searches uncompressed `audit.log.*` siblings. Copy-truncate starts a new
+generation. If the previous generation is unavailable, reading resumes from byte zero
+with an explicit source continuity warning. Compressed or removed rotations cannot be
+recovered. An identical rewrite without an observable identity/fingerprint change cannot
+be distinguished from an append.
+
+Legacy offset-only cursors replay the current file from zero. Retained legacy events are
+matched by timestamp, kind and raw evidence. A malformed cursor, or a missing cursor
+after `.tail.json.initialized` exists, fails closed. Do not remove that marker to work
+around an error: investigate the lost state and explicitly choose a recovery baseline.
+
+New events have a deterministic `event_id` based on source generation and audit identity.
+The store rejects retained duplicate IDs, including after restart. Its dedup cache is
+bounded (two daily Bloom filters and 4096 exact keys); Bloom positives are verified
+against disk. Incomplete journal tails are truncated before appending the next record.
+The API's existing `id` remains an ordinal pagination cursor, separate from `event_id`.
+
+This is a durable event boundary, not a transaction covering detection, firewall actions
+and notification delivery. A crash after journaling but before a side effect may leave
+that side effect unperformed; replay does not repeat already stored events. A durable
+outbox and decision reconciler remain required. Notifications still block detection.
+Day scans still read a whole day's events into memory; bounded dedup and the 16-line
+source queue do not make the entire store memory-bounded.
 
 Not SQLite, for now: the workload is append-only with a daily scan, which a file does
 well, and it keeps the dependency count at zero. The `store` API is narrow on purpose so
@@ -457,11 +484,11 @@ Interfaces only where there are already two clients, a retry or two implementati
 - **Stage 0** (done, branch `wip/acme-staging-production`): public HTTPS panel on a domain
   or IP and a chosen port, DNS / port / certificate checks from outside, installer error
   codes, mandatory first-time setup from `admin` / `admin`.
-- **Stage 1** (next), in this order:
-  1. assembler: many open events keyed by source, timestamp and serial; close on EOE or
+- **Stage 1** (in progress), in this order:
+  1. **implemented** — assembler: many open events keyed by source, timestamp and serial; close on EOE or
      timeout; caps with an `incomplete` event instead of silent loss; PATH chosen by
      `item` / `nametype`;
-  2. cursor with file identity and replay with a held cursor; stable event IDs;
+  2. **implemented** — cursor with file identity and replay with a held cursor; stable event IDs;
   3. durable outbox and channel workers; critical with a protected share; real counters;
   4. brute-force: correlation history kept apart from the ban cooldown;
   5. one sanitizer before storage, logs, API and messages (PROCTITLE, EXECVE argv);
