@@ -13,7 +13,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +27,8 @@ const (
 	dayLayout     = "2006-01-02"
 )
 
-// AllowEntry is an address that must never be banned.
+// AllowEntry is an address, or a CIDR network, that must never be banned. IP
+// holds its canonical text.
 type AllowEntry struct {
 	IP      string    `json:"ip"`
 	AddedAt time.Time `json:"added_at"`
@@ -44,7 +44,25 @@ type Ban struct {
 	Until     time.Time `json:"until,omitempty"`
 	Reason    string    `json:"reason,omitempty"`
 	Count     int       `json:"count"`
-	Applied   bool      `json:"applied"`
+	// Applied is kept for older readers: it is true exactly when State is
+	// "applied".
+	Applied bool `json:"applied"`
+
+	// What the decision wants is implied by the record itself: while it is
+	// active the address should be blocked. The fields below are what was
+	// last observed of the enforcement. They never say "blocked" for a
+	// backend that blocks nothing.
+	State      string    `json:"state,omitempty"` // StatePending ... StateExpired
+	Backend    string    `json:"backend,omitempty"`
+	VerifiedAt time.Time `json:"verified_at,omitempty"`
+	LastError  string    `json:"last_error,omitempty"`
+	Attempts   int       `json:"attempts,omitempty"`
+	Origin     string    `json:"origin,omitempty"` // detector, telegram, panel
+
+	// NoticeDue is set in the same write that records an automatic decision
+	// and cleared once its notification is in the outbox, so a crash between
+	// the two cannot lose the notice.
+	NoticeDue bool `json:"notice_due,omitempty"`
 }
 
 // Permanent reports whether the ban has no expiry.
@@ -54,10 +72,13 @@ func (b Ban) Permanent() bool { return b.Until.IsZero() }
 func (b Ban) Active(t time.Time) bool { return b.Permanent() || t.Before(b.Until) }
 
 type persisted struct {
-	Allowlist  map[string]AllowEntry `json:"allowlist"`
-	Bans       map[string]Ban        `json:"bans"`
-	MutedUntil time.Time             `json:"muted_until,omitempty"`
-	Meta       map[string]string     `json:"meta,omitempty"`
+	Allowlist map[string]AllowEntry `json:"allowlist"`
+	Bans      map[string]Ban        `json:"bans"`
+	// Releases are addresses whose block must be lifted: the owner asked for
+	// it (unban, allow) and the firewall has not confirmed yet.
+	Releases   map[string]Release `json:"releases,omitempty"`
+	MutedUntil time.Time          `json:"muted_until,omitempty"`
+	Meta       map[string]string  `json:"meta,omitempty"`
 }
 
 // Options configures a Store.
@@ -109,6 +130,7 @@ func Open(o Options) (*Store, error) {
 		state: persisted{
 			Allowlist: map[string]AllowEntry{},
 			Bans:      map[string]Ban{},
+			Releases:  map[string]Release{},
 			Meta:      map[string]string{},
 		},
 	}
@@ -276,151 +298,6 @@ func (s *Store) Stats(window time.Duration) (Stats, error) {
 	return out, nil
 }
 
-// Allow adds an address to the allowlist, so it can never be banned. This is
-// what the "that was me" button does, and what protects an owner on a dynamic
-// address from locking themselves out.
-func (s *Store) Allow(ip, note string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.state.Allowlist[ip] = AllowEntry{IP: ip, AddedAt: s.now(), Note: note}
-	delete(s.state.Bans, ip)
-	return s.saveStateLocked()
-}
-
-// IsAllowed reports whether the address is allowlisted.
-func (s *Store) IsAllowed(ip string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.state.Allowlist[ip]
-	return ok
-}
-
-// Unallow removes an address from the allowlist, reporting whether it was there.
-func (s *Store) Unallow(ip string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.state.Allowlist[ip]; !ok {
-		return false, nil
-	}
-	delete(s.state.Allowlist, ip)
-	return true, s.saveStateLocked()
-}
-
-// Allowlist returns the allowlist, sorted by address.
-func (s *Store) Allowlist() []AllowEntry {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]AllowEntry, 0, len(s.state.Allowlist))
-	for _, e := range s.state.Allowlist {
-		out = append(out, e)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
-	return out
-}
-
-// ErrAllowlisted is returned when a ban is refused because the address is
-// allowlisted. Refusing here, in the store, means no caller can bypass it.
-var ErrAllowlisted = fmt.Errorf("store: address is allowlisted")
-
-// RecordBan stores a ban decision, incrementing the repeat counter for an
-// address that has been banned before.
-func (s *Store) RecordBan(ip, reason string, until time.Time) (Ban, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.recordBanLocked(ip, reason, until)
-}
-
-// EnsureBan creates a decision only when there is no active ban. Repeated
-// requests retain the original duration, reason and repeat count. The check
-// and persistence share the store lock, including across different callers.
-func (s *Store) EnsureBan(ip, reason string, until time.Time) (Ban, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.state.Allowlist[ip]; ok {
-		return Ban{}, false, ErrAllowlisted
-	}
-	if b, ok := s.state.Bans[ip]; ok && b.Active(s.now()) {
-		return b, false, nil
-	}
-	b, err := s.recordBanLocked(ip, reason, until)
-	return b, err == nil, err
-}
-
-func (s *Store) recordBanLocked(ip, reason string, until time.Time) (Ban, error) {
-	if _, ok := s.state.Allowlist[ip]; ok {
-		return Ban{}, ErrAllowlisted
-	}
-	previous, existed := s.state.Bans[ip]
-	b := previous
-	b.IP = ip
-	b.CreatedAt = s.now()
-	b.Until = until
-	b.Reason = reason
-	b.Count++
-	b.Applied = false
-	s.state.Bans[ip] = b
-	if err := s.saveStateLocked(); err != nil {
-		if existed {
-			s.state.Bans[ip] = previous
-		} else {
-			delete(s.state.Bans, ip)
-		}
-		return Ban{}, err
-	}
-	return b, nil
-}
-
-// MarkBanApplied records that a Banner actually enforced the decision on the
-// host, which v0.1 never does and v0.2 will.
-func (s *Store) MarkBanApplied(ip string) error {
-	return s.setBanApplied(ip, true)
-}
-
-// MarkBanUnapplied clears stale confirmation when startup enforcement fails.
-func (s *Store) MarkBanUnapplied(ip string) error {
-	return s.setBanApplied(ip, false)
-}
-
-func (s *Store) setBanApplied(ip string, applied bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	b, ok := s.state.Bans[ip]
-	if !ok {
-		return nil
-	}
-	previous := b
-	b.Applied = applied
-	s.state.Bans[ip] = b
-	if err := s.saveStateLocked(); err != nil {
-		s.state.Bans[ip] = previous
-		return err
-	}
-	return nil
-}
-
-// Bans returns every recorded ban, newest first.
-func (s *Store) Bans() []Ban {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]Ban, 0, len(s.state.Bans))
-	for _, b := range s.state.Bans {
-		out = append(out, b)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
-	return out
-}
-
-// Unban removes a ban decision, reporting whether it existed.
-func (s *Store) Unban(ip string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.state.Bans[ip]; !ok {
-		return false, nil
-	}
-	delete(s.state.Bans, ip)
-	return true, s.saveStateLocked()
-}
-
 // Mute silences non-critical alerts until the given time.
 func (s *Store) Mute(until time.Time) error {
 	s.mu.Lock()
@@ -557,6 +434,7 @@ func (s *Store) loadState() error {
 		p.Meta = map[string]string{}
 	}
 	s.state = p
+	s.canonicalizeLocked()
 	return nil
 }
 
@@ -584,12 +462,8 @@ func (s *Store) saveStateLocked() error {
 		return fmt.Errorf("store: encode state: %w", err)
 	}
 	path := filepath.Join(s.dir, stateFileName)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o640); err != nil {
+	if err := writeFileAtomic(path, b, 0o640); err != nil {
 		return fmt.Errorf("store: write state: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("store: replace state: %w", err)
 	}
 	return nil
 }
