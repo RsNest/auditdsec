@@ -92,6 +92,9 @@ type Options struct {
 	// Sessions, when set, attributes audited actions to login sessions. It is
 	// context for people only: nothing here feeds detection or bans.
 	Sessions *session.Tracker
+	// Journal, when set, feeds Sessions from the systemd journal in the
+	// background. It is optional and never blocks ingestion.
+	Journal *session.Follower
 	// Banner applies decisions on the host. Nil, or the no-op banner, means
 	// decisions are recorded and reported but nothing is blocked.
 	Banner action.Banner
@@ -248,6 +251,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// else: a block lost across a restart is put back, one that was never
 	// confirmed is retried. The comparison then repeats in the background.
 	go p.reconcileLoop(ctx)
+	if p.opt.Journal != nil {
+		go p.opt.Journal.Run(ctx)
+	}
 	if p.outbox != nil {
 		workerctx, cancel := context.WithCancel(ctx)
 		done := make(chan struct{})
@@ -425,14 +431,7 @@ func (p *Pipeline) acknowledge() error {
 		positions[start] = c
 	}
 	p.openPositions = positions
-	// The session table is saved before the cursor moves past the records it
-	// was learned from, so a restart either has the session or re-reads the
-	// records that define it. Losing it is not fatal: it is context only.
-	if p.opt.Sessions != nil && p.opt.Sessions.Dirty() && p.sessionPath != "" {
-		if err := p.opt.Sessions.Save(p.sessionPath); err != nil {
-			p.log.Warn("cannot save the session table; attribution may be incomplete after a restart", "error", err)
-		}
-	}
+	p.saveSessions()
 	checkpoint := p.current
 	if start, ok := p.asm.OldestOpen(); ok {
 		checkpoint = positions[start]
@@ -1031,4 +1030,17 @@ func (p *Pipeline) PanelCertStatus() string {
 		return "not checked yet"
 	}
 	return p.certStatus
+}
+
+// saveSessions writes the session table when it changed. It runs before the
+// source cursor moves past the records the table was learned from, so a restart
+// either has the session or re-reads the records that define it. Losing it is
+// not fatal: it is context only.
+func (p *Pipeline) saveSessions() {
+	if p.opt.Sessions == nil || !p.opt.Sessions.Dirty() || p.sessionPath == "" {
+		return
+	}
+	if err := p.opt.Sessions.Save(p.sessionPath); err != nil {
+		p.log.Warn("cannot save the session table; attribution may be incomplete after a restart", "error", err)
+	}
 }

@@ -67,6 +67,17 @@ type HeartbeatConfig struct {
 	CheckEvery time.Duration
 }
 
+// SessionConfig controls the attribution of audited actions to SSH sessions.
+// The audit-based attribution is always on; this only switches the optional,
+// read-only enrichment from the systemd journal.
+type SessionConfig struct {
+	// Journald lets the agent read sshd's "Accepted" lines from the journal
+	// to place sessions whose audit records carry no remote address. The
+	// result is marked "correlated", never "observed". Missing journalctl or
+	// permissions only disable it.
+	Journald bool
+}
+
 // DetectConfig is the brute-force detector.
 type DetectConfig struct {
 	Enabled       bool
@@ -180,6 +191,7 @@ type Config struct {
 	Telegram  TelegramConfig
 	Store     StoreConfig
 	Heartbeat HeartbeatConfig
+	Session   SessionConfig
 	Detect    DetectConfig
 	Ban       BanConfig
 	CrowdSec  CrowdSecConfig
@@ -224,6 +236,7 @@ func Defaults(profile string) *Config {
 		},
 		Store:     StoreConfig{RetentionDays: 14, MaxRecent: 200},
 		Heartbeat: HeartbeatConfig{Enabled: true, StaleAfter: 6 * time.Hour, CheckEvery: time.Minute},
+		Session:   SessionConfig{Journald: true},
 		Detect: DetectConfig{
 			Enabled: true, Window: 10 * time.Minute, FailThreshold: 6,
 			SuccessAfterFailures: 6, MaxTracked: 10000,
@@ -298,7 +311,7 @@ func (c *Config) decode(root *node) error {
 	d := &dec{}
 	d.strict(root, "", "schema_version", "profile", "lang", "host", "audit_log", "state_dir",
 		"read_from_start", "debug", "log", "telegram", "store", "heartbeat",
-		"detect", "ban", "crowdsec", "web")
+		"detect", "ban", "crowdsec", "web", "session")
 
 	d.str(root, "lang", &c.Lang)
 	d.str(root, "host", &c.Host)
@@ -342,6 +355,11 @@ func (c *Config) decode(root *node) error {
 		d.boolean(n, "enabled", &c.Heartbeat.Enabled)
 		d.duration(n, "stale_after", &c.Heartbeat.StaleAfter)
 		d.duration(n, "check_every", &c.Heartbeat.CheckEvery)
+	}
+
+	if n := d.section(root, "session"); n != nil {
+		d.strict(n, "session", "journald")
+		d.boolean(n, "journald", &c.Session.Journald)
 	}
 
 	if n := d.section(root, "detect"); n != nil {
@@ -792,6 +810,7 @@ func (c *Config) Redacted() string {
 	}
 	fmt.Fprintf(&b, "store:            %d days, %d recent\n", c.Store.RetentionDays, c.Store.MaxRecent)
 	fmt.Fprintf(&b, "heartbeat:        enabled=%t stale_after=%s every=%s\n", c.Heartbeat.Enabled, shortDur(c.Heartbeat.StaleAfter), shortDur(c.Heartbeat.CheckEvery))
+	fmt.Fprintf(&b, "session:          journald=%t\n", c.Session.Journald)
 	fmt.Fprintf(&b, "detect:           enabled=%t window=%s threshold=%d success_after=%d\n",
 		c.Detect.Enabled, shortDur(c.Detect.Window), c.Detect.FailThreshold, c.Detect.SuccessAfterFailures)
 	fmt.Fprintf(&b, "ban:              backend=%s dry_run=%t auto_allowlist=%s\n",

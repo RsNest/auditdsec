@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -586,6 +587,15 @@ func cmdRun(args []string) error {
 		detector = bf
 	}
 
+	sessions := session.New(session.Options{}, session.ReadBootID())
+	var journal *session.Follower
+	if cfg.Session.Journald {
+		if _, err := exec.LookPath("journalctl"); err != nil {
+			log.Info("journalctl is not available: session addresses come from the audit log only")
+		} else {
+			journal = &session.Follower{Tracker: sessions, Reader: session.ExecReader{}, BootID: session.ReadBootID, Log: log}
+		}
+	}
 	pl, err := pipeline.New(pipeline.Options{
 		AuditLog:                cfg.AuditLog,
 		StateDir:                cfg.StateDir,
@@ -596,7 +606,8 @@ func cmdRun(args []string) error {
 		HeartbeatStale:          cfg.Heartbeat.StaleAfter,
 		Debug:                   cfg.Debug,
 		Detector:                detector,
-		Sessions:                session.New(session.Options{}, session.ReadBootID()),
+		Sessions:                sessions,
+		Journal:                 journal,
 		Banner:                  banner,
 		AutoAllowlistFirstLogin: autoAllow == config.AutoAllowFirstLogin,
 		Decisions:               dec,

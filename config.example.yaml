@@ -154,3 +154,12 @@ crowdsec:
   mode: push           # push, pull or both
   lapi_url: http://127.0.0.1:8080
   api_key: ""
+
+# Which login session an audited command belongs to. The audit log alone
+# already links a command to its SSH session and remote address when sshd's
+# records carry the address. With journald: true the agent also reads sshd's
+# "Accepted ... from <ip>" lines (read-only, bounded, never blocking) to place
+# sessions whose audit records have no address; such an address is shown as
+# "correlated", not "observed". Without journalctl or permission it is skipped.
+session:
+  journald: true
