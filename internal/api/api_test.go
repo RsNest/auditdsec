@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -778,5 +779,27 @@ func TestShortDur(t *testing.T) {
 		if got := shortDur(in); got != want {
 			t.Errorf("shortDur(%s) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A state directory that cannot be written is found at start, before anyone
+// fills in the setup form whose result could not be saved.
+func TestUnwritableStateDirStopsFirstTimeSetup(t *testing.T) {
+	s, _ := bootServer(t)
+	cfg := s.opt.Config
+	blocker := filepath.Join(t.TempDir(), "a-file")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.StateDir = filepath.Join(blocker, "state") // a directory under a file: never creatable
+	s2, err := New(Options{Config: cfg, Store: s.opt.Store, Logger: s.log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state(t, s2); got != StateLocked {
+		t.Fatalf("state = %s, want %s", got, StateLocked)
+	}
+	if r := firstLogin(t, s2); r.Code == 200 {
+		t.Errorf("admin/admin opened a setup that could not be saved: %d %s", r.Code, r.Body)
 	}
 }

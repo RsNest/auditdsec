@@ -199,7 +199,20 @@ func (s *Server) loadCreds() error {
 		}
 	}
 	if encoded == "" {
-		return nil // first-time setup
+		// First-time setup. It ends by writing the managed credentials, so a
+		// state directory that cannot be written would let the owner fill in
+		// the form and then lose the result. Find that out now and say so
+		// (state "locked"), instead of opening a setup that cannot finish.
+		if cp != "" {
+			dir := s.opt.Config.StateDir
+			if err := writeAtomic(dir, ".write-check", []byte("1\n")); err != nil {
+				s.cred.lock("the state directory cannot be written")
+				s.log.Error("panel first-time setup is stopped: the state directory cannot be written, so the new credentials could not be saved", "dir", dir, "error", err)
+				return nil
+			}
+			_ = os.Remove(filepath.Join(dir, ".write-check"))
+		}
+		return nil
 	}
 	h, err := parseHash(encoded)
 	if err != nil {
