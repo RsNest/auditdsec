@@ -356,11 +356,10 @@ func (p *Pipeline) emit(ctx context.Context, events []*parse.Event) error {
 	return nil
 }
 
-// handle delivers an event and then runs it past the detector. Events the
-// detector produces are delivered but never fed back into it, so a derived
-// event cannot trigger another one.
+// handle journals an event before detection, and enforces its decisions before
+// sending the triggering alert. Derived events are never fed back into detection.
 func (p *Pipeline) handle(ctx context.Context, ev model.Event) error {
-	added, err := p.deliver(ctx, ev)
+	added, err := p.persistEvent(ev)
 	if err != nil {
 		return err
 	}
@@ -369,10 +368,14 @@ func (p *Pipeline) handle(ctx context.Context, ev model.Event) error {
 	}
 	p.autoAllowlist(ctx, ev)
 
-	if p.opt.Detector == nil {
-		return nil
+	var res detect.Result
+	if p.opt.Detector != nil {
+		res = p.opt.Detector.Feed(ev)
 	}
-	res := p.opt.Detector.Feed(ev)
+	for _, d := range res.Decisions {
+		p.applyDecision(ctx, d)
+	}
+	p.notifyEvent(ctx, ev)
 	for n, derived := range res.Events {
 		if ev.ID != "" {
 			derived.ID = fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d", ev.ID, derived.Kind, n))))
@@ -381,9 +384,6 @@ func (p *Pipeline) handle(ctx context.Context, ev model.Event) error {
 		if _, err := p.deliver(ctx, derived); err != nil {
 			return err
 		}
-	}
-	for _, d := range res.Decisions {
-		p.applyDecision(ctx, d)
 	}
 	return nil
 }
@@ -433,7 +433,7 @@ func (p *Pipeline) applyDecision(ctx context.Context, d action.Decision) {
 			ban.Applied = true
 		}
 	}
-	p.log.Warn("address banned",
+	p.log.Warn("ban decision recorded",
 		"ip", d.IP, "reason", d.Reason, "until", untilLabel(d.Until),
 		"repeat", ban.Count, "applied", applyErr == nil && p.opt.Banner != nil)
 
@@ -510,6 +510,14 @@ func (p *Pipeline) reapplyBans(ctx context.Context) {
 }
 
 func (p *Pipeline) deliver(ctx context.Context, ev model.Event) (bool, error) {
+	added, err := p.persistEvent(ev)
+	if added && err == nil {
+		p.notifyEvent(ctx, ev)
+	}
+	return added, err
+}
+
+func (p *Pipeline) persistEvent(ev model.Event) (bool, error) {
 	added, err := p.opt.Store.AppendEventOnce(ev)
 	if err != nil {
 		p.log.Error("cannot store the event", "kind", ev.Kind, "error", err)
@@ -519,17 +527,17 @@ func (p *Pipeline) deliver(ctx context.Context, ev model.Event) (bool, error) {
 		}
 		return false, err
 	}
-	if !added {
-		return false, nil
-	}
+	return added, nil
+}
+
+func (p *Pipeline) notifyEvent(ctx context.Context, ev model.Event) {
 	if err := p.opt.Notifier.Notify(ctx, ev); err != nil {
 		p.log.Error("cannot send the alert", "kind", ev.Kind, "error", err)
-		return true, nil
+		return
 	}
 	p.reported.Add(1)
 	p.log.Debug("event handled",
 		"kind", ev.Kind, "severity", ev.Severity.String(), "user", ev.User, "ip", ev.SrcIP)
-	return true, nil
 }
 
 // checkHeartbeat reports the audit log going unreadable or silent. Silence is

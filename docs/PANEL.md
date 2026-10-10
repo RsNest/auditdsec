@@ -11,6 +11,38 @@ TLS, и только когда это выбрал владелец в `./insta
 
 ## Как включить
 
+### Suspicious address review
+
+The address section contains a deduplicated review list of failed SSH authentication
+sources inside the configured detection window. Low-frequency sources (one to five
+failures with the default threshold) are for manual review. The sixth failure triggers
+an automatic ban decision. Confirmed active blocks and allowlisted addresses leave
+the review queue; all underlying attempts remain in the event journal. Critical
+evidence such as `login_after_bruteforce` stays visible even after blocking its source.
+
+After a successful firewall ban, the deck immediately removes ordinary cards for that
+address and shows the next remaining card. Buttons are disabled while confirmation or
+the request is pending, and already blocked addresses cannot be banned again from a
+journal card. Repeated API requests retain the original ban and repeat count.
+
+Failed or disabled enforcement never displays a successful block. The decision remains
+recorded, the source stays visible with `needs_attention`, and a manual retry can apply
+the same decision. Real automatic blocking requires detection enabled and an enforcing
+nftables deployment (`./install.sh --enforce`); the default minimal image records decisions
+without changing the firewall. Existing explicit detection settings are not overwritten.
+
+`GET /api/v1/suspects` requires a completed-setup session. It returns `items` with
+`ip`, `attempts`, `first`, `last`, `state` (`review` or `needs_attention`), and the latest
+representative `event`, plus `threshold`, `window_seconds`, `auto_enforcing` and `truncated`.
+Aggregation streams journal records rather than using the latest 200-event page. At most
+10,000 addresses are tracked (or the smaller configured `detect.max_tracked`), and 100
+are returned; attention items take priority, followed by low-frequency review items.
+When `truncated` is true, the UI explicitly points to the full journal. Counts use the
+journal and timestamps; they describe observed failures rather than unique TCP packets.
+
+`POST /api/v1/bans` returns the ban with `already_banned`. A successful recorded-only
+decision has `applied: false`; firewall rejection returns `502` with `error: "firewall"`.
+
 Обычный путь — `./install.sh` (README, «Веб-панель»): он спрашивает домен или IP,
 проверяет DNS, выбирает публичный HTTPS-порт, проверяет его снаружи и печатает ссылку.
 

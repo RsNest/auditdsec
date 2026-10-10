@@ -55,9 +55,10 @@ source → parse → semantic → ┬→ store
   in-memory ring for `/last`.
 - `notify` (**internal/notify/telegram**) applies the alert policy and talks to the API.
 
-All stages pass `model.Event`. After an event is delivered it goes to `detect`, whose
+All stages pass `model.Event`. After an event is journaled it goes to `detect`, whose
 `Result` carries two things: ban decisions for `action`, and events the detector derived
-itself. A derived event is delivered but never fed back, so one cannot trigger another.
+itself. Decisions are applied before sending the triggering alert. A derived event is
+delivered but never fed back, so one cannot trigger another.
 
 Durable boundaries today: the acknowledged source cursor (`tail.json`), the day files of events and
 `state.json`. Everything between them — the line channel, the assembler, the alert policy,
@@ -67,8 +68,6 @@ the detector — is memory only.
 
 - delivery is synchronous: a slow Telegram delays detection and reading; one rate limit
   covers critical and routine alerts; a dedup group is recorded before the send succeeds;
-- the brute-force tracker clears its failure history on a ban, so a successful login right
-  after the ban threshold is not correlated;
 - `PROCTITLE` and other encodings of a command line are not all masked before storage;
 - bans: addresses are compared as strings, an allowlist entry can remove a ban the firewall
   failed to lift, and `Applied` is not the observed firewall state.
@@ -138,10 +137,18 @@ threshold; and a derived `login_after_bruteforce` event, when a login succeeds f
 address that has just failed many times. The second is the signal that matters most and
 it exists nowhere in the audit log: it is a pattern across records, not a record.
 
-After a decision the counter resets, and another ban for the same address is held off for
-one window, so a burst cannot re-ban on every packet. Tracked addresses are capped and
-evicted least-recently-seen first, so a spray from thousands of sources cannot grow the
-agent's memory.
+New defaults trigger on the sixth failed SSH login, inside ten minutes for the standard
+profile. Explicit `detect.fail_threshold` and `detect.window` overrides are preserved.
+Successful logins and arbitrary network connections do not increment this counter.
+
+Failure history survives a ban; a separate cooldown prevents another decision inside
+one window. A separate correlation flag suppresses repeated successful-login signals
+until new failure evidence arrives. Timestamp history per IP is capped at the larger
+of the ban and correlation thresholds; tracked addresses are capped and evicted
+least-recently-seen first. Startup restores recent failures from the committed journal
+without producing historical decisions: five failures before restart plus one after
+restart still meet the threshold. Notification delivery remains synchronous; earlier
+alerts can still delay reading subsequent records until the durable outbox is implemented.
 
 ## Bans
 
@@ -153,6 +160,14 @@ edited, and uninstalling is one `nft delete table` away.
 The table is recreated at startup and the store's active bans are pushed back into it.
 That makes the store the source of truth instead of whatever survived a reboot, at the
 cost of a short window during a restart where nothing is blocked.
+
+Panel, detector and Telegram use `Store.EnsureBan`: an active decision retains its
+original reason, expiry and repeat count. A failed panel request can retry enforcement
+without recording another offence. Expired decisions can create the next offence.
+Panel requests are serialized against other panel ban/unban/allow actions. Startup clears
+confirmation for failed reapplications; disabled enforcement is exposed as recorded-only.
+`Applied` remains the last confirmed result, not continuous observation of firewall state;
+cross-interface reconciliation and an operator action journal remain stage 1.6 work.
 
 Three decisions worth keeping:
 
@@ -244,8 +259,8 @@ recorded but does not page anyone), 14 days of retention, 10 messages a minute, 
 minute dedup window, heartbeat at 6 hours.
 
 `pro`: alerts from `info`, 90 days, 30 messages a minute, a 5 minute dedup window,
-heartbeat at 2 hours, and a tighter brute-force threshold (5 failures in 5 minutes
-against 10 in 10). v0.4 adds what the profile is really for: several hosts in one chat, Prometheus
+heartbeat at 2 hours, and a shorter brute-force window (6 failures in 5 minutes
+against 6 in 10). v0.4 adds what the profile is really for: several hosts in one chat, Prometheus
 metrics, alert routing.
 
 ## Heartbeat
@@ -490,7 +505,8 @@ Interfaces only where there are already two clients, a retry or two implementati
      `item` / `nametype`;
   2. **implemented** — cursor with file identity and replay with a held cursor; stable event IDs;
   3. durable outbox and channel workers; critical with a protected share; real counters;
-  4. brute-force: correlation history kept apart from the ban cooldown;
+  4. **implemented** — brute-force: bounded correlation history kept apart from the ban
+     cooldown, recent failures restored from the journal;
   5. one sanitizer before storage, logs, API and messages (PROCTITLE, EXECVE argv);
   6. `DecisionService`: canonical addresses, desired vs observed state, reconciler,
      nftables timeout refresh; first-login auto-allowlist off for new installations;
