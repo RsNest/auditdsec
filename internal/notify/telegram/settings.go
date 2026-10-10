@@ -352,7 +352,15 @@ func writeSettings(path string, s Settings) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	return os.Rename(f.Name(), path)
+	if err := os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	// Match credential persistence: best-effort directory sync after rename.
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
 }
 
 func (m *Managed) SetDiag(f DiagFunc) {

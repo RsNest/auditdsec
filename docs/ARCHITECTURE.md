@@ -157,9 +157,28 @@ whole feature is locking the owner out of their own server.
   replacing the hex form of a sudo command in the retained evidence — hex is trivially
   reversible, so storing it would store the password.
 - The bot token never reaches a log or an error string.
-- The bot answers only allowlisted chat ids and refuses to start without that list.
+- The bot answers only allowlisted chat ids. Without a token and recipients the agent
+  still collects events and serves the panel, but Telegram polling and delivery stay off.
 - Values taken from the log are HTML-escaped before they reach a message, so a file path
   cannot forge markup.
+
+Telegram configuration is owned by `telegram.Managed`: immutable clients are replaced
+when a full owner session saves the panel's settings. The old poll, commands and grouped
+sends drain before the new client starts; update cursors are namespaced by token hash.
+`state/telegram-settings.json` (schema version 1, mode 0600) overrides initial YAML/env
+settings. The file is atomically replaced before live state changes. A failed verification
+or write retains the old policy; a corrupt or unreadable saved file disables Telegram
+instead of silently restoring an env token. API reads return `has_token`, never the secret.
+Verification calls `getMe`; only an explicit test sends messages to draft recipients.
+Neither operation saves the draft. The recipient list also authorizes bot commands.
+
+The panel's Alerts section edits recipients, event kinds, bans/startup notices, severity,
+quiet hours and rate limit in a RU/EN dialog. Critical events bypass mute and quiet hours;
+an explicit category exclusion or disabling Telegram suppresses critical delivery too.
+Delivery status confirms successful delivery for the current token and recipient list,
+not merely a successful token check. Dialog drafts and tokens are never stored in browser
+storage. The installer can skip Telegram and selects/persists its own language before
+preflight; display translation does not change installer state or machine-readable output.
 
 ## Layout
 
