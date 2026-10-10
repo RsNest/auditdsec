@@ -117,6 +117,9 @@ type Event struct {
 	// late). Empty for a complete event. The event is evidence either way,
 	// but an incomplete one is not proof of everything that happened.
 	Incomplete string `json:"incomplete,omitempty"`
+	// Context is the process and session attribution; see Context. Absent on
+	// events stored before it existed.
+	Context *Context `json:"context,omitempty"`
 }
 
 // Arg returns one rendering argument, or the empty string.
@@ -138,4 +141,56 @@ func (e Event) DedupKey() string {
 		e.Arg("cmd"),
 		e.Arg("detail"),
 	}, "|")
+}
+
+// Attribution confidence levels of a Context.Session.
+const (
+	// ConfObserved: an audit record written by sshd for this session ID carried
+	// the remote address itself.
+	ConfObserved = "observed"
+	// ConfCorrelated: the address comes from a journal line joined to the audit
+	// session by sshd's PID, the user and a narrow time window, and the join was
+	// unique. Inferred; never as strong as ConfObserved.
+	ConfCorrelated = "correlated"
+	// ConfUnknown: no safe attribution. Session.Note says why.
+	ConfUnknown = "unknown"
+)
+
+// Context says who was behind an audited action and where the login that
+// started it came from. Everything here is evidence attached to the event for a
+// human; none of it is used to detect, decide or ban. Empty fields are unknown,
+// never guessed.
+type Context struct {
+	// LoginUID/LoginUser: the identity that authenticated at login (audit
+	// auid), which does not change when the process becomes root.
+	LoginUID  string `json:"login_uid,omitempty"`
+	LoginUser string `json:"login_user,omitempty"`
+	// EffectiveUID/EffectiveUser: the identity the action ran as.
+	EffectiveUID  string `json:"effective_uid,omitempty"`
+	EffectiveUser string `json:"effective_user,omitempty"`
+	// SessionID is the kernel audit session ID (ses=). It is reused after a
+	// reboot, so it is meaningless without the boot it belongs to.
+	SessionID string `json:"session_id,omitempty"`
+	PID       string `json:"pid,omitempty"`
+	PPID      string `json:"ppid,omitempty"`
+	Exe       string `json:"exe,omitempty"`
+	// Command is sanitized like every command the agent stores.
+	Command string `json:"command,omitempty"`
+	// Session is the SSH session the action belongs to, when that is proven or
+	// safely inferred. It is deliberately separate from Event.SrcIP, which is
+	// the address of an authentication attempt seen directly.
+	Session *SessionRef `json:"session,omitempty"`
+}
+
+// SessionRef is the attribution of an action to a login session.
+type SessionRef struct {
+	Addr       string `json:"addr,omitempty"`
+	Port       string `json:"port,omitempty"`
+	Source     string `json:"source,omitempty"` // "audit" or "journald"; empty when unknown
+	Confidence string `json:"confidence"`       // ConfObserved, ConfCorrelated, ConfUnknown
+	// Ended is true when the session had already closed when the action ran:
+	// a process that outlived its login.
+	Ended bool `json:"ended,omitempty"`
+	// Note explains an unknown or weak attribution.
+	Note string `json:"note,omitempty"`
 }

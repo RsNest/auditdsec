@@ -186,6 +186,7 @@ func (m *Mapper) MapVerbose(ev *parse.Event) (model.Event, string, bool) {
 	if !ev.Complete {
 		out.Incomplete = ev.IncompleteReason
 	}
+	out.Context = contextOf(ev, out)
 	out.SummaryKey = "event." + string(out.Kind)
 	out.Args["user"] = out.User
 	out.Args["kind"] = string(out.Kind)
@@ -437,3 +438,63 @@ func localAuth(out model.Event, ev *parse.Event, ok, root bool) model.Event {
 // RequiredKeys lists the audit rule keys the agent acts on. A rule set that
 // lacks one produces no events of that class, silently.
 func RequiredKeys() []string { return knownKeys() }
+
+// contextKinds are the kinds that describe an action by a process, for which
+// "who really did this" matters. Authentication events carry their own address
+// and are left alone.
+var contextKinds = map[model.Kind]bool{
+	model.KindSudo: true, model.KindUserChange: true, model.KindAuthorizedKeysChange: true,
+	model.KindPersistence: true, model.KindConfigChange: true, model.KindLogTamper: true,
+	model.KindSuspiciousExec: true,
+}
+
+func idOf(s string) string {
+	if s == "" || s == "4294967295" || s == "-1" || len(s) > 10 {
+		return ""
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return s
+}
+
+// contextOf collects what the records themselves say about the acting process:
+// the login UID (which survives sudo), the identity the action ran as, the
+// kernel session ID, the PIDs and the executable. Only explicit fields are used;
+// the remote address of the session is added later by the session tracker,
+// separately and with its own confidence.
+func contextOf(ev *parse.Event, out model.Event) *model.Context {
+	if !contextKinds[out.Kind] {
+		return nil
+	}
+	c := &model.Context{
+		LoginUID:  idOf(ev.Field("auid")),
+		SessionID: idOf(ev.Field("ses")),
+		PID:       idOf(ev.Field("pid")),
+		PPID:      idOf(ev.FieldOf("SYSCALL", "ppid")),
+	}
+	switch {
+	case ev.Has("USER_CMD"):
+		// uid is the invoking user; the identity sudo runs as is acct.
+		if a := ev.Field("acct"); valid(a) {
+			c.EffectiveUser = sanitize.Text(a)
+			if a == "root" {
+				c.EffectiveUID = "0"
+			}
+		}
+		c.Command = out.Args["cmd"]
+	case idOf(ev.FieldOf("SYSCALL", "euid")) != "":
+		c.EffectiveUID = idOf(ev.FieldOf("SYSCALL", "euid"))
+	default:
+		c.EffectiveUID = idOf(ev.Field("uid"))
+	}
+	if exe := ev.Field("exe"); valid(exe) {
+		c.Exe = sanitize.Text(strings.Trim(exe, `"`))
+	}
+	if *c == (model.Context{}) {
+		return nil
+	}
+	return c
+}

@@ -29,6 +29,7 @@ import (
 	"github.com/RsNest/auditdsec/internal/parse"
 	"github.com/RsNest/auditdsec/internal/sanitize"
 	"github.com/RsNest/auditdsec/internal/semantic"
+	"github.com/RsNest/auditdsec/internal/session"
 	"github.com/RsNest/auditdsec/internal/source"
 	"github.com/RsNest/auditdsec/internal/store"
 )
@@ -88,6 +89,9 @@ type Options struct {
 
 	// Detector turns events into ban decisions. Nil disables detection.
 	Detector detect.Detector
+	// Sessions, when set, attributes audited actions to login sessions. It is
+	// context for people only: nothing here feeds detection or bans.
+	Sessions *session.Tracker
 	// Banner applies decisions on the host. Nil, or the no-op banner, means
 	// decisions are recorded and reported but nothing is blocked.
 	Banner action.Banner
@@ -145,6 +149,7 @@ type Pipeline struct {
 	heartbeatAt     time.Time
 	heartbeatState  auditlog.State
 	detectReady     bool
+	sessionPath     string
 	noticed         map[string]bool
 
 	certMu     sync.Mutex
@@ -202,6 +207,16 @@ func New(o Options) (*Pipeline, error) {
 			FromStart: o.ReadFromStart,
 			Logger:    o.Logger,
 		}),
+	}
+	if o.Sessions != nil && o.StateDir != "" {
+		p.sessionPath = filepath.Join(o.StateDir, "sessions.json")
+		discarded, err := o.Sessions.Load(p.sessionPath)
+		switch {
+		case err != nil:
+			p.log.Warn("the saved session table is unreadable and was ignored", "error", err)
+		case discarded:
+			p.log.Info("the saved session table belongs to another boot and was discarded")
+		}
 	}
 	if planner, ok := o.Notifier.(DeliveryPlanner); ok {
 		if o.StateDir == "" {
@@ -410,6 +425,14 @@ func (p *Pipeline) acknowledge() error {
 		positions[start] = c
 	}
 	p.openPositions = positions
+	// The session table is saved before the cursor moves past the records it
+	// was learned from, so a restart either has the session or re-reads the
+	// records that define it. Losing it is not fatal: it is context only.
+	if p.opt.Sessions != nil && p.opt.Sessions.Dirty() && p.sessionPath != "" {
+		if err := p.opt.Sessions.Save(p.sessionPath); err != nil {
+			p.log.Warn("cannot save the session table; attribution may be incomplete after a restart", "error", err)
+		}
+	}
 	checkpoint := p.current
 	if start, ok := p.asm.OldestOpen(); ok {
 		checkpoint = positions[start]
@@ -423,6 +446,9 @@ func (p *Pipeline) acknowledge() error {
 // emit translates assembled events, stores the interesting ones and alerts.
 func (p *Pipeline) emit(ctx context.Context, events []*parse.Event) error {
 	for _, ae := range events {
+		if p.opt.Sessions != nil {
+			p.opt.Sessions.Observe(ae) // learns from every record, reported or not
+		}
 		ev, reason, ok := p.mapper.MapVerbose(ae)
 		if !ok {
 			p.log.Debug("audit event ignored",
@@ -431,6 +457,9 @@ func (p *Pipeline) emit(ctx context.Context, events []*parse.Event) error {
 				"keys", strings.Join(ae.AuditKeys(), ","),
 				"reason", reason)
 			continue
+		}
+		if p.opt.Sessions != nil && ev.Context != nil {
+			p.opt.Sessions.Attribute(ev.Context, ae.Time)
 		}
 		p.processed.Add(1)
 		if p.current.Generation != "" {

@@ -43,6 +43,7 @@ import (
 	"github.com/RsNest/auditdsec/internal/notify/telegram"
 	"github.com/RsNest/auditdsec/internal/pipeline"
 	"github.com/RsNest/auditdsec/internal/semantic"
+	"github.com/RsNest/auditdsec/internal/session"
 	"github.com/RsNest/auditdsec/internal/store"
 )
 
@@ -595,6 +596,7 @@ func cmdRun(args []string) error {
 		HeartbeatStale:          cfg.Heartbeat.StaleAfter,
 		Debug:                   cfg.Debug,
 		Detector:                detector,
+		Sessions:                session.New(session.Options{}, session.ReadBootID()),
 		Banner:                  banner,
 		AutoAllowlistFirstLogin: autoAllow == config.AutoAllowFirstLogin,
 		Decisions:               dec,

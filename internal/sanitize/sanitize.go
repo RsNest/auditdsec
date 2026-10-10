@@ -438,6 +438,19 @@ func Event(ev model.Event) model.Event {
 	ev.Raw = Raw(ev.Raw)
 	ev.User = redact.String(ev.User)
 	ev.Incomplete = redact.String(ev.Incomplete)
+	if c := ev.Context; c != nil {
+		cc := *c
+		cc.LoginUser = redact.String(cc.LoginUser)
+		cc.EffectiveUser = redact.String(cc.EffectiveUser)
+		cc.Exe = redact.String(cc.Exe)
+		cc.Command = redact.Command(cc.Command)
+		if cc.Session != nil {
+			s := *cc.Session
+			s.Note = redact.String(s.Note)
+			cc.Session = &s
+		}
+		ev.Context = &cc
+	}
 	if ev.Args != nil {
 		args := make(map[string]string, len(ev.Args))
 		for k, v := range ev.Args {
