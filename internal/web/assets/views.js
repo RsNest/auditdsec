@@ -51,8 +51,9 @@
             if (S.token !== session) { return false; }
             modelRevision++;
             model.bans = model.bans.filter(function (old) { return old.ip !== b.ip; }).concat([b]);
-            // Repaint before polling: every card for a blocked IP disappears now.
+            // Repaint before polling: ordinary cards for a blocked IP disappear now.
             paintAll();
+            if (b.applied && deck) { deck.advanceFromIP(b.ip); }
             A.toast(t(b.applied ? "bans.form.done" : "bans.form.recorded", { ip: b.ip }), b.applied ? "ok" : "warn");
             refresh();
             return !!b.applied;

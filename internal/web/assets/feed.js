@@ -209,7 +209,19 @@
       layout();
     }
 
-    return { set: set, signature: function () { return deckSignature(items); } };
+    function advanceFromIP(ip) {
+      if (!order.length || items[order[0]].src_ip !== ip) { return; }
+      var next = order.findIndex(function (idx) { return items[idx].src_ip !== ip; });
+      if (next < 1) { return; }
+      // Critical evidence remains in the deck, but a successful ban still
+      // moves the operator to the next address instead of keeping that card.
+      generation++; busy = false; drag = null;
+      order = order.slice(next).concat(order.slice(0, next));
+      pos = (pos + next) % items.length;
+      layout();
+    }
+
+    return { set: set, advanceFromIP: advanceFromIP, signature: function () { return deckSignature(items); } };
   }
 
   /* ---------------- journal rows ---------------- */
