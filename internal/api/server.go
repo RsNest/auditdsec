@@ -55,16 +55,18 @@ type Options struct {
 
 // Server is the panel's HTTP server.
 type Server struct {
-	opt      Options
-	log      *slog.Logger
-	now      func() time.Time
-	cred     credState
-	proxies  proxySet
-	sessions *sessions
-	limit    *limiter
-	hashing  chan struct{} // bounds concurrent password hashing
-	static   http.Handler
-	mux      *http.ServeMux
+	opt        Options
+	log        *slog.Logger
+	now        func() time.Time
+	cred       credState
+	global     *limiter
+	finalizeMu sync.Mutex
+	proxies    proxySet
+	sessions   *sessions
+	limit      *limiter
+	hashing    chan struct{} // bounds concurrent password hashing
+	static     http.Handler
+	mux        *http.ServeMux
 
 	statMu  sync.Mutex
 	statAt  time.Time
@@ -94,6 +96,7 @@ func New(o Options) (*Server, error) {
 		proxies:  proxies,
 		sessions: newSessions(w.SessionTTL, o.Now),
 		limit:    newLimiter(o.Now),
+		global:   newLimiterN(o.Now, globalFailLimit),
 		hashing:  make(chan struct{}, 2),
 		static:   web.Handler(),
 		mux:      http.NewServeMux(),
@@ -162,8 +165,9 @@ func (s *Server) routes() {
 		s.mux.Handle(pattern, s.guard(auth, h))
 	}
 	api("POST /api/v1/login", false, s.handleLogin)
-	api("POST /api/v1/logout", true, s.handleLogout)
-	api("POST /api/v1/account", true, s.handleAccount)
+	api("POST /api/v1/logout", false, s.handleLogout)
+	api("GET /api/v1/setup/state", false, s.handleSetupState)
+	api("POST /api/v1/setup/complete", false, s.handleSetupComplete) // checks for a setup session itself
 	api("GET /api/v1/status", true, s.handleStatus)
 	api("GET /api/v1/events", true, s.handleEvents)
 	api("GET /api/v1/explain/{kind}", true, s.handleExplain)
@@ -204,10 +208,6 @@ func (s *Server) guard(auth bool, next http.HandlerFunc) http.Handler {
 		}
 		if auth && !s.sessions.valid(bearer(r)) {
 			fail(w, http.StatusUnauthorized, "unauthorized", "sign in first")
-			return
-		}
-		if auth && s.cred.mustChange() && r.URL.Path != "/api/v1/account" && r.URL.Path != "/api/v1/logout" {
-			fail(w, http.StatusForbidden, "password_change_required", "replace the default login and password first")
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
@@ -327,12 +327,20 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusTooManyRequests, "throttled", "too many attempts, try later")
 		return
 	}
-	var in struct{ Login, Password string }
+	var in struct {
+		Login    string `json:"login"`
+		Password string `json:"password"`
+	}
 	if !decode(w, r, &in) {
 		return
 	}
-	if len(in.Password) > 256 || len(in.Login) > 128 {
+	if len(in.Password) > 512 || len(in.Login) > 128 {
 		fail(w, http.StatusBadRequest, "bad_request", "too long")
+		return
+	}
+	snap := s.cred.snapshot()
+	if !snap.ready {
+		s.bootstrapLogin(w, ip, in.Login, in.Password)
 		return
 	}
 	select {
@@ -345,8 +353,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	got := sha256.Sum256([]byte(in.Login))
-	snap := s.cred.snapshot()
-	loginOK := subtle.ConstantTimeCompare(got[:], snap.loginSum[:]) == 1
+	loginOK := subtle.ConstantTimeCompare(got[:], snap.sum[:]) == 1
 	h := snap.hash
 	if !loginOK {
 		h = snap.dummy
@@ -361,7 +368,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.limit.ok(ip)
 	token, exp := s.sessions.create()
 	s.log.Info("panel sign-in", "ip", ip)
-	writeJSON(w, http.StatusOK, map[string]any{"token": token, "expires": exp.UTC().Format(time.RFC3339), "must_change": snap.mustReset})
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "expires": exp.UTC().Format(time.RFC3339)})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

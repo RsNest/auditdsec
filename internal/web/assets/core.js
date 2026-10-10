@@ -264,7 +264,11 @@
       return res.text().then(function (raw) {
         var data = null;
         if (raw) { try { data = JSON.parse(raw); } catch (e) { data = null; } }
-        if (!res.ok) { throw fail((data && data.error) || String(res.status), (data && data.message) || t("err.generic")); }
+        if (!res.ok) {
+          var failure = fail((data && data.error) || String(res.status), (data && data.message) || t("err.generic"));
+          failure.reasons = (data && data.reasons) || [];
+          throw failure;
+        }
         return data;
       });
     }, function () {
@@ -275,9 +279,7 @@
 
   var api = {
     login: function (login, password) { return request("POST", "/login", { login: login, password: password }); },
-    account: function (current, login, password) {
-      return request("POST", "/account", { current_password: current, login: login, password: password });
-    },
+    setupComplete: function (p) { return request("POST", "/setup/complete", p); },
     status: function () { return request("GET", "/status"); },
     events: function (query) { return request("GET", "/events" + (query ? "?" + query : "")); },
     explain: function (kind) { return request("GET", "/explain/" + kind + "?lang=" + state.lang); },

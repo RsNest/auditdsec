@@ -460,7 +460,6 @@ ask_password() {
     if [ -n "$PASSWORD_FILE" ]; then
         [ -r "$PASSWORD_FILE" ] || die "cannot read $PASSWORD_FILE"
         PASSWORD="$(head -n 1 "$PASSWORD_FILE")"
-        [ "${#PASSWORD}" -ge 12 ] || die "the password in $PASSWORD_FILE is shorter than 12 characters"
     elif [ -n "$existing" ]; then
         if interactive; then
             if confirm "A panel password is already set. Keep it?"; then
@@ -996,8 +995,8 @@ verify_stack() {
         esac
         reply="$(post_login "$target" ${ROUTE[@]+"${ROUTE[@]}"} "${trust[@]}")"
         case "$reply" in
-            *'"must_change":true'*)
-                LOGIN_STATE="the default account answers; the panel will force a new login and password at the first sign-in"
+            *'"setup":true'*)
+                LOGIN_STATE="first-time setup is waiting: admin / admin opens only the screen where the owner chooses a login and password"
                 ok "$LOGIN_STATE" ;;
             *'"token"'*) LOGIN_STATE="signed in with the chosen password"; ok "$LOGIN_STATE, $LOGIN_ROUTE" ;;
             *'"bad_credentials"'*)
@@ -1108,9 +1107,10 @@ summary() {
         printf '  Login:    %s   (and the password you set; only its hash is stored)\n' "$LOGIN"
     else
         printf '  Login:    %sadmin%s   Password:  %sadmin%s\n' "$B" "$N" "$B" "$N"
-        printf '            The first sign-in asks you to replace both (a login other than admin,\n'
-        printf '            a password of 12+ characters). Until then the panel shows nothing else,\n'
-        printf '            but do it right away: whoever opens the link first can choose them.\n'
+        printf '            The first sign-in leads to a mandatory screen: choose your own login\n'
+        printf '            (or tick "keep admin") and a password of 8+ characters with a lower-case\n'
+        printf '            and an upper-case letter. Until then nothing else in the panel opens.\n'
+        printf '            Do it right away: whoever opens the link first can choose them.\n'
     fi
     printf '  Page:     %s\n' "${PAGE_STATE:-not checked}"
     printf '  Sign-in:  %s\n' "${LOGIN_STATE:-not checked}"

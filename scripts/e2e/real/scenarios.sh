@@ -96,23 +96,23 @@ s_default_account() {
     step "no password given: admin/admin, changed at the first sign-in (real daemon)"
     reset
     DEFAULT_ACCOUNT=1 run_inst default --mode tunnel --port 19478
-    local u=http://127.0.0.1:19478 tok body new='a-brand-new-password-1'
+    local u=http://127.0.0.1:19478 tok body new='BrandNewPass1'
     expect "installer succeeds without a password" test "$RC" = 0
-    expect_out "the installer says the default account answers" "the default account answers"
+    expect_out "the installer says first-time setup is waiting" "first-time setup is waiting"
     expect_out "the summary shows the default login" "Login:    admin   Password:  admin"
-    expect_out "the summary says it must be replaced" "asks you to replace both"
+    expect_out "the summary says it must be replaced" "mandatory screen"
     expect "no password hash was written to .env" test -z "$(env_val AUDITDSEC_WEB_PASSWORD_HASH)"
     api() { curl -sS --noproxy '*' -o /dev/stderr -w '%{http_code}' -X "$1" -H 'X-Requested-With: auditdsec' \
         -H 'Content-Type: application/json' ${3:+-H "Authorization: Bearer $3"} ${4:+--data-binary "$4"} "$u$2" 2>/dev/null; }
     body="$(curl -sS --noproxy '*' -X POST -H 'X-Requested-With: auditdsec' -H 'Content-Type: application/json' \
         --data-binary '{"login":"admin","password":"admin"}' "$u/api/v1/login")"
     tok="$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' <<<"$body")"
-    expect "admin/admin signs in and is told to change" grep -q '"must_change":true' <<<"$body"
-    expect "status is refused before the change" test "$(api GET /api/v1/status "$tok")" = 403
-    expect "bans are refused before the change" test "$(api GET /api/v1/bans "$tok")" = 403
-    expect "keeping login admin is refused" test "$(api POST /api/v1/account "$tok" '{"current_password":"admin","login":"admin","password":"'"$new"'"}')" = 400
-    expect "keeping password admin is refused" test "$(api POST /api/v1/account "$tok" '{"current_password":"admin","login":"owner","password":"admin"}')" = 400
-    expect "a new login and password are accepted" test "$(api POST /api/v1/account "$tok" '{"current_password":"admin","login":"owner","password":"'"$new"'"}')" = 204
+    expect "admin/admin signs in and is told to change" grep -q '"setup":true' <<<"$body"
+    expect "status is refused with the setup session" test "$(api GET /api/v1/status "$tok")" = 401
+    expect "bans are refused with the setup session" test "$(api GET /api/v1/bans "$tok")" = 401
+    expect "keeping login admin without the tick is refused" test "$(api POST /api/v1/setup/complete "$tok" '{"login":"admin","password":"'"$new"'","password_confirm":"'"$new"'"}')" = 400
+    expect "a weak password is refused" test "$(api POST /api/v1/setup/complete "$tok" '{"login":"owner","password":"alllowercase","password_confirm":"alllowercase"}')" = 400
+    expect "new credentials are accepted" test "$(api POST /api/v1/setup/complete "$tok" '{"login":"owner","password":"'"$new"'","password_confirm":"'"$new"'"}')" = 204
     expect "admin/admin no longer signs in" test "$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' -X POST -H 'X-Requested-With: auditdsec' -H 'Content-Type: application/json' --data-binary '{"login":"admin","password":"admin"}' "$u/api/v1/login")" = 401
     docker restart auditdsec >/dev/null
     expect "the panel is back after a restart" wait_for 40 curl -fsS --noproxy '*' "$u/"
@@ -387,13 +387,13 @@ s_secrets() {
     local f hits=0
     for f in "$OUTDIR"/*.log; do
         [ -e "$f" ] || continue
-        if grep -qF 'a-long-test-password' "$f" || grep -qE 'pbkdf2-sha256\$' "$f" || grep -qF '123:abc' "$f"; then
+        if grep -qF 'A-long-test-password' "$f" || grep -qE 'pbkdf2-sha256\$' "$f" || grep -qF '123:abc' "$f"; then
             fail "secret in $f"; hits=1
         fi
     done
     [ "$hits" = 0 ] && pass "installer output has no password, hash or token"
     local logs; logs="$(docker ps -a --format '{{.Names}}' | xargs -r -n1 docker logs 2>&1)"
-    if grep -qF 'a-long-test-password' <<<"$logs"; then fail "password in container logs"; else pass "container logs have no password"; fi
+    if grep -qF 'A-long-test-password' <<<"$logs"; then fail "password in container logs"; else pass "container logs have no password"; fi
 }
 
 # ------------------------------------------------------------------- main --

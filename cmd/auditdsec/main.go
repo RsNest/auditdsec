@@ -134,6 +134,8 @@ func run(args []string) error {
 		return cmdExplain(args)
 	case "hash-password":
 		return cmdHashPassword(args)
+	case "reset-credentials":
+		return cmdResetCredentials(args)
 	case "check-site", "check-domain":
 		return cmdCheckSite(args)
 	case "version":
@@ -157,6 +159,7 @@ Usage:
   auditdsec check-config [-config F] load the settings and report problems
   auditdsec explain KIND [-lang ru]  explain one kind of event
   auditdsec hash-password [-stdin]   hash a panel password for the web panel
+  auditdsec reset-credentials -yes   forget the panel login and password (local recovery)
   auditdsec check-site NAME|IP       can this address get a certificate?
   auditdsec version                  print the build version
 
@@ -196,6 +199,31 @@ func configPath(flagValue string) string {
 		return defaultConfigPath
 	}
 	return ""
+}
+
+// cmdResetCredentials is the local way back when the saved panel login and
+// password are lost or damaged: it removes them, and the next start of the
+// panel offers first-time setup (admin / admin, then a forced change) again.
+// Running it on the server is the proof of ownership; there is no web reset.
+func cmdResetCredentials(args []string) error {
+	fs := flag.NewFlagSet("reset-credentials", flag.ContinueOnError)
+	path := fs.String("config", "", "path to the configuration file")
+	yes := fs.Bool("yes", false, "do it without asking")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(configPath(*path))
+	if err != nil {
+		return err
+	}
+	if !*yes {
+		return errors.New("this REMOVES the panel login and password (the panel returns to admin / admin with a forced change); add -yes to confirm")
+	}
+	if err := api.ResetCredentials(cfg.StateDir); err != nil {
+		return fmt.Errorf("cannot reset: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "The saved panel login and password were removed. Restart the agent so it starts first-time setup.")
+	return nil
 }
 
 func cmdCheckConfig(args []string) error {
@@ -263,8 +291,9 @@ func cmdHashPassword(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len([]rune(password)) < minPasswordLen {
-		return fmt.Errorf("use at least %d characters", minPasswordLen)
+	if reasons := api.CheckPassword(password, ""); len(reasons) > 0 {
+		return fmt.Errorf("the password is not acceptable (%s): use at least %d characters with a lower-case and an upper-case letter, and not a common password",
+			strings.Join(reasons, ", "), api.MinPasswordRunes)
 	}
 
 	hash, err := api.HashPassword(password)
@@ -277,9 +306,6 @@ func cmdHashPassword(args []string) error {
 		"  auditdsec.yaml: web.password_hash: \"<the line above>\"\n")
 	return nil
 }
-
-// minPasswordLen matches what the configuration will accept.
-const minPasswordLen = 12
 
 func readPassword(fromStdin bool) (string, error) {
 	in := bufio.NewReader(os.Stdin)

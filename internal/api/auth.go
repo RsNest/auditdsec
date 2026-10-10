@@ -15,8 +15,17 @@ const (
 	maxTrackedAddrs = 4096
 )
 
+// Kinds of session. A setup session is what the bootstrap code and admin/admin
+// buy: it can finish the first-time setup and nothing else.
+const (
+	kindFull  = "full"
+	kindSetup = "setup"
+)
+
 type session struct {
 	expires time.Time
+	kind    string
+	gen     int64 // bootstrap generation a setup session belongs to
 }
 
 // sessions holds bearer tokens in memory. Only the SHA-256 of a token is kept,
@@ -34,12 +43,16 @@ func newSessions(ttl time.Duration, now func() time.Time) *sessions {
 }
 
 func (s *sessions) create() (token string, expires time.Time) {
+	return s.createKind(kindFull, 0, s.ttl)
+}
+
+func (s *sessions) createKind(kind string, gen int64, ttl time.Duration) (token string, expires time.Time) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		panic("api: no randomness: " + err.Error())
 	}
 	token = base64.RawURLEncoding.EncodeToString(raw)
-	expires = s.now().Add(s.ttl)
+	expires = s.now().Add(ttl)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -54,26 +67,32 @@ func (s *sessions) create() (token string, expires time.Time) {
 		}
 		delete(s.m, oldest)
 	}
-	s.m[sha256.Sum256([]byte(token))] = session{expires: expires}
+	s.m[sha256.Sum256([]byte(token))] = session{expires: expires, kind: kind, gen: gen}
 	return token, expires
 }
 
+// valid reports whether the token is a live full session.
 func (s *sessions) valid(token string) bool {
+	sess, ok := s.lookup(token)
+	return ok && sess.kind == kindFull
+}
+
+func (s *sessions) lookup(token string) (session, bool) {
 	if token == "" || len(token) > 128 {
-		return false
+		return session{}, false
 	}
 	key := sha256.Sum256([]byte(token))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.m[key]
 	if !ok {
-		return false
+		return session{}, false
 	}
 	if !s.now().Before(sess.expires) {
 		delete(s.m, key)
-		return false
+		return session{}, false
 	}
-	return true
+	return sess, true
 }
 
 func (s *sessions) revoke(token string) {
@@ -100,13 +119,16 @@ func (s *sessions) sweepLocked() {
 // limiter counts failed sign-ins per address. Five misses in ten minutes lock
 // that address out for the rest of the window; a success forgives it.
 type limiter struct {
-	mu   sync.Mutex
-	now  func() time.Time
-	fail map[string][]time.Time
+	mu    sync.Mutex
+	now   func() time.Time
+	limit int
+	fail  map[string][]time.Time
 }
 
-func newLimiter(now func() time.Time) *limiter {
-	return &limiter{now: now, fail: map[string][]time.Time{}}
+func newLimiter(now func() time.Time) *limiter { return newLimiterN(now, failLimit) }
+
+func newLimiterN(now func() time.Time, limit int) *limiter {
+	return &limiter{now: now, limit: limit, fail: map[string][]time.Time{}}
 }
 
 // blocked reports whether the address may not try again yet, and for how long.
@@ -114,7 +136,7 @@ func (l *limiter) blocked(addr string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	times := l.prune(addr)
-	if len(times) < failLimit {
+	if len(times) < l.limit {
 		return false, 0
 	}
 	return true, times[0].Add(failWindow).Sub(l.now())

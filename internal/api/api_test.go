@@ -36,6 +36,7 @@ func newServer(t *testing.T) (*Server, *store.Store, *time.Time) {
 	cfg.Web.Login = "admin"
 	cfg.Web.Password = testPassword
 	cfg.Web.SessionTTL = time.Hour
+	cfg.StateDir = dir
 	cfg.Telegram.Token = "x"
 	cfg.Telegram.ChatIDs = []int64{1}
 
@@ -434,9 +435,8 @@ func TestPasswordHashing(t *testing.T) {
 	}
 }
 
-// newDefaultServer starts a panel with no configured password: the admin/admin
-// account that may only replace itself.
-func newDefaultServer(t *testing.T) (*Server, string) {
+// bootServer starts a panel that has no owner yet.
+func bootServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	cfg := config.Defaults(config.ProfileSimple)
 	cfg.Web.Enabled = true
@@ -456,8 +456,7 @@ func newDefaultServer(t *testing.T) (*Server, string) {
 func tokenOf(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
 	var out struct {
-		Token      string `json:"token"`
-		MustChange bool   `json:"must_change"`
+		Token string `json:"token"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Token == "" {
 		t.Fatalf("no token in %d %s", rec.Code, rec.Body)
@@ -465,111 +464,293 @@ func tokenOf(t *testing.T, rec *httptest.ResponseRecorder) string {
 	return out.Token
 }
 
-// With no password configured the panel opens with admin/admin, and that
-// account can do nothing except change itself.
-func TestDefaultAccountMustChangeBeforeAnythingElse(t *testing.T) {
-	s, dir := newDefaultServer(t)
-	rec := do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "admin"})
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"must_change":true`) {
-		t.Fatalf("login: %d %s", rec.Code, rec.Body)
+func firstLogin(t *testing.T, s *Server) *httptest.ResponseRecorder {
+	return do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "admin"})
+}
+
+func complete(t *testing.T, s *Server, tok, login, pass string, keep bool) *httptest.ResponseRecorder {
+	return do(t, s, "POST", "/api/v1/setup/complete", tok, map[string]any{
+		"login": login, "password": pass, "password_confirm": pass, "keep_admin_confirmed": keep})
+}
+
+func state(t *testing.T, s *Server) string {
+	t.Helper()
+	var out struct{ State string }
+	rec := do(t, s, "GET", "/api/v1/setup/state", "", nil)
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.State
+}
+
+// A new installation takes admin/admin, and what that opens is setup only.
+func TestFirstLoginIsASetupSessionNotAPanelSession(t *testing.T) {
+	s, _ := bootServer(t)
+	if state(t, s) != StateBootstrap {
+		t.Fatalf("state = %s", state(t, s))
+	}
+	for _, b := range []map[string]string{{"login": "admin", "password": "wrong"}, {"login": "root", "password": "admin"}, {"login": "", "password": ""}} {
+		if r := do(t, s, "POST", "/api/v1/login", "", b); r.Code != 401 {
+			t.Errorf("%v = %d, want 401", b, r.Code)
+		}
+	}
+	rec := firstLogin(t, s)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"setup":true`) {
+		t.Fatalf("admin/admin = %d %s", rec.Code, rec.Body)
 	}
 	tok := tokenOf(t, rec)
 	for _, p := range []string{"/api/v1/status", "/api/v1/events", "/api/v1/bans", "/api/v1/config", "/api/v1/diagnostics", "/api/v1/allowlist"} {
-		r := do(t, s, "GET", p, tok, nil)
-		if r.Code != 403 || !strings.Contains(r.Body.String(), "password_change_required") {
-			t.Errorf("GET %s before the change = %d %s, want 403 password_change_required", p, r.Code, r.Body)
+		if r := do(t, s, "GET", p, tok, nil); r.Code != 401 {
+			t.Errorf("GET %s with a setup session = %d, want 401", p, r.Code)
 		}
 	}
-	if r := do(t, s, "POST", "/api/v1/bans", tok, map[string]string{"ip": "203.0.113.5"}); r.Code != 403 {
-		t.Errorf("POST bans before the change = %d", r.Code)
+	if r := do(t, s, "POST", "/api/v1/bans", tok, map[string]string{"ip": "203.0.113.5"}); r.Code != 401 {
+		t.Errorf("POST bans = %d", r.Code)
 	}
+	if r := do(t, s, "POST", "/api/v1/setup/complete", "", map[string]any{"login": "owner"}); r.Code != 401 {
+		t.Errorf("complete without a session = %d", r.Code)
+	}
+}
 
-	bad := []map[string]string{
-		{"current_password": "admin", "login": "admin", "password": "a-long-new-password"},
-		{"current_password": "admin", "login": "ADMIN", "password": "a-long-new-password"},
-		{"current_password": "admin", "login": "owner", "password": "admin"},
-		{"current_password": "admin", "login": "owner", "password": "short"},
-		{"current_password": "admin", "login": "owner", "password": "owner"},
-		{"current_password": "admin", "login": "my owner", "password": "a-long-new-password"},
-		{"current_password": "admin", "login": "", "password": "a-long-new-password"},
+func TestSetupRulesAreEnforcedByTheServer(t *testing.T) {
+	s, dir := bootServer(t)
+	tok := tokenOf(t, firstLogin(t, s))
+	cases := []struct {
+		name, login, pass string
+		keep              bool
+		want              string
+	}{
+		{"keeping admin needs the tick", "admin", "Goodpass1", false, ReasonKeepAdmin},
+		{"too short", "owner", "Ab1", true, ReasonShort},
+		{"no capital letter", "owner", "alllowercase", true, ReasonNeedUpper},
+		{"no small letter", "owner", "ALLUPPERCASE", true, ReasonNeedLower},
+		{"the old default", "owner", "Admin", true, ReasonDefault},
+		{"common", "owner", "Password1", true, ReasonCommon},
+		{"same as login", "OwnerPass1", "OwnerPass1", true, ReasonSameAsLogin},
+		{"login with a space", "my owner", "Goodpass1", true, ReasonLoginChars},
+		{"login with markup", "<b>x</b>", "Goodpass1", true, ReasonLoginChars},
+		{"login too short", "ab", "Goodpass1", true, ReasonLoginLen},
 	}
-	for _, b := range bad {
-		if r := do(t, s, "POST", "/api/v1/account", tok, b); r.Code != 400 {
-			t.Errorf("account %v = %d %s, want 400", b, r.Code, r.Body)
+	for _, c := range cases {
+		r := complete(t, s, tok, c.login, c.pass, c.keep)
+		if r.Code != 400 || !strings.Contains(r.Body.String(), c.want) {
+			t.Errorf("%s: %d %s, want 400 with %s", c.name, r.Code, r.Body, c.want)
 		}
 	}
-	if r := do(t, s, "POST", "/api/v1/account", tok, map[string]string{"current_password": "nope", "login": "owner", "password": "a-long-new-password"}); r.Code != 400 || !strings.Contains(r.Body.String(), "wrong_password") {
-		t.Errorf("wrong current password = %d %s", r.Code, r.Body)
+	r := do(t, s, "POST", "/api/v1/setup/complete", tok, map[string]any{"login": "owner", "password": "Goodpass1", "password_confirm": "Goodpass2"})
+	if r.Code != 400 || !strings.Contains(r.Body.String(), ReasonMismatch) {
+		t.Errorf("mismatch: %d %s", r.Code, r.Body)
 	}
-	if _, err := os.Stat(dir + "/" + credFile); err == nil {
-		t.Fatal("a refused change was saved")
+	if exists(dir + "/" + credFile) {
+		t.Fatal("a refused setup was saved")
 	}
+	if state(t, s) != StateBootstrap {
+		t.Errorf("state after refusals = %s", state(t, s))
+	}
+	// The session survives refusals: the person can correct and retry.
+	if r := complete(t, s, tok, "owner", "Goodpass1", false); r.Code != 204 {
+		t.Errorf("retry = %d %s", r.Code, r.Body)
+	}
+}
 
-	good := map[string]string{"current_password": "admin", "login": "owner", "password": "a-long-new-password"}
-	if r := do(t, s, "POST", "/api/v1/account", tok, good); r.Code != 204 {
-		t.Fatalf("change = %d %s", r.Code, r.Body)
+func TestSetupCompletesAndNothingBringsBackAdminAdmin(t *testing.T) {
+	s, dir := bootServer(t)
+	tok := tokenOf(t, firstLogin(t, s))
+	if r := complete(t, s, tok, "owner", "Goodpass1", false); r.Code != 204 {
+		t.Fatalf("complete = %d %s", r.Code, r.Body)
 	}
-	// The old session and the old account are gone.
-	if r := do(t, s, "GET", "/api/v1/status", tok, nil); r.Code != 401 {
-		t.Errorf("old session after change = %d, want 401", r.Code)
+	if state(t, s) != StateReady {
+		t.Errorf("state = %s", state(t, s))
 	}
-	if r := do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "admin"}); r.Code != 401 {
-		t.Errorf("admin/admin after change = %d, want 401", r.Code)
+	// The first session is gone, and no full session was handed out.
+	if r := do(t, s, "POST", "/api/v1/setup/complete", tok, map[string]any{"login": "x"}); r.Code != 401 {
+		t.Errorf("reusing the setup session = %d", r.Code)
 	}
-	rec = do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "owner", "password": "a-long-new-password"})
-	if rec.Code != 200 || strings.Contains(rec.Body.String(), `"must_change":true`) {
+	if r := firstLogin(t, s); r.Code != 401 {
+		t.Errorf("admin/admin after setup = %d", r.Code)
+	}
+	rec := do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "owner", "password": "Goodpass1"})
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), `"setup"`) {
 		t.Fatalf("new login: %d %s", rec.Code, rec.Body)
 	}
-	if r := do(t, s, "GET", "/api/v1/status", tokenOf(t, rec), nil); r.Code != 200 {
-		t.Errorf("status after the change = %d", r.Code)
+	if do(t, s, "GET", "/api/v1/status", tokenOf(t, rec), nil).Code != 200 {
+		t.Error("status refused after setup")
 	}
-
-	// The file holds a hash only, with owner-only access.
-	raw, err := os.ReadFile(dir + "/" + credFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "a-long-new-password") || !strings.Contains(string(raw), "pbkdf2-sha256$") {
+	raw, _ := os.ReadFile(dir + "/" + credFile)
+	if strings.Contains(string(raw), "Goodpass1") || !strings.Contains(string(raw), "pbkdf2-sha256$") || !strings.Contains(string(raw), `"bootstrap_completed":true`) {
 		t.Errorf("credentials file = %s", raw)
 	}
-	if fi, _ := os.Stat(dir + "/" + credFile); fi.Mode().Perm() != 0o600 {
-		t.Errorf("credentials file mode = %v", fi.Mode().Perm())
+	for _, n := range []string{credFile, doneFile} {
+		if fi, err := os.Stat(dir + "/" + n); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("%s: %v %v", n, err, fi)
+		}
 	}
-}
-
-// A restart keeps the chosen credentials, and the default does not come back.
-func TestChangedCredentialsSurviveRestart(t *testing.T) {
-	s, dir := newDefaultServer(t)
-	tok := tokenOf(t, do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "admin"}))
-	if r := do(t, s, "POST", "/api/v1/account", tok, map[string]string{"current_password": "admin", "login": "owner", "password": "a-long-new-password"}); r.Code != 204 {
-		t.Fatal(r.Code)
-	}
-	cfg := s.opt.Config
-	cfg.StateDir = dir
-	s2, err := New(Options{Config: cfg, Store: s.opt.Store, Logger: s.log})
+	// A restart keeps the owner and does not reopen the default.
+	s2, err := New(Options{Config: s.opt.Config, Store: s.opt.Store, Logger: s.log})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := do(t, s2, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "admin"}); r.Code != 401 {
+	if state(t, s2) != StateReady {
+		t.Errorf("state after restart = %s", state(t, s2))
+	}
+	if r := firstLogin(t, s2); r.Code != 401 {
 		t.Errorf("default after restart = %d", r.Code)
 	}
-	if r := do(t, s2, "POST", "/api/v1/login", "", map[string]string{"login": "owner", "password": "a-long-new-password"}); r.Code != 200 {
-		t.Errorf("chosen account after restart = %d", r.Code)
+	if r := do(t, s2, "POST", "/api/v1/login", "", map[string]string{"login": "owner", "password": "Goodpass1"}); r.Code != 200 {
+		t.Errorf("owner after restart = %d", r.Code)
 	}
 }
 
-// A configured password is not the default account: no forced change.
-func TestConfiguredPasswordIsNotForcedToChange(t *testing.T) {
+func TestKeepingAdminIsPossibleWithTheTick(t *testing.T) {
+	s, _ := bootServer(t)
+	tok := tokenOf(t, firstLogin(t, s))
+	if r := complete(t, s, tok, "admin", "Goodpass1", true); r.Code != 204 {
+		t.Fatalf("%d %s", r.Code, r.Body)
+	}
+	if r := firstLogin(t, s); r.Code != 401 {
+		t.Errorf("old admin password = %d", r.Code)
+	}
+	if r := do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "Goodpass1"}); r.Code != 200 {
+		t.Errorf("admin with the new password = %d", r.Code)
+	}
+}
+
+func TestSetupSessionExpires(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	cfg := config.Defaults(config.ProfileSimple)
+	cfg.Web.Enabled = true
+	cfg.StateDir = t.TempDir()
+	st, _ := store.Open(store.Options{Dir: t.TempDir()})
+	defer st.Close()
+	s, err := New(Options{Config: cfg, Store: st, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := tokenOf(t, firstLogin(t, s))
+	now = now.Add(setupSessionTTL + time.Minute)
+	if r := complete(t, s, tok, "owner", "Goodpass1", false); r.Code != 401 {
+		t.Errorf("an expired setup session finished setup: %d", r.Code)
+	}
+}
+
+func TestWrongFirstLoginsAreThrottled(t *testing.T) {
+	s, _ := bootServer(t)
+	for i := 0; i < failLimit; i++ {
+		do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "nope"})
+	}
+	if r := firstLogin(t, s); r.Code != 429 {
+		t.Errorf("admin/admin after %d misses from one address = %d, want 429", failLimit, r.Code)
+	}
+}
+
+// Completed setup whose credentials vanished or broke must stop sign-in, not
+// fall back to the default pair; the local reset is the way out.
+func TestLostOrDamagedCredentialsLockSignIn(t *testing.T) {
+	for _, damage := range []string{"remove", "garble"} {
+		s, dir := bootServer(t)
+		tok := tokenOf(t, firstLogin(t, s))
+		if r := complete(t, s, tok, "owner", "Goodpass1", false); r.Code != 204 {
+			t.Fatal(r.Code)
+		}
+		if damage == "remove" {
+			os.Remove(dir + "/" + credFile)
+		} else {
+			os.WriteFile(dir+"/"+credFile, []byte("{not json"), 0o600)
+		}
+		s2, err := New(Options{Config: s.opt.Config, Store: s.opt.Store, Logger: s.log})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state(t, s2) != StateLocked {
+			t.Errorf("%s: state = %s", damage, state(t, s2))
+		}
+		for _, body := range []map[string]string{{"login": "admin", "password": "admin"}, {"login": "owner", "password": "Goodpass1"}} {
+			if r := do(t, s2, "POST", "/api/v1/login", "", body); r.Code != 503 {
+				t.Errorf("%s: sign-in = %d, want 503", damage, r.Code)
+			}
+		}
+		if err := ResetCredentials(dir); err != nil {
+			t.Fatal(err)
+		}
+		s3, err := New(Options{Config: s.opt.Config, Store: s.opt.Store, Logger: s.log})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state(t, s3) != StateBootstrap {
+			t.Errorf("%s: after the local reset state = %s", damage, state(t, s3))
+		}
+	}
+}
+
+// Failing to write leaves setup unfinished and the old state intact.
+func TestFailedWriteLeavesSetupUnfinished(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	s, dir := bootServer(t)
+	tok := tokenOf(t, firstLogin(t, s))
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Skip("cannot make the directory read-only")
+	}
+	defer os.Chmod(dir, 0o700)
+	r := complete(t, s, tok, "owner", "Goodpass1", false)
+	if r.Code != 500 || !strings.Contains(r.Body.String(), "bootstrap_persistence_failed") {
+		t.Errorf("= %d %s", r.Code, r.Body)
+	}
+	if state(t, s) != StateBootstrap {
+		t.Errorf("state = %s", state(t, s))
+	}
+	if r := do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "owner", "password": "Goodpass1"}); r.Code == 200 {
+		t.Error("full access was handed out although nothing was saved")
+	}
+}
+
+// Two finalize requests cannot install two different pairs.
+func TestConcurrentSetupInstallsOnePair(t *testing.T) {
+	s, _ := bootServer(t)
+	tok := tokenOf(t, firstLogin(t, s))
+	codes := make(chan int, 2)
+	for _, l := range []string{"first", "second"} {
+		go func(l string) { codes <- complete(t, s, tok, l, "Goodpass1", false).Code }(l)
+	}
+	a, b := <-codes, <-codes
+	if !(a == 204 && b == 401 || a == 401 && b == 204) {
+		t.Errorf("results %d and %d, want exactly one success", a, b)
+	}
+}
+
+// An installation that already had a password keeps it; it is not asked to
+// set up again and admin/admin does not work next to it.
+func TestExistingPasswordIsMigratedNotReset(t *testing.T) {
 	s, _, _ := newServer(t)
+	if state(t, s) != StateReady {
+		t.Fatalf("state = %s", state(t, s))
+	}
+	if !exists(s.opt.Config.StateDir + "/" + credFile) {
+		t.Error("the configured password was not copied into the managed credentials")
+	}
 	rec := do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": testPassword})
-	if rec.Code != 200 || strings.Contains(rec.Body.String(), `"must_change":true`) {
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), `"setup"`) {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
-	if do(t, s, "GET", "/api/v1/status", tokenOf(t, rec), nil).Code != 200 {
-		t.Error("status refused")
-	}
-	if do(t, s, "POST", "/api/v1/login", "", map[string]string{"login": "admin", "password": "admin"}).Code != 401 {
+	if firstLogin(t, s).Code != 401 {
 		t.Error("admin/admin accepted next to a configured password")
+	}
+}
+
+func TestPasswordPolicy(t *testing.T) {
+	good := []string{"Goodpass1", "Абвгдежз1Я", "Aa345678", strings.Repeat("aB", 64)}
+	for _, p := range good {
+		if r := CheckPassword(p, "owner"); len(r) != 0 {
+			t.Errorf("%q rejected: %v", p, r)
+		}
+	}
+	bad := map[string]string{"Short1A": ReasonShort, "alllower1": ReasonNeedUpper, "ALLUPPER1": ReasonNeedLower,
+		"Password": ReasonCommon, strings.Repeat("aB", 65): ReasonLong, "12345678": ReasonNeedLower}
+	for p, want := range bad {
+		if r := CheckPassword(p, "owner"); !strings.Contains(strings.Join(r, ","), want) {
+			t.Errorf("%q: %v, want %s", p, r, want)
+		}
 	}
 }
 

@@ -16,7 +16,7 @@ export NO_COLOR=1
 export PANEL_RECONCILE_SECONDS=5
 PW_FILE="$LAB/pw.txt"
 # shellcheck disable=SC2016
-printf 'a-long-test-password-with-$dollar"quote\\slash\n' > "$PW_FILE"
+printf 'A-long-test-password-with-$dollar"quote\\slash\n' > "$PW_FILE"
 
 reset() {
     docker ps -aq --filter name=auditdsec | xargs -r docker rm -f >/dev/null 2>&1 || true

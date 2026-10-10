@@ -491,3 +491,6 @@ dialog::backdrop { background: rgba(5, 6, 8, .72); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+.tick { display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--ink2); }
+.rules { list-style: none; padding: 0; margin: 0; font-size: 12px; display: grid; gap: 2px; color: var(--muted); }
+.rules .yes { color: var(--green, #5fb878); }

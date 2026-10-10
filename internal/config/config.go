@@ -568,8 +568,10 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// minPasswordLen is the shortest plain password accepted from the environment.
-const minPasswordLen = 12
+// minPasswordLen is the shortest plain password accepted from the environment
+// (an older way to set one). A password chosen in the panel also needs both
+// letter cases; see internal/api/policy.go.
+const minPasswordLen = 8
 
 func (c *Config) validateWeb(add func(string, ...any)) {
 	if c.badWeb != "" {
