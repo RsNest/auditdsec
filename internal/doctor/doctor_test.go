@@ -120,7 +120,7 @@ func TestDoctorChangesNothing(t *testing.T) {
 		t.Errorf("doctor modified files:\n%s\n--- vs ---\n%s", before, after)
 	}
 	for _, c := range e.cmds {
-		if !strings.HasPrefix(c, "nft list ") {
+		if !strings.HasPrefix(c, "nft list ") && !strings.HasPrefix(c, "journalctl --no-pager -n 1 ") {
 			t.Errorf("a command that is not read-only was run: %q", c)
 		}
 	}
@@ -252,5 +252,29 @@ func TestConfigFailureIsAFinding(t *testing.T) {
 	r := ConfigFailure(i18n.LangEN, errors.New("line 3: bad"))
 	if r.Worst() != Fail || !strings.Contains(r.Findings[0].What, "line 3") {
 		t.Errorf("%+v", r)
+	}
+}
+
+func TestSessionContextFindings(t *testing.T) {
+	e := newEnv(t)
+	if f := find(e.run(), "SSH session")[0]; f.Level != OK {
+		t.Errorf("readable journal: %+v", f)
+	}
+	e = newEnv(t)
+	e.o.Run = func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("No journal files were opened due to insufficient permissions."), errors.New("exit status 1")
+	}
+	if f := find(e.run(), "SSH session")[0]; f.Level != Warn || !strings.Contains(f.Fix, "systemd-journal") || !strings.Contains(f.What, "audit log") {
+		t.Errorf("permission: %+v", f)
+	}
+	e = newEnv(t)
+	e.o.LookPath = func(string) (string, error) { return "", errors.New("nope") }
+	if f := find(e.run(), "SSH session")[0]; f.Level != Info {
+		t.Errorf("no journalctl is not a failure: %+v", f)
+	}
+	e = newEnv(t)
+	e.cfg.Session.Journald = false
+	if f := find(e.run(), "SSH session")[0]; f.Level != Info {
+		t.Errorf("off: %+v", f)
 	}
 }

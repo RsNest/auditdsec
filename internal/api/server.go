@@ -419,6 +419,7 @@ type eventJSON struct {
 	Summary  string            `json:"summary"`
 	Args     map[string]string `json:"args,omitempty"`
 	Raw      string            `json:"raw,omitempty"`
+	Context  *model.Context    `json:"context,omitempty"`
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -484,7 +485,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, eventJSON{
 			ID: id, EventID: ev.ID, Time: ev.Time.UTC(), Host: ev.Host, Kind: ev.Kind, Severity: ev.Severity.String(),
-			User: ev.User, SrcIP: ev.SrcIP, Summary: summary, Args: ev.Args, Raw: ev.Raw,
+			User: ev.User, SrcIP: ev.SrcIP, Summary: summary, Args: ev.Args, Raw: ev.Raw, Context: ev.Context,
 		})
 		return len(items) <= limit
 	})

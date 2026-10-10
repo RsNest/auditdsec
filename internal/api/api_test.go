@@ -815,3 +815,54 @@ func TestUnwritableStateDirStopsFirstTimeSetup(t *testing.T) {
 		t.Errorf("admin/admin opened a setup that could not be saved: %d %s", r.Code, r.Body)
 	}
 }
+
+// The context is part of the event API, and a context stored by an older
+// version that still holds a secret is masked on the way out.
+func TestEventsExposeSessionContextAndMaskOldSecrets(t *testing.T) {
+	s, st, clock := newServer(t)
+	if err := st.AppendEvent(model.Event{
+		Time: *clock, Host: "test-host", Kind: model.KindSudo, Severity: model.SevInfo, User: "root",
+		SummaryKey: "event.sudo", Args: map[string]string{"user": "root", "cmd": "id"},
+		Context: &model.Context{LoginUID: "1000", LoginUser: "alice", EffectiveUser: "root", SessionID: "5",
+			Command: "mysql -u root -pHUNTER2secret",
+			Session: &model.SessionRef{Addr: "203.0.113.9", Confidence: model.ConfObserved, Source: "audit"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendEvent(model.Event{Time: clock.Add(-time.Hour), Host: "test-host", Kind: model.KindSudo, SummaryKey: "event.sudo",
+		Args: map[string]string{"user": "root", "cmd": "id"}}); err != nil {
+		t.Fatal(err)
+	}
+	token := signIn(t, s)
+	rec := do(t, s, http.MethodGet, "/api/v1/events?limit=5", token, nil)
+	if strings.Contains(rec.Body.String(), "HUNTER2secret") {
+		t.Fatalf("secret in the response: %s", rec.Body.String())
+	}
+	var page struct {
+		Items []eventJSON `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("%d items", len(page.Items))
+	}
+	var with, without eventJSON
+	for _, it := range page.Items {
+		if it.Context != nil {
+			with = it
+		} else {
+			without = it
+		}
+	}
+	c := with.Context
+	if c == nil || c.LoginUser != "alice" || c.Session == nil || c.Session.Addr != "203.0.113.9" || c.Session.Confidence != "observed" {
+		t.Errorf("context lost: %+v", c)
+	}
+	if with.SrcIP != "" {
+		t.Errorf("the session address is not a source address: %q", with.SrcIP)
+	}
+	if without.Summary == "" || without.Context != nil {
+		t.Errorf("an event without context must stay without: %+v", without)
+	}
+}

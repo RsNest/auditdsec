@@ -262,12 +262,45 @@
       el("div", { class: "facts-inline" }, facts.map(function (f) {
         return el("div", null, [el("span", { class: "lbl", text: f[0] }), el("span", { class: "mono", text: f[1] })]);
       })),
+      contextBlock(ev),
       ev.raw ? el("div", { class: "raw" }, [
         el("div", { class: "raw-head" }, [el("span", { class: "lbl", text: t("ev.detail.raw") }), copyButton(ev.raw)]),
         el("code", { text: ev.raw })
       ]) : null,
       el("div", { class: "btns" }, buttons)
     ]);
+  }
+
+  /* Who did it, as logged in and as run, plus the session; unknown stays unknown. */
+  function contextRows(ev) {
+    var c = ev.context;
+    if (!c) { return []; }
+    var who = function (name, uid) { return name || (uid ? "uid " + uid : ""); };
+    var rows = [];
+    var login = who(c.login_user, c.login_uid);
+    var eff = who(c.effective_user, c.effective_uid);
+    if (login) { rows.push([t("ev.ctx.login"), login]); }
+    if (eff) { rows.push([t("ev.ctx.effective"), eff]); }
+    var s = c.session;
+    if (s) {
+      var where = s.addr ? s.addr + (s.port ? ":" + s.port : "") : t("ev.ctx.unknown");
+      var note = s.confidence === "observed" ? t("ev.ctx.observed")
+        : s.confidence === "correlated" ? t("ev.ctx.correlated") : (s.note || "");
+      rows.push([t("ev.ctx.session"), where + (note ? " — " + note : "") + (s.ended ? " (" + t("ev.ctx.ended") + ")" : "")]);
+    }
+    if (c.session_id) { rows.push([t("ev.ctx.session_id"), c.session_id]); }
+    var proc = [c.exe, c.pid && "pid " + c.pid, c.ppid && "ppid " + c.ppid].filter(Boolean).join(" · ");
+    if (proc) { rows.push([t("ev.ctx.process"), proc]); }
+    if (c.command) { rows.push([t("ev.ctx.command"), c.command]); }
+    return rows;
+  }
+
+  function contextBlock(ev) {
+    var rows = contextRows(ev);
+    if (!rows.length) { return null; }
+    return el("div", { class: "facts-inline ctx" }, [el("span", { class: "lbl", text: t("ev.ctx.title") })].concat(rows.map(function (r) {
+      return el("div", null, [el("span", { class: "lbl", text: r[0] }), el("span", { class: "mono", text: r[1] })]);
+    })));
   }
 
   function copyButton(text) {
@@ -406,6 +439,6 @@
     };
   }
 
-  window.ADS.feed = { Deck: Deck, Journal: Journal, row: row, sevTag: sevTag,
+  window.ADS.feed = { contextRows: contextRows, Deck: Deck, Journal: Journal, row: row, sevTag: sevTag,
     selectDeck: selectDeck, deckSignature: deckSignature, blocked: blocked, protectedIP: protectedIP, banButton: banButton };
 })();

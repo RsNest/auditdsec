@@ -134,6 +134,7 @@ func Run(ctx context.Context, o Options) Report {
 	d.auditLog()
 	d.rules()
 	d.firewall()
+	d.sessions()
 	d.decisions()
 	d.queue()
 	d.panel()
@@ -437,4 +438,28 @@ func copyFile(from, to string) error {
 		return err
 	}
 	return out.Close()
+}
+
+func (d *doc) sessions() {
+	c := d.o.Config
+	area := d.t("SSH session context", "Контекст SSH-сессий")
+	base := d.t("Commands are linked to their SSH session through the audit log (session ID and login user).",
+		"Команды связываются с SSH-сессией через журнал аудита (ID сессии и пользователь входа).")
+	if !c.Session.Journald {
+		d.add(area, Info, base+d.t(" Journal enrichment is off (session.journald: false).", " Обогащение из журнала systemd выключено (session.journald: false)."),
+			d.t("Turn it on only if sessions show an unknown address.", "Включайте, только если у сессий не видно адреса."))
+		return
+	}
+	if _, err := d.o.LookPath("journalctl"); err != nil {
+		d.add(area, Info, base+d.t(" journalctl is not available here, so addresses missing from the audit log stay unknown.", " journalctl здесь недоступен, поэтому адреса, которых нет в журнале аудита, остаются неизвестными."),
+			d.t("Normal inside a container; mount the host journal read-only if you want the enrichment.", "Для контейнера это нормально; примонтируйте журнал хоста только для чтения, если нужно обогащение."))
+		return
+	}
+	if out, err := d.o.Run(d.ctx, "journalctl", "--no-pager", "-n", "1", "-o", "json", "_COMM=sshd"); err != nil {
+		d.add(area, Warn, base+fmt.Sprintf(d.t(" The journal cannot be read: %v", " Журнал systemd не читается: %v"), oneLine(err.Error()+" "+string(out))),
+			d.t("Add the agent's user to the systemd-journal group (or adm), or set session.journald: false. Audit-based attribution is not affected.",
+				"Добавьте пользователя агента в группу systemd-journal (или adm) либо задайте session.journald: false. Атрибуция по журналу аудита не затронута."))
+		return
+	}
+	d.add(area, OK, base+d.t(" The journal is readable, so sshd's login lines can fill in a missing address (shown as inferred).", " Журнал systemd читается, поэтому строки входа sshd могут дополнить недостающий адрес (помечается как выведенный)."), "")
 }

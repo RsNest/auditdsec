@@ -1115,3 +1115,42 @@ func TestDryRunIsNotReportedAsBlocked(t *testing.T) {
 		t.Errorf("%+v", b)
 	}
 }
+
+func TestAlertShowsLoginIdentityApartFromEffectiveAndSession(t *testing.T) {
+	ev := model.Event{Time: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC), Host: "web01", Kind: model.KindSudo, Severity: model.SevInfo,
+		SummaryKey: "event.sudo", Args: map[string]string{"user": "root", "cmd": "id"}}
+	render := func(lang i18n.Lang, c *model.Context) string {
+		f := newClient(t, func(o *Options) { o.Lang = lang })
+		e := ev
+		e.Context = c
+		return f.client.renderEvent(e)
+	}
+	observed := &model.Context{LoginUID: "1000", LoginUser: "alice", EffectiveUID: "0", EffectiveUser: "root",
+		Session: &model.SessionRef{Addr: "203.0.113.9", Confidence: model.ConfObserved, Source: "audit"}}
+	if got := render(i18n.LangEN, observed); !strings.Contains(got, "alice → root") || !strings.Contains(got, "SSH 203.0.113.9") || strings.Contains(got, "inferred") {
+		t.Errorf("observed (en): %q", got)
+	}
+	if got := render(i18n.LangRU, observed); !strings.Contains(got, "alice → root") || !strings.Contains(got, "SSH 203.0.113.9") {
+		t.Errorf("observed (ru): %q", got)
+	}
+	inferred := &model.Context{LoginUser: "alice", EffectiveUser: "root",
+		Session: &model.SessionRef{Addr: "198.51.100.4", Confidence: model.ConfCorrelated, Source: "journald", Ended: true}}
+	if got := render(i18n.LangEN, inferred); !strings.Contains(got, "(inferred)") || !strings.Contains(got, "session closed") {
+		t.Errorf("inferred: %q", got)
+	}
+	if got := render(i18n.LangRU, inferred); !strings.Contains(got, "выведено") || !strings.Contains(got, "сессия закрыта") {
+		t.Errorf("inferred (ru): %q", got)
+	}
+	unknown := &model.Context{LoginUID: "1000", Session: &model.SessionRef{Confidence: model.ConfUnknown, Note: "x"}}
+	got := render(i18n.LangEN, unknown)
+	if !strings.Contains(got, "uid 1000") || !strings.Contains(got, "SSH address unknown") || strings.Contains(got, "203.") {
+		t.Errorf("unknown: %q", got)
+	}
+	if got := render(i18n.LangEN, nil); strings.Contains(got, "🔑") {
+		t.Errorf("no context, no line: %q", got)
+	}
+	hostile := &model.Context{LoginUser: "<b>x</b>", EffectiveUser: "root"}
+	if got := render(i18n.LangEN, hostile); strings.Contains(got, "<b>x</b>") || !strings.Contains(got, "&lt;b&gt;") {
+		t.Errorf("names must be escaped: %q", got)
+	}
+}

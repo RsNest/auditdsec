@@ -51,6 +51,9 @@ func (c *Client) renderEvent(ev model.Event) string {
 	fmt.Fprintf(&b, "%s <b>%s</b> · %s\n", sevEmoji(ev.Severity), html.EscapeString(host),
 		c.tr("sev."+ev.Severity.String(), nil))
 	b.WriteString(c.tr(ev.SummaryKey, ev.Args))
+	if line := c.contextLine(ev); line != "" {
+		b.WriteString("\n" + line)
+	}
 	fmt.Fprintf(&b, "\n<code>%s</code>", c.fmtTime(ev.Time))
 	return b.String()
 }
@@ -100,4 +103,53 @@ func (c *Client) eventKeyboard(ev model.Event) *inlineKeyboard {
 		return nil
 	}
 	return &inlineKeyboard{Rows: rows}
+}
+
+// contextLine says who was really behind the event in one short line: the
+// identity that logged in, the identity the action ran as, and the SSH session
+// address with its confidence. Unknown parts are said to be unknown, nothing is
+// guessed, and the line is left out when the event carries no context.
+func (c *Client) contextLine(ev model.Event) string {
+	x := ev.Context
+	if x == nil {
+		return ""
+	}
+	name := func(n, uid string) string {
+		if n != "" {
+			return n
+		}
+		if uid != "" {
+			return "uid " + uid
+		}
+		return ""
+	}
+	login, eff := name(x.LoginUser, x.LoginUID), name(x.EffectiveUser, x.EffectiveUID)
+	var parts []string
+	switch {
+	case login != "" && eff != "" && login != eff:
+		parts = append(parts, html.EscapeString(login)+" → "+html.EscapeString(eff))
+	case login != "":
+		parts = append(parts, html.EscapeString(login))
+	case eff != "":
+		parts = append(parts, html.EscapeString(eff))
+	}
+	if s := x.Session; s != nil {
+		var p string
+		switch {
+		case s.Addr != "" && s.Confidence == model.ConfCorrelated:
+			p = c.tr("ui.ctx.ssh_inferred", map[string]string{"addr": html.EscapeString(s.Addr)})
+		case s.Addr != "":
+			p = c.tr("ui.ctx.ssh", map[string]string{"addr": html.EscapeString(s.Addr)})
+		default:
+			p = c.tr("ui.ctx.ssh_unknown", nil)
+		}
+		if s.Ended {
+			p += " (" + c.tr("ui.ctx.ended", nil) + ")"
+		}
+		parts = append(parts, p)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "🔑 " + strings.Join(parts, " · ")
 }
