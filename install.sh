@@ -1049,7 +1049,7 @@ write_config() {
     local k
     for k in PANEL_DOMAIN PANEL_CADDYFILE PANEL_SITE PANEL_SITE_ADDR PANEL_EMAIL PANEL_HTTPS_PORT \
              PANEL_PUBLIC_URL AUDITDSEC_WEB_LISTEN AUDITDSEC_WEB_PUBLIC_URL PANEL_ACME PANEL_ACME_URL \
-             PANEL_ACME_SUFFIX PANEL_HSTS PANEL_ACME_CA_ROOT; do
+             PANEL_ACME_SUFFIX PANEL_HSTS PANEL_ACME_CA_ROOT PANEL_CERT_CHECK; do
         env_unset "$k"
     done
 
@@ -1064,6 +1064,12 @@ write_config() {
             [ -z "$PUBLIC_IP" ] || env_set PANEL_PUBLIC_IP "$PUBLIC_IP"
             ;;
     esac
+    # The agent watches the certificate its panel serves. It can judge the
+    # chain only against the public CA store; a staging, self-signed or
+    # privately signed certificate is watched for its expiry alone.
+    if [ "$MODE" = selfsigned ] || [ "$ACME" = staging ] || [ -n "$CACERT" ]; then
+        env_set PANEL_CERT_CHECK expiry
+    fi
     case "$MODE" in
         domain)     env_set PANEL_CADDYFILE ./deploy/Caddyfile ;;
         ip)         env_set PANEL_CADDYFILE ./deploy/Caddyfile.acme-ip ;;
