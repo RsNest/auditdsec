@@ -6,6 +6,7 @@
 //	auditdsec run [-config FILE]     follow the audit log (the default)
 //	auditdsec check-config [-config] load the settings and report problems
 //	auditdsec check-rules [-rules]  check the audit rule files for the keys the agent needs
+//	auditdsec doctor [-config]      explain what works and what is broken, read-only
 //	auditdsec explain KIND [-lang]   explain one kind of event
 //	auditdsec hash-password          hash a panel password for the config
 //	auditdsec version                print the build version
@@ -35,6 +36,7 @@ import (
 	"github.com/RsNest/auditdsec/internal/config"
 	"github.com/RsNest/auditdsec/internal/decision"
 	"github.com/RsNest/auditdsec/internal/detect"
+	"github.com/RsNest/auditdsec/internal/doctor"
 	"github.com/RsNest/auditdsec/internal/i18n"
 	"github.com/RsNest/auditdsec/internal/logging"
 	"github.com/RsNest/auditdsec/internal/model"
@@ -141,6 +143,8 @@ func run(args []string) error {
 		return cmdCheckConfig(args)
 	case "check-rules":
 		return cmdCheckRules(args)
+	case "doctor":
+		return cmdDoctor(args)
 	case "explain":
 		return cmdExplain(args)
 	case "hash-password":
@@ -179,6 +183,7 @@ Usage:
                                      follow the audit log (the default command)
   auditdsec check-config [-config F] load the settings and report problems
   auditdsec check-rules [-rules P]  check the audit rule files for the keys the agent needs
+  auditdsec doctor [-config F]      explain what works and what is broken, read-only
   auditdsec explain KIND [-lang ru]  explain one kind of event
   auditdsec hash-password [-stdin]   hash a panel password for the web panel
   auditdsec reset-credentials -yes   forget the panel login and password (local recovery)
@@ -295,6 +300,28 @@ func cmdCheckRules(args []string) error {
 	}
 	fmt.Println("All required audit keys are present in the rule files.")
 	fmt.Println("This reads files only; `auditctl -l` shows what the kernel has loaded.")
+	return nil
+}
+
+// cmdDoctor explains, check by check, what works and what does not. It only
+// reads; it exits non-zero when something is broken so scripts can use it.
+func cmdDoctor(args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	path := fs.String("config", "", "path to the configuration file")
+	rules := fs.String("rules", "/etc/audit/rules.d,/etc/audit/audit.rules", "comma-separated audit rule files or directories")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(configPath(*path))
+	if err != nil {
+		doctor.Write(os.Stdout, i18n.Default, doctor.ConfigFailure(i18n.Default, err))
+		return errors.New("doctor found problems")
+	}
+	rep := doctor.Run(context.Background(), doctor.Options{Config: cfg, RulesPaths: strings.Split(*rules, ",")})
+	doctor.Write(os.Stdout, cfg.Language(), rep)
+	if rep.Worst() == doctor.Fail {
+		return errors.New("doctor found problems")
+	}
 	return nil
 }
 
