@@ -45,3 +45,34 @@ func (NoopBanner) Ban(context.Context, Decision) error      { return nil }
 func (NoopBanner) Unban(context.Context, string) error      { return nil }
 func (NoopBanner) List(context.Context) ([]Decision, error) { return nil, nil }
 func (NoopBanner) Name() string                             { return "noop" }
+
+// DryRunner is implemented by a backend that only logs what it would do. Its
+// blocks are not blocks, and nothing may report them as such.
+type DryRunner interface{ DryRun() bool }
+
+// Mode says how real a banner is, for reporting enforcement truthfully.
+type Mode string
+
+const (
+	// ModeNone: nothing enforces. No banner, or the no-op one.
+	ModeNone Mode = "none"
+	// ModeDryRun: the backend logs the commands it would run.
+	ModeDryRun Mode = "dry_run"
+	// ModeEnforcing: the backend changes the firewall.
+	ModeEnforcing Mode = "enforcing"
+)
+
+// ModeOf classifies a banner.
+func ModeOf(b Banner) Mode {
+	switch v := b.(type) {
+	case nil:
+		return ModeNone
+	case NoopBanner, *NoopBanner:
+		return ModeNone
+	case DryRunner:
+		if v.DryRun() {
+			return ModeDryRun
+		}
+	}
+	return ModeEnforcing
+}

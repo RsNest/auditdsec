@@ -11,14 +11,16 @@ import (
 
 // fakeRunner records what would have been run and can be told to fail.
 type fakeRunner struct {
-	mu   sync.Mutex
-	cmds []string
-	out  map[string]string // first matching substring wins
-	fail map[string]error
+	mu        sync.Mutex
+	cmds      []string
+	out       map[string]string // first matching substring wins
+	fail      map[string]error
+	failInput map[string]error // fail a script that contains the text
+	inputs    []string         // scripts given on standard input
 }
 
 func newFakeRunner() *fakeRunner {
-	return &fakeRunner{out: map[string]string{}, fail: map[string]error{}}
+	return &fakeRunner{out: map[string]string{}, fail: map[string]error{}, failInput: map[string]error{}}
 }
 
 func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -39,6 +41,21 @@ func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte
 	return nil, nil
 }
 
+func (f *fakeRunner) RunInput(ctx context.Context, input, name string, args ...string) ([]byte, error) {
+	f.mu.Lock()
+	f.inputs = append(f.inputs, input)
+	f.mu.Unlock()
+	out, err := f.Run(ctx, name, args...)
+	if err == nil {
+		for pat, e := range f.failInput {
+			if strings.Contains(input, pat) {
+				return nil, e
+			}
+		}
+	}
+	return out, err
+}
+
 func (f *fakeRunner) ran(substr string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -54,51 +71,6 @@ func (f *fakeRunner) all() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.cmds...)
-}
-
-func TestNftablesEnsureBuildsItsOwnTable(t *testing.T) {
-	r := newFakeRunner()
-	n := NewNftables(NftablesOptions{Runner: r})
-	if err := n.Ensure(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !n.Ready() {
-		t.Error("Ready should be true after Ensure")
-	}
-
-	want := []string{
-		"nft --version",
-		"add table inet auditdsec",
-		"add set inet auditdsec blocked4",
-		"add set inet auditdsec blocked6",
-		"add chain inet auditdsec input",
-		"ip saddr @blocked4 drop",
-		"ip6 saddr @blocked6 drop",
-	}
-	for _, w := range want {
-		if !r.ran(w) {
-			t.Errorf("missing step %q; ran:\n%s", w, strings.Join(r.all(), "\n"))
-		}
-	}
-	// Everything must live in the agent's own table: the host's firewall is
-	// not ours to edit.
-	for _, c := range r.all() {
-		if strings.Contains(c, "filter") && !strings.Contains(c, "auditdsec") {
-			t.Errorf("command touches a table that is not ours: %q", c)
-		}
-	}
-}
-
-// Recreating the table makes the store the single source of truth, instead of
-// leaving stale rules from a previous run behind.
-func TestNftablesEnsureReplacesAnOldTable(t *testing.T) {
-	r := newFakeRunner()
-	if err := NewNftables(NftablesOptions{Runner: r}).Ensure(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !r.ran("delete table inet auditdsec") {
-		t.Error("Ensure should drop a previous copy of the table first")
-	}
 }
 
 func TestNftablesEnsureReportsAMissingNft(t *testing.T) {
@@ -301,3 +273,160 @@ func TestIsNotFound(t *testing.T) {
 }
 
 var _ Banner = (*Nftables)(nil)
+
+const goodTable = `table inet auditdsec {
+	set blocked4 {
+		type ipv4_addr
+		flags interval,timeout
+		elements = { 198.51.100.7 timeout 1h expires 59m2s }
+	}
+	set blocked6 {
+		type ipv6_addr
+		flags interval,timeout
+	}
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+		ip saddr @blocked4 drop
+		ip6 saddr @blocked6 drop
+	}
+}`
+
+func TestNftablesEnsureCreatesAMissingTableInOneTransaction(t *testing.T) {
+	r := newFakeRunner()
+	r.fail["list table"] = errors.New("Error: No such file or directory")
+	n := NewNftables(NftablesOptions{Runner: r})
+	if err := n.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !n.Ready() {
+		t.Error("Ready should be true after Ensure")
+	}
+	if len(r.inputs) != 1 {
+		t.Fatalf("want one transaction, got %d", len(r.inputs))
+	}
+	script := r.inputs[0]
+	for _, w := range []string{
+		"add table inet auditdsec",
+		"add set inet auditdsec blocked4 { type ipv4_addr; flags timeout, interval; }",
+		"add set inet auditdsec blocked6 { type ipv6_addr; flags timeout, interval; }",
+		"hook input priority -10",
+		"add rule inet auditdsec input ip saddr @blocked4 drop",
+		"add rule inet auditdsec input ip6 saddr @blocked6 drop",
+	} {
+		if !strings.Contains(script, w) {
+			t.Errorf("script lacks %q:\n%s", w, script)
+		}
+	}
+	if strings.Contains(script, "delete table") {
+		t.Error("a missing table must not be deleted first")
+	}
+	for _, c := range r.all() {
+		if strings.Contains(c, "filter") && !strings.Contains(c, "auditdsec") {
+			t.Errorf("command touches a table that is not ours: %q", c)
+		}
+	}
+}
+
+// A restart must not open a window in which nothing is blocked: a table that
+// is already right is left alone, blocks included.
+func TestNftablesEnsureKeepsAWorkingTable(t *testing.T) {
+	r := newFakeRunner()
+	r.out["list table"] = goodTable
+	if err := NewNftables(NftablesOptions{Runner: r}).Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.inputs) != 0 || r.ran("delete") || r.ran("add ") {
+		t.Errorf("an intact table was modified:\n%s\ninputs: %q", strings.Join(r.all(), "\n"), r.inputs)
+	}
+}
+
+func TestNftablesEnsureReplacesATableOfTheWrongShape(t *testing.T) {
+	r := newFakeRunner()
+	r.out["list table"] = strings.Replace(goodTable, "ip6 saddr @blocked6 drop", "", 1)
+	if err := NewNftables(NftablesOptions{Runner: r}).Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.inputs) != 1 || !strings.HasPrefix(r.inputs[0], "delete table inet auditdsec\nadd table inet auditdsec") {
+		t.Fatalf("want one replacing transaction, got %q", r.inputs)
+	}
+}
+
+func TestNftablesEnsureReportsRealListFailures(t *testing.T) {
+	r := newFakeRunner()
+	r.fail["list table"] = errors.New("Operation not permitted")
+	if err := NewNftables(NftablesOptions{Runner: r}).Ensure(context.Background()); err == nil {
+		t.Error("a permission problem must not be taken for a missing table")
+	}
+	if len(r.inputs) != 0 {
+		t.Error("nothing may be created after an unexplained failure")
+	}
+}
+
+// A repeated ban must change the firewall's timeout: adding an existing
+// element does not.
+func TestNftablesBanRenewsAnExistingElement(t *testing.T) {
+	r := newFakeRunner()
+	r.out["list set inet auditdsec blocked4"] = goodTable
+	n := NewNftables(NftablesOptions{Runner: r})
+	if err := n.Ban(context.Background(), Decision{IP: "198.51.100.7", Until: time.Now().Add(24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.inputs) != 1 {
+		t.Fatalf("want one transaction, got %q", r.inputs)
+	}
+	s := r.inputs[0]
+	del, add := strings.Index(s, "delete element inet auditdsec blocked4 { 198.51.100.7 }"), strings.Index(s, "add element inet auditdsec blocked4 { 198.51.100.7 timeout 86")
+	if del < 0 || add < 0 || del > add {
+		t.Errorf("the element must be deleted and added again in one script:\n%s", s)
+	}
+	// if the element vanished meanwhile, a plain add still blocks it
+	r2 := newFakeRunner()
+	r2.out["list set inet auditdsec blocked4"] = goodTable
+	r2.failInput["delete element"] = errors.New("No such file or directory")
+	if err := NewNftables(NftablesOptions{Runner: r2}).Ban(context.Background(), Decision{IP: "198.51.100.7", Until: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if !r2.ran("add element inet auditdsec blocked4") {
+		t.Errorf("no fallback add:\n%s", strings.Join(r2.all(), "\n"))
+	}
+}
+
+func TestNftablesBanOfAnAbsentElementIsAPlainAdd(t *testing.T) {
+	r := newFakeRunner()
+	if err := NewNftables(NftablesOptions{Runner: r}).Ban(context.Background(), Decision{IP: "203.0.113.50", Until: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.inputs) != 0 || !r.ran("add element inet auditdsec blocked4 { 203.0.113.50 timeout") {
+		t.Errorf("ran:\n%s\ninputs %q", strings.Join(r.all(), "\n"), r.inputs)
+	}
+}
+
+func TestParseNftDuration(t *testing.T) {
+	tests := map[string]time.Duration{
+		"59m2s":       59*time.Minute + 2*time.Second,
+		"29d23h59m1s": 29*24*time.Hour + 23*time.Hour + 59*time.Minute + time.Second,
+		"1s130ms":     time.Second + 130*time.Millisecond,
+		"1w":          7 * 24 * time.Hour,
+	}
+	for in, want := range tests {
+		if got, ok := parseNftDuration(in); !ok || got != want {
+			t.Errorf("%q = %v %v, want %v", in, got, ok, want)
+		}
+	}
+	for _, bad := range []string{"", "x", "5", "5x", "1h2"} {
+		if _, ok := parseNftDuration(bad); ok {
+			t.Errorf("%q should not parse", bad)
+		}
+	}
+}
+
+func TestNftablesListReadsLongBans(t *testing.T) {
+	r := newFakeRunner()
+	r.out["list set inet auditdsec blocked4"] = `set blocked4 { elements = { 198.51.100.7 timeout 30d expires 29d23h59m1s } }`
+	got, err := NewNftables(NftablesOptions{Runner: r}).List(context.Background())
+	if err != nil || len(got) != 1 || got[0].Permanent() {
+		t.Fatalf("a 30-day ban read as permanent: %+v %v", got, err)
+	}
+}
+
+var _ DryRunner = (*Nftables)(nil)
