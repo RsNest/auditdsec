@@ -38,7 +38,16 @@ fmt:
 fmt-check:
 	@test -z "$$(gofmt -l .)" || { echo "not gofmt-clean:"; gofmt -l .; exit 1; }
 
-check: fmt-check vet test
+# The certificate helper's tests need Python with `cryptography` (certbot's own
+# environment has it). They are skipped, loudly, where it is missing.
+test-py:
+	@if python3 -c 'import cryptography' 2>/dev/null; then \
+		python3 -B -m unittest deploy/test_certtool.py; \
+	elif [ -x /opt/certbot/bin/python ]; then \
+		/opt/certbot/bin/python -B -m unittest deploy/test_certtool.py; \
+	else echo "test-py: SKIPPED (no Python with the cryptography package)"; fi
+
+check: fmt-check vet test test-py
 
 docker:
 	docker build -f deploy/Dockerfile \

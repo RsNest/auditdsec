@@ -6,8 +6,9 @@
 #   lab.sh up && scenarios.sh              # everything
 #   scenarios.sh ip_promote untrusted      # some
 #
-# Scenarios: tunnel ip_promote domain_promote ip_change domain_to_ip
+# Scenarios: tunnel selfsigned ip_promote domain_promote ip_change domain_to_ip
 #            domain_to_ip_fails restore untrusted reuse renew_and_reload
+# shellcheck disable=SC2016
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=env.sh
@@ -43,6 +44,7 @@ run_inst() {
 }
 
 env_val() { grep -E "^$1=" "$WORK/.env" | tail -n 1 | cut -d= -f2- | tr -d "'"; }
+hash_intact() { local v re='^pbkdf2-sha256[$][0-9]+[$][^$]+[$][^$]+$'; v="$(env_val AUDITDSEC_WEB_PASSWORD_HASH)"; [[ $v =~ $re ]]; }
 vol() { printf 'e2e_%s' "$1"; }
 vol_exists() { docker volume inspect "$(vol "$1")" >/dev/null 2>&1; }
 vol_cat() { docker run --rm -v "$(vol "$1"):/v:ro" --entrypoint cat "$CERTBOT_IMG" "/v/$2"; }
@@ -87,7 +89,20 @@ s_tunnel() {
     expect "the panel answers on loopback" listening 19477
     expect "the panel does not answer on the machine's other address" not_on_lan 19477
     expect ".env is mode 600" test "$(stat -c %a "$WORK/.env")" = 600
-    expect "the hash in .env keeps its dollar signs" bash -c "grep -qE \"^AUDITDSEC_WEB_PASSWORD_HASH='pbkdf2-sha256\\\$310000\\\$[^\\\$]+\\\$[^\\\$]+'\$\" '$WORK/.env'"
+    expect "the hash in .env keeps its dollar signs" hash_intact
+}
+
+s_selfsigned() {
+    step "self-signed mode: verified against the proxy's own CA, never against nothing"
+    reset
+    run_inst ss1 --mode selfsigned --site 127.0.0.1
+    expect "install succeeds" test "$RC" = 0
+    expect_out "the certificate verifies against this server's own CA" "verified against this server's own CA"
+    expect_out "the password went over that verified connection" "over the verified TLS connection to https://127.0.0.1"
+    expect_out "the summary tells the person browsers will warn" "browsers do not know it, so they warn"
+    expect "no certbot in this mode" test -z "$(docker ps -q --filter name=auditdsec-certbot)"
+    expect "the sign-in reached the proxy" caddy_has '/api/v1/login'
+    expect "a client without the CA cannot verify the connection" bash -c '! curl -fsS --noproxy "*" -o /dev/null https://127.0.0.1/'
 }
 
 s_ip_promote() {
@@ -316,11 +331,16 @@ s_renew_and_reload() {
     expect "and says why" bash -c "grep -q 'does not serve the current certificate' <<<'$st'"
     expect "status.json records the failure" bash -c "docker run --rm -v $(vol panel-certs-staging):/v:ro --entrypoint cat $CERTBOT_IMG /v/status.json | grep -q reload-failed"
 
+    expect "docker itself marks the certbot container unhealthy" \
+        wait_for 280 bash -c '[ "$(docker inspect -f "{{.State.Health.Status}}" auditdsec-certbot)" = unhealthy ]'
+
     step "  the fault is fixed; the next attempt succeeds without any renewal"
     cat "$LAB/Caddyfile.good" > "$cf"
     expect "the loop retried the reload and port 443 now serves the new certificate" \
         wait_for 90 bash -c "[ \"\$(printf '' | openssl s_client -connect 127.0.0.1:443 2>/dev/null | openssl x509 -noout -fingerprint -sha256 | cut -d= -f2)\" = '$new_on_disk' ]"
     expect "the health check passes again" wait_for 30 bash -c "[ \"\$(docker exec auditdsec-certbot python3 /hooks/certtool.py status)\" = ok ]"
+    expect "and docker marks the container healthy again" \
+        wait_for 150 bash -c '[ "$(docker inspect -f "{{.State.Health.Status}}" auditdsec-certbot)" = healthy ]'
 }
 
 s_secrets() {
@@ -339,7 +359,7 @@ s_secrets() {
 
 # ------------------------------------------------------------------- main --
 
-ALL="tunnel ip_promote domain_promote ip_change domain_to_ip domain_to_ip_fails restore untrusted reuse renew_and_reload"
+ALL="tunnel selfsigned ip_promote domain_promote ip_change domain_to_ip domain_to_ip_fails restore untrusted reuse renew_and_reload"
 want=("$@"); [ ${#want[@]} -gt 0 ] || read -r -a want <<<"$ALL"
 for n in "${want[@]}"; do
     "s_$n" || true
