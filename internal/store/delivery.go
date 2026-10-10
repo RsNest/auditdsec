@@ -57,15 +57,21 @@ func (s *Store) RecoverDeliveryPlans(cursors map[string]int64, accept func(deliv
 }
 
 func (s *Store) recoverDay(day string, offset int64, accept func(delivery.Position, delivery.Plan) error) error {
+	// Snapshot the file boundary after any append has completed its fsync.
+	// Reading beyond this boundary could import a concurrent uncommitted row.
+	s.mu.Lock()
 	f, err := os.Open(filepath.Join(s.dir, eventsDirName, day+".jsonl"))
 	if errors.Is(err, os.ErrNotExist) {
+		s.mu.Unlock()
 		return nil
 	}
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	defer f.Close()
 	fi, err := f.Stat()
+	s.mu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -75,7 +81,7 @@ func (s *Store) recoverDay(day string, offset int64, accept func(delivery.Positi
 	if _, err = f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
-	r := bufio.NewReaderSize(f, 64<<10)
+	r := bufio.NewReaderSize(io.LimitReader(f, fi.Size()-offset), 64<<10)
 	var line []byte
 	for {
 		part, err := r.ReadSlice('\n')

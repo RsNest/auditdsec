@@ -162,7 +162,18 @@ type apiResponse struct {
 	Result      json.RawMessage `json:"result"`
 	Description string          `json:"description"`
 	ErrorCode   int             `json:"error_code"`
+	Parameters  struct {
+		RetryAfter int `json:"retry_after"`
+	} `json:"parameters"`
 }
+
+type apiError struct {
+	message    string
+	code       int
+	retryAfter time.Duration
+}
+
+func (e *apiError) Error() string { return e.message }
 
 // call performs one API request. The token appears only in the URL and is
 // never included in a returned error.
@@ -195,10 +206,14 @@ func (c *Client) call(ctx context.Context, hc *http.Client, method string, req, 
 	}
 	var ar apiResponse
 	if err := json.Unmarshal(raw, &ar); err != nil {
-		return fmt.Errorf("telegram %s: bad response (http %d)", method, resp.StatusCode)
+		return &apiError{message: fmt.Sprintf("telegram %s: bad response (http %d)", method, resp.StatusCode), code: resp.StatusCode}
 	}
-	if !ar.OK {
-		return fmt.Errorf("telegram %s: %s (code %d)", method, strings.ReplaceAll(ar.Description, c.opt.Token, "[redacted]"), ar.ErrorCode)
+	if !ar.OK || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		code := ar.ErrorCode
+		if code == 0 {
+			code = resp.StatusCode
+		}
+		return &apiError{message: fmt.Sprintf("telegram %s: %s (code %d)", method, strings.ReplaceAll(ar.Description, c.opt.Token, "[redacted]"), code), code: code, retryAfter: time.Duration(min(max(ar.Parameters.RetryAfter, 0), 86400)) * time.Second}
 	}
 	if out != nil && len(ar.Result) > 0 {
 		if err := json.Unmarshal(ar.Result, out); err != nil {

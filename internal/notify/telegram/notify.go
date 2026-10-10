@@ -183,6 +183,11 @@ func (c *Client) allowRate(now time.Time) bool {
 // actually blocked or the decision was only recorded, because the difference
 // is the whole point: a ban nobody applied protects nothing.
 func (c *Client) NotifyBan(ctx context.Context, b store.Ban, applyErr error) error {
+	text, kb := c.banMessage(b, applyErr)
+	return c.Broadcast(ctx, text, kb)
+}
+
+func (c *Client) banMessage(b store.Ban, applyErr error) (string, *inlineKeyboard) {
 	args := map[string]string{
 		"ip":     b.IP,
 		"reason": b.Reason,
@@ -204,7 +209,7 @@ func (c *Client) NotifyBan(ctx context.Context, b store.Ban, applyErr error) err
 		{Text: c.tr("ui.btn.unban", map[string]string{"ip": b.IP}), Data: "unban:" + b.IP},
 		{Text: c.tr("ui.btn.me", nil), Data: "allow:" + b.IP},
 	}}}
-	return c.Broadcast(ctx, text, kb)
+	return text, kb
 }
 
 // NotifyMessage sends a plain localized notice.

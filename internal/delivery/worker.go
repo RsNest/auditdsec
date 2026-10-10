@@ -229,7 +229,10 @@ func (q *Queue) worker(ctx context.Context, sender Sender, priority Priority, ra
 					code = se.Code
 				}
 			}
-			if se != nil && se.Permanent {
+			if se != nil && se.Cancelled {
+				tx.Remove = []string{candidate.ID}
+				tx.Stats.Cancelled++
+			} else if se != nil && se.Permanent {
 				tx.Remove = []string{candidate.ID}
 				tx.Stats.Failed++
 				tx.Failure = &Failure{ID: candidate.ID, Destination: candidate.Destination, At: now, Reason: code, Attempts: candidate.Attempts}
@@ -257,8 +260,8 @@ func (q *Queue) worker(ctx context.Context, sender Sender, priority Priority, ra
 			q.mu.Unlock()
 			return fmt.Errorf("persist delivery result: %w", err)
 		}
-		// Forget rate buckets for routes with no remaining jobs. Fingerprints
-		// cannot accumulate forever as credentials are rotated.
+		// Bound temporary rate state as credentials are rotated. Durable retry
+		// deadlines survive even when an inactive fingerprint is discarded.
 		if len(rates) > q.opt.MaxJobs {
 			clear(rates)
 		}

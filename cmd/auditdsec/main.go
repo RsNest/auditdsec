@@ -528,6 +528,8 @@ func cmdRun(args []string) error {
 		return err
 	}
 
+	defer pl.Close()
+
 	// /debug reports what only the pipeline knows, so it is attached once the
 	// pipeline exists.
 	bot.SetDiag(func() []telegram.DiagItem {

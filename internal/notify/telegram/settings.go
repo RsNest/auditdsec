@@ -69,6 +69,7 @@ type Managed struct {
 	last      time.Time
 	lastError string
 	attempt   time.Time
+	outbox    bool
 }
 
 func NewManaged(o Options, stateDir string, startup bool) (*Managed, error) {
@@ -378,12 +379,16 @@ func (m *Managed) startLocked(startup bool) {
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel, m.done = cancel, make(chan struct{})
-	c, done, notice := m.client, m.done, startup && m.settings.StartupNotice
+	c, done, notice := m.client, m.done, startup && m.settings.StartupNotice && !m.outbox
+	outbox := m.outbox
 	go func() {
 		var wg sync.WaitGroup
-		wg.Add(2)
+		wg.Add(1)
 		go func() { defer wg.Done(); _ = c.RunBot(ctx) }()
-		go func() { defer wg.Done(); c.RunGrouper(ctx) }()
+		if !outbox {
+			wg.Add(1)
+			go func() { defer wg.Done(); c.RunGrouper(ctx) }()
+		}
 		if notice {
 			_ = c.SendStartupNotice(ctx)
 		}
@@ -391,6 +396,10 @@ func (m *Managed) startLocked(startup bool) {
 		close(done)
 	}()
 }
+
+// UseOutbox is called during wiring, before Run starts. Automatic alerts and
+// startup notices then use the pipeline's durable workers instead of broadcasts.
+func (m *Managed) UseOutbox() { m.mu.Lock(); defer m.mu.Unlock(); m.outbox = true }
 
 func (m *Managed) stopLocked() {
 	if m.cancel != nil {

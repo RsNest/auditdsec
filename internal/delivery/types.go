@@ -97,6 +97,7 @@ type Sender interface {
 type SendError struct {
 	Code       string
 	Permanent  bool
+	Cancelled  bool
 	RetryAfter time.Duration
 }
 

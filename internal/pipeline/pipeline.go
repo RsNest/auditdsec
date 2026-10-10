@@ -6,6 +6,7 @@ package pipeline
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/action"
+	"github.com/RsNest/auditdsec/internal/delivery"
 	"github.com/RsNest/auditdsec/internal/detect"
 	"github.com/RsNest/auditdsec/internal/model"
 	"github.com/RsNest/auditdsec/internal/netcheck"
@@ -32,6 +34,14 @@ import (
 // Notifier is the alerting side of the pipeline, implemented by the Telegram
 // client. Keeping it an interface means tests need no network and a second
 // channel (ntfy, a webhook) can be added without touching this package.
+// DeliveryPlanner snapshots immutable notification intents without network I/O.
+type DeliveryPlanner interface {
+	delivery.Sender
+	PlanEvent(model.Event) delivery.Plan
+	PlanBan(store.Ban, error) delivery.Plan
+	PlanMessage(string, map[string]string) delivery.Plan
+}
+
 type Notifier interface {
 	// Notify reports one event.
 	Notify(ctx context.Context, ev model.Event) error
@@ -111,6 +121,8 @@ type Pipeline struct {
 	current       source.Cursor
 	openPositions map[int64]source.Cursor
 	fatal         chan error
+	planner       DeliveryPlanner
+	outbox        *delivery.Queue
 
 	processed atomic.Uint64
 	reported  atomic.Uint64
@@ -156,7 +168,7 @@ func New(o Options) (*Pipeline, error) {
 	if o.StateDir != "" {
 		statePath = filepath.Join(o.StateDir, "tail.json")
 	}
-	return &Pipeline{
+	p := &Pipeline{
 		opt:           o,
 		log:           o.Logger,
 		now:           o.Now,
@@ -170,11 +182,54 @@ func New(o Options) (*Pipeline, error) {
 			FromStart: o.ReadFromStart,
 			Logger:    o.Logger,
 		}),
-	}, nil
+	}
+	if planner, ok := o.Notifier.(DeliveryPlanner); ok {
+		if o.StateDir == "" {
+			return nil, errors.New("pipeline: StateDir is required for durable delivery")
+		}
+		q, err := delivery.Open(delivery.Options{Dir: filepath.Join(o.StateDir, "outbox"), Now: o.Now})
+		if err != nil {
+			return nil, err
+		}
+		p.planner, p.outbox = planner, q
+		if managed, ok := o.Notifier.(interface{ UseOutbox() }); ok {
+			managed.UseOutbox()
+		}
+	}
+	return p, nil
+}
+
+// Close releases the outbox after Run and its workers have stopped.
+func (p *Pipeline) Close() error {
+	if p.outbox != nil {
+		return p.outbox.Close()
+	}
+	return nil
 }
 
 // Run follows the log until the context is cancelled.
 func (p *Pipeline) Run(ctx context.Context) error {
+	p.reapplyBans(ctx)
+	if p.outbox != nil {
+		workerctx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if err := p.outbox.Run(workerctx, p.planner); err != nil {
+				p.failDelivery(err)
+			}
+		}()
+		defer func() { cancel(); <-done }()
+		if err := p.recoverDeliveries(ctx); err != nil {
+			return err
+		}
+		if startup, ok := p.opt.Notifier.(interface{ PlanStartup() delivery.Plan }); ok {
+			if err := p.enqueueNotice(ctx, startup.PlanStartup()); err != nil {
+				return err
+			}
+		}
+	}
+
 	lines := make(chan source.Line, lineBuffer)
 	tailctx, stopReader := context.WithCancel(ctx)
 	readerErr := make(chan error, 1)
@@ -215,7 +270,6 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		"from_start", p.opt.ReadFromStart, "debug", p.opt.Debug,
 		"detector", detectorName(p.opt.Detector), "banner", bannerName(p.opt.Banner))
 	p.purgeOldEvents()
-	p.reapplyBans(ctx)
 
 	certs := make(chan certResult, 1)
 	if strings.HasPrefix(p.opt.PanelURL, "https://") {
@@ -253,6 +307,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			p.checkHeartbeat(ctx)
 
 		case <-purge.C:
+			if err := p.recoverDeliveries(ctx); err != nil {
+				return err
+			}
 			p.purgeOldEvents()
 
 		case r := <-certs:
@@ -375,7 +432,9 @@ func (p *Pipeline) handle(ctx context.Context, ev model.Event) error {
 	for _, d := range res.Decisions {
 		p.applyDecision(ctx, d)
 	}
-	p.notifyEvent(ctx, ev)
+	if err := p.notifyEvent(ctx, ev); err != nil {
+		return err
+	}
 	for n, derived := range res.Events {
 		if ev.ID != "" {
 			derived.ID = fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d", ev.ID, derived.Kind, n))))
@@ -437,6 +496,12 @@ func (p *Pipeline) applyDecision(ctx context.Context, d action.Decision) {
 		"ip", d.IP, "reason", d.Reason, "until", untilLabel(d.Until),
 		"repeat", ban.Count, "applied", applyErr == nil && p.opt.Banner != nil)
 
+	if p.planner != nil {
+		if err := p.enqueueNotice(ctx, p.planner.PlanBan(ban, applyErr)); err != nil {
+			p.failDelivery(err)
+		}
+		return
+	}
 	if err := p.opt.Notifier.NotifyBan(ctx, ban, applyErr); err != nil {
 		p.log.Error("cannot report the ban", "ip", d.IP, "error", err)
 	}
@@ -469,6 +534,12 @@ func (p *Pipeline) autoAllowlist(ctx context.Context, ev model.Event) {
 	}
 	p.log.Info("the first successful login was allowlisted", "ip", ev.SrcIP, "user", ev.User)
 
+	if p.planner != nil {
+		if err := p.enqueueNotice(ctx, p.planner.PlanMessage("ui.allow.auto", map[string]string{"ip": ev.SrcIP})); err != nil {
+			p.failDelivery(err)
+		}
+		return
+	}
 	if err := p.opt.Notifier.NotifyMessage(ctx, "ui.allow.auto", map[string]string{"ip": ev.SrcIP}); err != nil {
 		p.log.Warn("cannot report the allowlisting", "error", err)
 	}
@@ -512,13 +583,29 @@ func (p *Pipeline) reapplyBans(ctx context.Context) {
 func (p *Pipeline) deliver(ctx context.Context, ev model.Event) (bool, error) {
 	added, err := p.persistEvent(ev)
 	if added && err == nil {
-		p.notifyEvent(ctx, ev)
+		err = p.notifyEvent(ctx, ev)
 	}
 	return added, err
 }
 
 func (p *Pipeline) persistEvent(ev model.Event) (bool, error) {
-	added, err := p.opt.Store.AppendEventOnce(ev)
+	var plan *delivery.Plan
+	if p.planner != nil {
+		if ev.Time.IsZero() {
+			ev.Time = p.now()
+		}
+		if ev.ID == "" {
+			var nonce [16]byte
+			if _, err := rand.Read(nonce[:]); err != nil {
+				return false, err
+			}
+			ev.ID = fmt.Sprintf("%x", nonce)
+		}
+		prepared := p.planner.PlanEvent(ev)
+		plan = &prepared
+	}
+	committed, err := p.opt.Store.AppendEventWithPlan(ev, plan)
+	added := committed.Added
 	if err != nil {
 		p.log.Error("cannot store the event", "kind", ev.Kind, "error", err)
 		select {
@@ -530,14 +617,18 @@ func (p *Pipeline) persistEvent(ev model.Event) (bool, error) {
 	return added, nil
 }
 
-func (p *Pipeline) notifyEvent(ctx context.Context, ev model.Event) {
+func (p *Pipeline) notifyEvent(ctx context.Context, ev model.Event) error {
+	if p.outbox != nil {
+		return p.recoverDeliveries(ctx)
+	}
 	if err := p.opt.Notifier.Notify(ctx, ev); err != nil {
 		p.log.Error("cannot send the alert", "kind", ev.Kind, "error", err)
-		return
+		return nil
 	}
 	p.reported.Add(1)
 	p.log.Debug("event handled",
 		"kind", ev.Kind, "severity", ev.Severity.String(), "user", ev.User, "ip", ev.SrcIP)
+	return nil
 }
 
 // checkHeartbeat reports the audit log going unreadable or silent. Silence is
@@ -610,12 +701,25 @@ func (p *Pipeline) purgeOldEvents() {
 	}
 	if removed > 0 {
 		p.log.Info("old event files removed", "files", removed)
+		if p.outbox != nil {
+			days, err := p.opt.Store.DeliveryDays()
+			if err == nil {
+				err = p.outbox.PruneCursors(days)
+			}
+			if err != nil {
+				p.failDelivery(err)
+			}
+		}
 	}
 }
 
 // Counters reports what the pipeline has done, for diagnostics.
 func (p *Pipeline) Counters() (processed, reported, skipped uint64) {
-	return p.processed.Load(), p.reported.Load(), p.skipped.Load()
+	reported = p.reported.Load()
+	if p.outbox != nil {
+		reported = p.outbox.Stats().Delivered
+	}
+	return p.processed.Load(), reported, p.skipped.Load()
 }
 
 // Banned reports how many ban decisions have been taken, for /debug.
