@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -43,8 +44,11 @@ type Options struct {
 
 // Tailer follows one file.
 type Tailer struct {
-	opt Options
-	log *slog.Logger
+	opt        Options
+	log        *slog.Logger
+	mu         sync.Mutex
+	checkpoint *Cursor
+	status     string
 }
 
 // New returns a Tailer. It does not touch the filesystem yet.
