@@ -219,9 +219,9 @@ The nftables backend is tested against a fake `nft` that records the scripts it 
 (one transaction per change, delete+add to renew a timeout, nft duration parsing with d/w).
 
 Not verified: a real `nft` on a real kernel, a live reconciliation against a changed
-firewall, or Telegram delivery; none of those were run. Decisions are not transactional with
-the audit journal, so a crash between reading an event and recording its decision can lose
-that decision. The `input` hook does not filter traffic forwarded to bridged containers.
+firewall, or Telegram delivery; none of those were run. (The journal-to-decision gap noted here
+was closed afterwards; see "Detection recovery" and the verification section below.)
+The `input` hook does not filter traffic forwarded to bridged containers.
 
 ## Stage 1.7 focused verification
 
@@ -239,3 +239,38 @@ Not verified: the rules against a real auditd (`augenrules --load`, `auditctl -l
 that rejects a syscall name); a real unlink/rename/truncate producing the records used in the
 tests (they are written from the documented record format); `check-rules` on a host. No
 privileged live lab was run. The `-F dir=` rules do not see `ftruncate` or `open(O_TRUNC)`.
+
+## Detection recovery verification
+
+Deterministic offline tests (fake clock, fault-injected state writes, fake firewall that can
+be listed; a "crash" is a process dropped without shutdown work, followed by a new process
+over the same state directory):
+
+- event journaled, detection never started → the ban is created after restart, once, and a
+  duplicate event from the audit log changes nothing;
+- decision computed, state write fails → the agent stops with no decision and an unmoved
+  cursor; after restart five consumed failures are rebuilt and the sixth is judged once
+  (mutation-checked: restoring the cursor on a failed write removes this test's guarantee);
+- five failures before a restart plus one after reach the threshold; restoring history
+  produces no decision;
+- decision committed, firewall refuses → recorded as `failed`; the reconciler applies it
+  later without a second offence;
+- firewall holds the block, completion record lost → the reconciler adopts it; no second
+  `Ban` call;
+- ban notice journaled, outbox import interrupted → one notice job, one journal record, duty
+  cleared;
+- repeated recoveries leave the decision, its creation time and the firewall calls unchanged;
+- an old backlog (ban window over) and an allowlisted address advance progress and ban
+  nobody;
+- migration: a journal written before the upgrade produces no ban; one new failure after an
+  hour-old burst does not ban;
+- a lost progress record (marker present) and a cursor beyond its file are errors;
+- store level: atomic commit and rollback, repeat commit as a no-op, active ban not extended,
+  retention keeps unconsumed days and bounds cursors, restore reads only consumed records.
+
+Not verified: a real crash (`kill -9`) or power loss against real storage and a real `nft`;
+the filesystem's fsync/rename behaviour is assumed. Remaining limits: the audit-log cursor
+and the journal append are still two writes (a crash between them re-reads the lines, and
+deduplication makes that safe); a failed state write stops the agent instead of degrading;
+`state.json` is rewritten whole on every decision, which is acceptable for the expected
+decision rate but not for a very large ban table; notifications remain at least once.

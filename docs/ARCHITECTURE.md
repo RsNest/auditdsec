@@ -195,11 +195,60 @@ Failure history survives a ban; a separate cooldown prevents another decision in
 one window. A separate correlation flag suppresses repeated successful-login signals
 until new failure evidence arrives. Timestamp history per IP is capped at the larger
 of the ban and correlation thresholds; tracked addresses are capped and evicted
-least-recently-seen first. Startup restores recent failures from the committed journal
+least-recently-seen first. Startup restores recent failures from the already-consumed journal
 without producing historical decisions: five failures before restart plus one after
 restart still meet the threshold. Telegram requests run in independent outbox workers,
 so routine provider latency does not delay subsequent detection. A full critical queue
 backpressures intake instead of silently dropping critical notification intents.
+
+### Detection recovery
+
+Ingestion and detection are two durable steps with the event journal between them.
+
+1. **Ingest.** The assembled event is appended to the journal (`events/<day>.jsonl`)
+   with its notification plan; the audit-log cursor may then advance. Event IDs are
+   stable, so a re-read line is a duplicate and adds nothing.
+2. **Detect.** `store.ConsumeDetection` offers every journal record the detector has not
+   yet judged, in order, from a per-day byte cursor stored in `state.json` (`detect`).
+   The detector runs, then `decision.Service.CommitDetection` writes, in **one atomic
+   state write**, the desired ban decisions (state `pending`, `NoticeDue` set) and the
+   cursor past the record. A failed write records nothing and moves nothing; the agent
+   stops (the detector's in-memory counters already include the event) and the restart
+   re-derives them. Events that produce no decision advance the cursor the same way.
+3. **Enforce.** Only after the commit is the firewall touched, outside the commit. A
+   refusal, a hang or a kill leaves a `pending`/`failed` record the reconciler enforces;
+   a block already in the firewall whose completion record was lost is adopted, not
+   re-added.
+
+Derived events (`login_after_bruteforce`) are journaled before the commit under IDs
+derived from the triggering event, so a replay re-creates the same ID and the journal
+deduplicates it; they never feed detection. A decision for an address that already has
+an active ban changes nothing (no new offence, no longer ban); a protected, private or
+already-expired one is refused, and the cursor still moves, so an old backlog never
+revives an expired ban.
+
+**Correlation memory** is rebuilt at start from the *consumed* prefix of the last
+`detect.window` of journal (`store.RestoreConsumed` → `BruteForce.RestoreFailure`), never
+from unconsumed records, so nothing is counted twice. Per-address history and the number
+of tracked addresses stay capped as before.
+
+**Retention** (`Store.Purge`) never deletes a journal day whose size exceeds its detection
+cursor while a detector runs; cursors of removed days are dropped, so the checkpoint is
+bounded by the retained days.
+
+**Notice duty.** The notice intent ID is derived from the decision (address, creation
+time, repeat count). A duty found at start is first looked up in the notification journal
+(last two days); a notice already journaled is imported, not journaled again. The outbox
+still skips an intent ID it already holds.
+
+**Migration.** The first start with this version on an installation with an existing
+journal sets every day's cursor to the end of that day's file: history written before the
+upgrade produces no bans and no notices, and the log says so. The recovery guarantee
+begins at that moment. A marker file `detection.initialized` records that this happened;
+if it exists while the progress record is missing, or a cursor points beyond its file,
+start-up fails with an explicit error instead of resetting progress. If the detector is
+disabled, nothing is consumed and retention applies as before; enabling it later resumes
+from the stored cursor (or starts at the end if it was never initialized).
 
 ## Bans
 
@@ -238,9 +287,9 @@ All three interfaces — the detector, Telegram and the panel — ask one `decis
 - **Notice duty.** An automatic ban is stored together with `NoticeDue`; the pipeline sends
   the notice and then clears the duty, and does so again after a restart or a reconciliation
   pass. A crash between the two repeats the notice (at-least-once); the outbox skips an
-  intent ID it already holds, so a replay cannot stall recovery. Decisions are still not
-  transactional with the audit journal: a crash after reading an event but before the
-  decision can lose that one decision.
+  intent ID it already holds, so a replay cannot stall recovery. The decision itself is
+  committed together with detection progress (see Detection recovery), so a crash after
+  journaling an event no longer loses its decision.
 - **First-login allowlist.** `ban.auto_allowlist` defaults to `off` for new installations,
   because the first successful login need not be the owner's. An installation whose config
   explicitly says `first_login` keeps it. Allowlisting goes through the same service.

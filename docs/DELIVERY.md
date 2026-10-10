@@ -33,9 +33,12 @@ request and the process dies before persisting the acknowledgment, that recipien
 receive it again. Telegram `sendMessage` has no client idempotency key: the guarantee is
 **at least once**, not exactly once. A provider acknowledgment is not a read receipt.
 
-Notification intent persistence does not make detection/firewall changes transactional.
-A crash between a ban decision and journaling its notice can still lose that notice;
-the stage 1.6 decision service/reconciler must close that separate gap.
+Detection results (desired ban decisions, the notice duty and the detection cursor) are
+committed together; see "Detection recovery" in ARCHITECTURE.md. Firewall execution is not
+part of that commit and is recovered by the reconciler.
+A ban notice is owed from the decision itself and is looked up in the notification journal
+before it is journaled again; a crash between journaling it and clearing the duty cannot
+journal it twice, but a crash after a provider accepted it can still repeat it (at least once).
 
 ## Admission and delivery
 
