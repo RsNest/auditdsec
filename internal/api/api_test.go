@@ -965,3 +965,102 @@ func TestExceptionsAPI(t *testing.T) {
 		t.Errorf("delete: %d", rec.Code)
 	}
 }
+
+func TestExportEvents(t *testing.T) {
+	s, st, clock := newServer(t)
+	add := func(ev model.Event) {
+		t.Helper()
+		if err := st.AppendEvent(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk := func(i int, user, cmd string) model.Event {
+		return model.Event{Time: clock.Add(-time.Duration(i) * time.Minute), Host: "test-host", Kind: model.KindSudo, Severity: model.SevInfo, User: user,
+			SummaryKey: "event.sudo", Args: map[string]string{"user": user, "cmd": cmd},
+			Context: &model.Context{LoginUser: "alice", EffectiveUser: "root", Session: &model.SessionRef{Addr: "203.0.113.9", Confidence: model.ConfObserved}}}
+	}
+	add(mk(1, "root", "mysql -u root -pHUNTER2secret")) // stored by an old version, unmasked
+	add(mk(2, "=HYPERLINK(\"http://evil\")", "id"))
+	add(mk(3, "bob", "ls"))
+	other := mk(4, "root", "id")
+	other.Kind, other.SummaryKey, other.SrcIP = model.KindSSHLoginFail, "event.ssh_login_fail", "198.51.100.7"
+	other.Args = map[string]string{"user": "root", "ip": "198.51.100.7"}
+	add(other)
+
+	if rec := do(t, s, http.MethodGet, "/api/v1/export/events", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("export needs a session: %d", rec.Code)
+	}
+	token := signIn(t, s)
+
+	rec := do(t, s, http.MethodGet, "/api/v1/export/events?kind=sudo", token, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Disposition"), "attachment") || rec.Header().Get("Content-Type") != "application/x-ndjson" {
+		t.Fatalf("%d %v", rec.Code, rec.Header())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "HUNTER2secret") {
+		t.Fatalf("an old stored secret was exported: %s", body)
+	}
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	if len(lines) != 4 { // three events and the trailer
+		t.Fatalf("%d lines: %s", len(lines), body)
+	}
+	if !strings.Contains(lines[len(lines)-1], `"complete":true`) || !strings.Contains(body, "203.0.113.9") {
+		t.Errorf("trailer or context missing: %s", body)
+	}
+
+	rec = do(t, s, http.MethodGet, "/api/v1/export/events?format=csv&kind=sudo", token, nil)
+	csvBody := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.HasPrefix(csvBody, "time,host,kind,") || strings.Contains(csvBody, ",=HYPERLINK") || !strings.Contains(csvBody, "'=HYPERLINK") {
+		t.Errorf("csv must neutralize formulas: %d %s", rec.Code, csvBody)
+	}
+
+	// Filters apply as in the list.
+	rec = do(t, s, http.MethodGet, "/api/v1/export/events?user=bob", token, nil)
+	if n := strings.Count(rec.Body.String(), `"kind"`); n != 1 {
+		t.Errorf("user filter: %d rows", n)
+	}
+	if rec = do(t, s, http.MethodGet, "/api/v1/export/events?format=xml", token, nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("bad format: %d", rec.Code)
+	}
+	if rec = do(t, s, http.MethodGet, "/api/v1/export/events?severity=nope", token, nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("bad filter: %d", rec.Code)
+	}
+
+	// The cap is explicit, never silent.
+	old := exportLimit
+	exportLimit = 2
+	defer func() { exportLimit = old }()
+	rec = do(t, s, http.MethodGet, "/api/v1/export/events?kind=sudo", token, nil)
+	if !strings.Contains(rec.Body.String(), `"complete":false`) || strings.Count(rec.Body.String(), `"kind"`) != 2 {
+		t.Errorf("truncation must be reported: %s", rec.Body.String())
+	}
+	rec = do(t, s, http.MethodGet, "/api/v1/export/events?format=csv&kind=sudo", token, nil)
+	if !strings.Contains(rec.Body.String(), "export limit of 2 rows reached") {
+		t.Errorf("csv truncation: %s", rec.Body.String())
+	}
+}
+
+func TestExportIncidents(t *testing.T) {
+	s, st, clock := newServer(t)
+	st.InitDetection()
+	ev := model.Event{ID: "e1", Time: *clock, Host: "test-host", Kind: model.KindSSHLoginFail, Severity: model.SevWarn, SrcIP: "198.51.100.7", User: "root"}
+	c, _ := st.AppendEventWithPlan(ev, nil)
+	if _, err := st.CommitDetectionEvent(c.Position, []store.DetectBan{{IP: "198.51.100.7", Reason: "6 failed", Until: clock.Add(time.Hour)}}, &ev); err != nil {
+		t.Fatal(err)
+	}
+	token := signIn(t, s)
+	rec := do(t, s, http.MethodGet, "/api/v1/export/incidents", token, nil)
+	var out struct {
+		Items []incidentJSON `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || len(out.Items) != 1 || len(out.Items[0].Events) != 1 {
+		t.Fatalf("%v %s", err, rec.Body.String())
+	}
+	rec = do(t, s, http.MethodGet, "/api/v1/export/incidents?format=csv&state=open", token, nil)
+	if !strings.HasPrefix(rec.Body.String(), "id,state,severity,") || !strings.Contains(rec.Body.String(), "inc-1") {
+		t.Errorf("%s", rec.Body.String())
+	}
+	if rec = do(t, s, http.MethodGet, "/api/v1/export/incidents?state=zzz", token, nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("%d", rec.Code)
+	}
+}

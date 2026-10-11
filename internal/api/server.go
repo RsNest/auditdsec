@@ -190,6 +190,8 @@ func (s *Server) routes() {
 	api("GET /api/v1/incidents", true, s.handleIncidents)
 	api("GET /api/v1/incidents/{id}", true, s.handleIncident)
 	api("POST /api/v1/incidents/{id}", true, s.handleIncidentAction)
+	api("GET /api/v1/export/events", true, s.handleExportEvents)
+	api("GET /api/v1/export/incidents", true, s.handleExportIncidents)
 	api("GET /api/v1/exceptions", true, s.handleExceptions)
 	api("POST /api/v1/exceptions", true, s.handleExceptionAdd)
 	api("DELETE /api/v1/exceptions/{id}", true, s.handleExceptionDelete)
@@ -429,12 +431,83 @@ type eventJSON struct {
 	Suppressed string            `json:"suppressed,omitempty"`
 }
 
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	lang := s.lang(r)
+// eventQuery is the filter shared by the event list and the export.
+type eventQuery struct {
+	sev          model.Severity
+	kind         model.Kind
+	since, until time.Time
+	ip, user     string
+	needle       string
+	before       string
+	lang         i18n.Lang
+}
 
+// parseEventQuery reads the filter from the URL; on a bad value it answers 400
+// and reports false.
+func (s *Server) parseEventQuery(w http.ResponseWriter, r *http.Request) (eventQuery, bool) {
+	q := r.URL.Query()
+	f := eventQuery{sev: -1, lang: s.lang(r)}
+	if v := q.Get("severity"); v != "" {
+		p, err := model.ParseSeverity(v)
+		if err != nil {
+			fail(w, http.StatusBadRequest, "bad_request", "bad severity")
+			return f, false
+		}
+		f.sev = p
+	}
+	f.kind = model.Kind(q.Get("kind"))
+	if f.kind != "" && !model.ValidKind(f.kind) {
+		fail(w, http.StatusBadRequest, "bad_request", "unknown kind")
+		return f, false
+	}
+	f.since, f.until = timeParam(w, q.Get("since")), timeParam(w, q.Get("until"))
+	if f.since.Equal(errTime) || f.until.Equal(errTime) {
+		return f, false
+	}
+	f.ip, f.user = strings.ToLower(q.Get("ip")), strings.ToLower(q.Get("user"))
+	f.needle = strings.ToLower(q.Get("q"))
+	f.before = q.Get("before")
+	return f, true
+}
+
+// accept applies the filter. The returned event is masked: events written by
+// older versions may hold unmasked evidence, which is masked on the way out and
+// before the search can match against it, so neither an answer nor a query can
+// reveal it. Stored files are not rewritten.
+func (f eventQuery) accept(id string, ev model.Event) (model.Event, string, bool) {
+	if f.before != "" && id >= f.before {
+		return ev, "", false
+	}
+	if f.sev >= 0 && ev.Severity != f.sev {
+		return ev, "", false
+	}
+	if f.kind != "" && ev.Kind != f.kind {
+		return ev, "", false
+	}
+	if f.ip != "" && !strings.Contains(strings.ToLower(ev.SrcIP), f.ip) {
+		return ev, "", false
+	}
+	if f.user != "" && !strings.Contains(strings.ToLower(ev.User), f.user) {
+		return ev, "", false
+	}
+	ev = sanitize.Event(ev)
+	summary := i18n.T(f.lang, ev.SummaryKey, ev.Args)
+	if f.needle != "" && !strings.Contains(strings.ToLower(summary+" "+ev.User+" "+ev.SrcIP+" "+ev.Raw), f.needle) {
+		return ev, "", false
+	}
+	return ev, summary, true
+}
+
+func toEventJSON(id string, ev model.Event, summary string) eventJSON {
+	return eventJSON{
+		ID: id, EventID: ev.ID, Time: ev.Time.UTC(), Host: ev.Host, Kind: ev.Kind, Severity: ev.Severity.String(),
+		User: ev.User, SrcIP: ev.SrcIP, Summary: summary, Args: ev.Args, Raw: ev.Raw, Context: ev.Context, Suppressed: ev.Suppressed,
+	}
+}
+
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	limit := 50
-	if v := q.Get("limit"); v != "" {
+	if v := r.URL.Query().Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
 			fail(w, http.StatusBadRequest, "bad_request", "bad limit")
@@ -442,58 +515,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = min(n, 200)
 	}
-	var sev model.Severity = -1
-	if v := q.Get("severity"); v != "" {
-		p, err := model.ParseSeverity(v)
-		if err != nil {
-			fail(w, http.StatusBadRequest, "bad_request", "bad severity")
-			return
-		}
-		sev = p
-	}
-	kind := model.Kind(q.Get("kind"))
-	if kind != "" && !model.ValidKind(kind) {
-		fail(w, http.StatusBadRequest, "bad_request", "unknown kind")
+	f, ok := s.parseEventQuery(w, r)
+	if !ok {
 		return
 	}
-	since, until := timeParam(w, q.Get("since")), timeParam(w, q.Get("until"))
-	if since.Equal(errTime) || until.Equal(errTime) {
-		return
-	}
-	ipQ, userQ := strings.ToLower(q.Get("ip")), strings.ToLower(q.Get("user"))
-	needle := strings.ToLower(q.Get("q"))
-	before := q.Get("before")
-
 	items := make([]eventJSON, 0, limit+1)
-	err := s.opt.Store.Scan(since, until, func(id string, ev model.Event) bool {
-		if before != "" && id >= before {
+	err := s.opt.Store.Scan(f.since, f.until, func(id string, ev model.Event) bool {
+		ev, summary, ok := f.accept(id, ev)
+		if !ok {
 			return true
 		}
-		if sev >= 0 && ev.Severity != sev {
-			return true
-		}
-		if kind != "" && ev.Kind != kind {
-			return true
-		}
-		if ipQ != "" && !strings.Contains(strings.ToLower(ev.SrcIP), ipQ) {
-			return true
-		}
-		if userQ != "" && !strings.Contains(strings.ToLower(ev.User), userQ) {
-			return true
-		}
-		// Events written by older versions may hold unmasked evidence: it is
-		// masked on the way out, before the search can match against it, so
-		// neither the answer nor a query can reveal it. Stored files are not
-		// rewritten.
-		ev = sanitize.Event(ev)
-		summary := i18n.T(lang, ev.SummaryKey, ev.Args)
-		if needle != "" && !strings.Contains(strings.ToLower(summary+" "+ev.User+" "+ev.SrcIP+" "+ev.Raw), needle) {
-			return true
-		}
-		items = append(items, eventJSON{
-			ID: id, EventID: ev.ID, Time: ev.Time.UTC(), Host: ev.Host, Kind: ev.Kind, Severity: ev.Severity.String(),
-			User: ev.User, SrcIP: ev.SrcIP, Summary: summary, Args: ev.Args, Raw: ev.Raw, Context: ev.Context, Suppressed: ev.Suppressed,
-		})
+		items = append(items, toEventJSON(id, ev, summary))
 		return len(items) <= limit
 	})
 	if err != nil {
