@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,8 @@ type Options struct {
 	// MinManualGap: how often the button may trigger a request (default 1 min).
 	MinManualGap time.Duration
 	Rand         func() float64
+	// Sleep replaces the pause between tries (tests).
+	Sleep func(context.Context, time.Duration)
 }
 
 // persisted is what survives a restart.
@@ -192,15 +195,23 @@ func (c *Checker) save() {
 	}
 }
 
-// fetch downloads one file of the channel.
-func (c *Checker) fetch(ctx context.Context, name string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.opt.Base+name, nil)
+// fetch downloads one file of the channel. bust is empty on the first try; on
+// a retry after a stale or mismatched copy it is a value added to the address
+// so a cache that kept the old answer is asked a new question.
+func (c *Checker) fetch(ctx context.Context, name, bust string) ([]byte, error) {
+	target := c.opt.Base + name
+	if bust != "" {
+		target += "?cb=" + bust
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, err
 	}
 	// Nothing about this server, its events or its user: a fixed agent string.
 	req.Header.Set("User-Agent", "auditdsec-update-check")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
 	resp, err := c.opt.Client.Do(req)
 	if err != nil {
 		return nil, err
@@ -219,19 +230,79 @@ func (c *Checker) fetch(ctx context.Context, name string) ([]byte, error) {
 	return data, nil
 }
 
-// Fetch downloads, verifies and evaluates the channel's document without
-// touching the saved state (used by the installer's update command).
-func (c *Checker) Fetch(ctx context.Context) (Result, error) {
-	doc, err := c.fetch(ctx, c.opt.Channel+".json")
-	if err != nil {
-		return Result{}, err
+// ErrStale: the source answered with a copy older than one already seen. A
+// caching layer between the project's release and this server can hold the old
+// copy of a rolling file for a while; it is not a damaged document and not an
+// update that was withdrawn.
+var ErrStale = errors.New("update: the source returned an older copy than the one already seen")
+
+// retryPauses are the waits before the second and third tries.
+var retryPauses = []time.Duration{3 * time.Second, 9 * time.Second}
+
+func (c *Checker) pause(ctx context.Context, d time.Duration) {
+	if c.opt.Sleep != nil {
+		c.opt.Sleep(ctx, d)
+		return
 	}
-	return c.evaluate(ctx, doc)
+	select {
+	case <-ctx.Done():
+	case <-time.After(d):
+	}
 }
 
-func (c *Checker) evaluate(ctx context.Context, doc []byte) (Result, error) {
+// seenSeq is the order number of the newest build this server has already seen
+// in this channel, for the build it runs; 0 when none.
+func (c *Checker) seenSeq() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.st.Last == nil || c.st.Commit != c.opt.Installed.Commit {
+		return 0
+	}
+	return c.st.Last.Latest.Seq
+}
+
+// Fetch downloads, verifies and evaluates the channel's document without
+// touching the saved state (used by the installer's update command). A copy
+// that does not verify (the document and its signature came from different
+// moments) or is older than one already seen is asked for again, twice, with a
+// pause and a changed address; signature and validation are never skipped.
+func (c *Checker) Fetch(ctx context.Context) (Result, error) {
+	seen := c.seenSeq()
+	var res Result
+	var err error
+	for try := 0; try <= len(retryPauses); try++ {
+		bust := ""
+		if try > 0 {
+			c.pause(ctx, retryPauses[try-1])
+			if ctx.Err() != nil {
+				break
+			}
+			bust = strconv.FormatInt(c.opt.Now().UnixNano(), 36)
+		}
+		var doc []byte
+		if doc, err = c.fetch(ctx, c.opt.Channel+".json", bust); err != nil {
+			if try == 0 {
+				return Result{}, err // an unreachable source is the backoff's business
+			}
+			continue
+		}
+		res, err = c.evaluate(ctx, doc, bust)
+		if err == nil && res.Latest.Seq < seen {
+			err = ErrStale
+		}
+		if err == nil {
+			return res, nil
+		}
+		if !errors.Is(err, ErrSignature) && !errors.Is(err, ErrStale) {
+			return Result{}, err // a document that is invalid by its own content
+		}
+	}
+	return Result{}, err
+}
+
+func (c *Checker) evaluate(ctx context.Context, doc []byte, bust string) (Result, error) {
 	if len(c.opt.PublicKey) > 0 {
-		sig, err := c.fetch(ctx, c.opt.Channel+".json.sig")
+		sig, err := c.fetch(ctx, c.opt.Channel+".json.sig", bust)
 		if err != nil {
 			return Result{}, fmt.Errorf("%w (%v)", ErrSignature, err)
 		}

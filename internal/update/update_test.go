@@ -300,7 +300,8 @@ func rig(t *testing.T, src *source, mod func(*Options)) (*Checker, *clock, *memS
 	clk := &clock{t: time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)}
 	st := &memStore{}
 	o := Options{Installed: Installed{Version: "x"}, Channel: ChannelMain, Arch: "amd64", Base: srv.URL + "/", Store: st, Now: clk.now,
-		Rand: func() float64 { return 0.5 }, Client: &http.Client{Timeout: 2 * time.Second}}
+		Sleep: func(context.Context, time.Duration) {},
+		Rand:  func() float64 { return 0.5 }, Client: &http.Client{Timeout: 2 * time.Second}}
 	if mod != nil {
 		mod(&o)
 	}

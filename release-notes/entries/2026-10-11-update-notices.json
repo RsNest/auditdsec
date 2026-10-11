@@ -1,0 +1,18 @@
+{
+  "id": "2026-10-11-update-notices",
+  "date": "2026-10-11",
+  "title": { "en": "Notice of newer versions in the panel", "ru": "Уведомление о новых версиях в панели" },
+  "added": {
+    "en": [
+      "The panel shows when a newer version is published, what changed, and whether an installer update is needed.",
+      "The notice is read from a signed document over HTTPS; a source that is down never affects detection or the panel."
+    ],
+    "ru": [
+      "Панель показывает, что вышла новая версия, что в ней изменилось и нужен ли запуск обновления установщика.",
+      "Сведения читаются из подписанного документа по HTTPS; недоступный источник не влияет на обнаружение и панель."
+    ]
+  },
+  "breaking": [],
+  "requires": { "installer_update": false, "migration": "none" },
+  "evidence": ["internal/update/checker.go", "internal/api/update.go", "internal/web/assets/updates.js"]
+}

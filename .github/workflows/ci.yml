@@ -224,8 +224,11 @@ jobs:
             docker manifest inspect "ghcr.io/${OWNER}/${name}@${digest}" > /dev/null
           done
       - name: fetch the previous document
-        run: |
-          curl -fsSL --retry 3 -o previous.json "https://github.com/${GITHUB_REPOSITORY}/releases/download/updates/${{ steps.v.outputs.channel }}.json" || : > previous.json
+        # From the release asset through the API, not from the public address:
+        # a cached copy there could be older than the last publication and
+        # would restart the build numbers. Only a 404 means "no history yet";
+        # any other failure stops the job.
+        run: node scripts/verify-published.cjs previous --repo "$GITHUB_REPOSITORY" --channel "${{ steps.v.outputs.channel }}" --out previous.json
       - name: build the document
         id: build
         run: |
@@ -259,15 +262,35 @@ jobs:
           gh release view updates > /dev/null 2>&1 || gh release create updates --title "Update metadata" --prerelease \
             --notes "Rolling metadata that installed copies of auditdsec read to learn about new versions. Not a release; do not edit."
           gh release upload updates "${files[@]}" --clobber
-      - name: read it back from the public address
+      - name: check the stored asset by ID and digest
         if: steps.build.outputs.skip != 'yes'
         run: |
           set -euo pipefail
+          sigarg=(); [ -f out.json.sig ] && sigarg=(--sig out.json.sig)
+          node scripts/verify-published.cjs asset --repo "$GITHUB_REPOSITORY" --channel "${{ steps.v.outputs.channel }}" --file out.json "${sigarg[@]}"
+      - name: read it back from the public address
+        if: steps.build.outputs.skip != 'yes'
+        run: |
+          set -uo pipefail
           channel="${{ steps.v.outputs.channel }}"
-          for i in 1 2 3 4 5 6 7 8; do
-            if curl -fsSL -o check.json "https://github.com/${GITHUB_REPOSITORY}/releases/download/updates/$channel.json" && cmp -s check.json out.json; then ok=yes; break; fi
-            sleep 5
-          done
-          [ "${ok:-no}" = yes ] || { echo "::error::the published document does not match what was uploaded"; exit 1; }
-          sigarg=""; [ -f out.json.sig ] && sigarg="-sig out.json.sig"
-          go run ./cmd/auditdsec update-validate $sigarg check.json
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/updates"
+          # A fresh copy is asked for with a changed address and no-cache headers,
+          # a few times with growing pauses. The stored asset was verified above, so a
+          # stale cached copy that does not clear is a warning; a corrupt one fails.
+          node scripts/verify-published.cjs public --url "$base/$channel.json" --file out.json
+          rc=$?
+          if [ "$rc" = 10 ]; then
+            echo "::warning::the public address still serves an older copy of $channel.json; the stored asset is correct (verified by ID and digest). Installed copies ask again with a cache bypass."
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+          # The bytes themselves must still be a valid, correctly signed document: validate what the
+          # public address serves when it serves the new copy, and the uploaded file otherwise.
+          sigarg=(); [ -f out.json.sig ] && sigarg=(-sig out.json.sig)
+          if [ "$rc" = 0 ]; then
+            curl -fsSL -H 'Cache-Control: no-cache' -o check.json "$base/$channel.json?cb=$(date +%s)"
+            if [ -f out.json.sig ]; then curl -fsSL -H 'Cache-Control: no-cache' -o check.json.sig "$base/$channel.json.sig?cb=$(date +%s)"; sigarg=(-sig check.json.sig); fi
+            go run ./cmd/auditdsec update-validate "${sigarg[@]}" check.json
+          else
+            go run ./cmd/auditdsec update-validate "${sigarg[@]}" out.json
+          fi

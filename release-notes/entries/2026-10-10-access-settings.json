@@ -1,0 +1,18 @@
+{
+  "id": "2026-10-10-access-settings",
+  "date": "2026-10-10",
+  "title": { "en": "Change the panel address after installation", "ru": "Смена адреса панели после установки" },
+  "added": {
+    "en": [
+      "A repeated ./install.sh shows a menu: check, change the domain, switch to an IP address, an SSH tunnel, or reset the credentials.",
+      "Settings has an access wizard that checks a new address and applies it through a small local control service, with a rollback when the new address does not work."
+    ],
+    "ru": [
+      "Повторный запуск ./install.sh показывает меню: проверка, смена домена, переход на IP-адрес, SSH-туннель или сброс учётных данных.",
+      "В настройках есть мастер доступа: он проверяет новый адрес и применяет его через небольшую локальную службу, а при неудаче возвращает прежний."
+    ]
+  },
+  "breaking": [],
+  "requires": { "installer_update": false, "migration": "none" },
+  "evidence": ["deploy/installer-access.sh", "internal/access/control.go", "internal/web/assets/access.js", "docs/ACCESS.md"]
+}

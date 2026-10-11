@@ -1,0 +1,20 @@
+{
+  "id": "2026-10-10-incidents-and-exceptions",
+  "date": "2026-10-10",
+  "title": { "en": "Incidents, exceptions and SSH session context", "ru": "Инциденты, исключения и контекст SSH-сессий" },
+  "added": {
+    "en": [
+      "Related events are grouped into incidents with a timeline; events and incidents can be exported.",
+      "Exceptions silence expected noise without hiding critical events or changing detection.",
+      "Events show which SSH session they came from and how sure the address is: observed, correlated or unknown."
+    ],
+    "ru": [
+      "Связанные события собираются в инциденты с хронологией; события и инциденты можно выгрузить.",
+      "Исключения убирают ожидаемый шум, не скрывая критичные события и не меняя обнаружение.",
+      "События показывают, из какой SSH-сессии они пришли и насколько надёжен адрес: наблюдаемый, сопоставленный или неизвестный."
+    ]
+  },
+  "breaking": [],
+  "requires": { "installer_update": false, "migration": "none" },
+  "evidence": ["internal/incident", "internal/exception", "internal/session", "internal/api/export.go"]
+}

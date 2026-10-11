@@ -1,0 +1,38 @@
+{
+  "id": "2026-10-11-installer-and-logs",
+  "date": "2026-10-11",
+  "title": { "en": "A clearer installer and one place for logs", "ru": "Понятный установщик и единое место для логов" },
+  "added": {
+    "en": [
+      "The installer shows numbered stages, a plan to confirm and a result that keeps the application, HTTPS and the outside check apart.",
+      "./install.sh --logs TRACE_ID and auditdsec logs --trace TRACE_ID show one operation from every component.",
+      "Logs of the installer, agent, panel API and browser errors are JSON lines in /var/log/auditseclogs with a trace ID, masked secrets and size rotation.",
+      "The panel reports its own browser errors to the server log, with limits on size and rate."
+    ],
+    "ru": [
+      "Установщик показывает пронумерованные этапы, план для подтверждения и итог, где приложение, HTTPS и проверка снаружи названы отдельно.",
+      "./install.sh --logs TRACE_ID и auditdsec logs --trace TRACE_ID показывают одну операцию из всех компонентов.",
+      "Логи установщика, агента, API панели и ошибок браузера — это JSON-строки в /var/log/auditseclogs с trace ID, скрытыми секретами и ротацией по размеру.",
+      "Панель сообщает об ошибках в браузере в лог сервера, с ограничением размера и частоты."
+    ]
+  },
+  "changed": {
+    "en": [
+      "The installer must be run as root and never calls sudo for you; it stops before changing anything otherwise.",
+      "A RemoteProbe is optional: without one the installer checks what it can on this server and says what it did not check.",
+      "The panel port starts at 443; if it is taken you choose another one, and nothing that holds it is stopped."
+    ],
+    "ru": [
+      "Установщик нужно запускать от root; sudo он сам не вызывает и без root останавливается до любых изменений.",
+      "RemoteProbe необязателен: без него установщик проверяет всё возможное на сервере и говорит, что не проверял.",
+      "Порт панели начинается с 443; если он занят, вы выбираете другой, а то, что его держит, не останавливается."
+    ]
+  },
+  "actions": {
+    "en": ["Run the installer with sudo ./install.sh from now on."],
+    "ru": ["Запускайте установщик так: sudo ./install.sh."]
+  },
+  "breaking": [],
+  "requires": { "installer_update": true, "migration": "none" },
+  "evidence": ["install.sh", "deploy/installer-log.sh", "internal/logging/logging.go", "internal/api/clientlog.go", "scripts/check-installer-ui.sh"]
+}
