@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/RsNest/auditdsec/internal/access"
 	"github.com/RsNest/auditdsec/internal/update"
 )
 
@@ -14,6 +16,83 @@ type fakeUpdate struct {
 	view update.View
 	err  error
 	n    int
+}
+
+func TestUpdateApplyPinsTheCheckedBuildAndGuardsMutations(t *testing.T) {
+	s, _, clock := newServer(t)
+	token := signIn(t, s)
+	v := availableView()
+	v.LastSuccess = *clock
+	f := &fakeUpdate{view: v}
+	s.opt.Update = f
+	ctl := &fakeControl{status: statusJSON}
+	s.opt.Control = ctl
+	payload := map[string]string{"commit": v.Result.Latest.Commit}
+	if rec := do(t, s, http.MethodPost, "/api/v1/update/apply", "", payload); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated update: %d", rec.Code)
+	}
+	if rec := do(t, s, http.MethodPost, "/api/v1/update/apply", token, map[string]string{"commit": strings.Repeat("c", 40)}); rec.Code != http.StatusConflict {
+		t.Fatalf("arbitrary build accepted: %d", rec.Code)
+	}
+	for _, state := range []string{"unavailable", "checking", "up_to_date"} {
+		f.view.State = state
+		if rec := do(t, s, http.MethodPost, "/api/v1/update/apply", token, payload); rec.Code != http.StatusConflict {
+			t.Fatalf("state %s was installable: %d", state, rec.Code)
+		}
+	}
+	f.view.State = update.StateAvailable
+	f.view.Result.Requires.Migration = "irreversible"
+	if rec := do(t, s, http.MethodPost, "/api/v1/update/apply", token, payload); rec.Code != http.StatusConflict {
+		t.Fatalf("irreversible migration accepted: %d", rec.Code)
+	}
+	f.view.Result.Requires.Migration = "reversible"
+	f.view.LastSuccess = clock.Add(-25 * time.Hour)
+	if rec := do(t, s, http.MethodPost, "/api/v1/update/apply", token, payload); rec.Code != http.StatusConflict {
+		t.Fatalf("stale build accepted: %d", rec.Code)
+	}
+	f.view.LastSuccess = *clock
+	ctl.err = access.ErrBusy
+	if rec := do(t, s, http.MethodPost, "/api/v1/update/apply", token, payload); rec.Code != http.StatusConflict {
+		t.Fatalf("concurrent update accepted: %d", rec.Code)
+	}
+	ctl.err = nil
+	if rec := do(t, s, http.MethodPost, "/api/v1/update/apply", token, payload); rec.Code != http.StatusAccepted {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body)
+	}
+	if len(ctl.started) != 1 || ctl.started[0].Action != access.ActionUpdate || ctl.started[0].Commit != payload["commit"] || ctl.started[0].TraceID == "" {
+		t.Fatalf("not a pinned, traced update: %+v", ctl.started)
+	}
+	var out updateJSON
+	rec := do(t, s, http.MethodGet, "/api/v1/update", token, nil)
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Task == nil || !out.Control["available"] {
+		t.Fatalf("cannot resume: %v %s", err, rec.Body)
+	}
+	if rec := do(t, s, http.MethodGet, "/api/v1/update/tasks/chg-1", token, nil); rec.Code != http.StatusOK {
+		t.Fatalf("polling failed: %d", rec.Code)
+	}
+	ctl.tasks[0].Params.Action = access.ActionDomain
+	if rec := do(t, s, http.MethodGet, "/api/v1/update/tasks/chg-1", token, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("another operation shown as an update: %d", rec.Code)
+	}
+}
+
+type oldUpdateControl struct{ fakeControl }
+
+func (*oldUpdateControl) SupportsUpdates(context.Context) bool { return false }
+
+func TestOldOrMissingControlCannotOfferOneClickUpdate(t *testing.T) {
+	s, _, clock := newServer(t)
+	token := signIn(t, s)
+	v := availableView()
+	v.LastSuccess = *clock
+	s.opt.Update = &fakeUpdate{view: v}
+	for _, ctl := range []AccessControl{nil, &oldUpdateControl{}} {
+		s.opt.Control = ctl
+		rec := do(t, s, http.MethodPost, "/api/v1/update/apply", token, map[string]string{"commit": v.Result.Latest.Commit})
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "enable-panel-control") {
+			t.Fatalf("old control: %d %s", rec.Code, rec.Body)
+		}
+	}
 }
 
 func (f *fakeUpdate) View() update.View { return f.view }

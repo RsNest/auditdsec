@@ -39,11 +39,11 @@
     ui.control.dataset.ok = ctl && ctl.available ? "1" : "0";
     ui.available = !!(ctl && ctl.available);
     if (s && s.draft && !ui.touched) { fill(s.draft); }
-    if (s && s.last_task && !polling && ui.shownTask !== s.last_task.id) { track(s.last_task); }
+    if (s && s.last_task && s.last_task.params && s.last_task.params.action !== "update" && !polling && ui.shownTask !== s.last_task.id) { track(s.last_task); }
   }
 
   function fill(d) {
-    ui.action.value = d.action || "domain"; ui.site.value = d.site || ""; ui.email.value = d.email || ""; ui.port.value = d.https_port || "auto";
+    ui.action.value = d.action === "update" ? "domain" : d.action || "domain"; ui.site.value = d.site || ""; ui.email.value = d.email || ""; ui.port.value = d.https_port || "auto";
     toggle();
   }
   function toggle() {
@@ -59,10 +59,11 @@
   }
 
   function checkNow() {
-    var p = params();
+    var p = params(), current = ui;
     clear(ui.result); ui.touched = true;
     add(ui.result, el("p", { class: "callout", text: t("acc.checking") }));
-    A.api.accessCheck(p).then(function (r) { show(p, r); }, function (e) {
+    A.api.accessCheck(p).then(function (r) { if (ui === current) { show(p, r); } }, function (e) {
+      if (ui !== current) { return; }
       clear(ui.result); add(ui.result, el("p", { class: "err", text: e.message || t("err.generic") }));
     });
   }
@@ -104,8 +105,9 @@
   }
 
   function apply(p, plan) {
-    var body = Object.assign({}, p, { plan_id: plan.plan_id, confirm: true });
-    A.api.accessApply(body).then(function (task) { track(task); }, function (e) {
+    var body = Object.assign({}, p, { plan_id: plan.plan_id, confirm: true }), current = ui;
+    A.api.accessApply(body).then(function (task) { if (ui === current) { track(task); } }, function (e) {
+      if (ui !== current) { return; }
       clear(ui.progress); add(ui.progress, el("p", { class: "err", text: e.message || t("err.generic") }));
       if (e.data && e.data.command) { add(ui.progress, copyCmd(e.data.command)); }
     });
@@ -141,12 +143,14 @@
     ui.shownTask = task.id;
     if (polling) { clearInterval(polling); polling = null; }
     if (paintTask(task)) { return; }
-    var misses = 0;
+    var misses = 0, current = ui;
     polling = setInterval(function () {
       A.api.accessTask(task.id).then(function (x) {
+        if (ui !== current) { return; }
         misses = 0;
         if (paintTask(x)) { clearInterval(polling); polling = null; }
       }, function () {
+        if (ui !== current) { return; }
         misses++;
         if (misses === 3) { add(ui.progress, el("p", { class: "callout", text: t("acc.reconnect") })); }
       });
@@ -155,7 +159,7 @@
 
   function mount(host) {
     ui = { available: false, touched: false, shownTask: "" };
-    ui.action = el("select", { class: "sel", onchange: toggle }, ["domain", "ip", "tunnel", "update", "check"].map(function (a) { return el("option", { value: a, text: t("acc.action." + a) }); }));
+    ui.action = el("select", { class: "sel", onchange: toggle }, ["domain", "ip", "tunnel", "check"].map(function (a) { return el("option", { value: a, text: t("acc.action." + a) }); }));
     ui.site = el("input", { class: "in", type: "text", autocomplete: "off", spellcheck: "false", placeholder: "panel.example.com" });
     ui.email = el("input", { class: "in", type: "text", autocomplete: "off", placeholder: "me@example.com" });
     ui.port = el("input", { class: "in", type: "text", value: "auto", autocomplete: "off" });
@@ -163,16 +167,17 @@
     ui.siteF = f(t("acc.f.site"), ui.site); ui.emailF = f(t("acc.f.email"), ui.email); ui.portF = f(t("acc.f.port"), ui.port);
     ui.status = el("div", { class: "facts-inline" });
     ui.control = el("p", { class: "callout" });
-    ui.result = el("div"); ui.progress = el("div", { "aria-live": "polite" });
+    ui.result = el("div", { class: "acc-result" }); ui.progress = el("div", { class: "acc-progress", "aria-live": "polite" });
+    var actionField = f(t("acc.f.action"), ui.action); actionField.classList.add("acc-action");
     add(host, [
       el("h3", { class: "sub-h", text: t("acc.current") }), ui.status, ui.control,
       el("h3", { class: "sub-h", text: t("acc.wizard") }), el("p", { class: "callout", text: t("acc.lede") }),
-      el("div", { class: "form-row" }, [f(t("acc.f.action"), ui.action), ui.siteF, ui.emailF, ui.portF,
+      el("div", { class: "form-row" }, [actionField, ui.siteF, ui.emailF, ui.portF,
         el("button", { class: "pill pill-solid", type: "button", text: t("acc.check"), onclick: checkNow })]),
       ui.result, ui.progress
     ]);
     toggle();
   }
 
-  A.Access = { mount: mount, update: function (s) { if (ui) { status(s); } }, params: function () { return ui ? params() : null; } };
+  A.Access = { mount: mount, unmount: function () { if (polling) { clearInterval(polling); } polling = null; ui = null; }, update: function (s) { if (ui) { status(s); } }, params: function () { return ui ? params() : null; } };
 })();

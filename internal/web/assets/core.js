@@ -148,6 +148,7 @@
     for (var i = 0; i < kids.length; i++) {
       var k = kids[i];
       if (k === null || k === undefined || k === false) { continue; }
+      if (Array.isArray(k)) { add(node, k); continue; }
       node.appendChild(typeof k === "object" ? k : document.createTextNode(String(k)));
     }
     return node;
@@ -286,15 +287,18 @@
 
   var api = {
     login: function (login, password) { return request("POST", "/login", { login: login, password: password }); },
+    logout: function () { return request("POST", "/logout"); },
     setupComplete: function (p) { return request("POST", "/setup/complete", p); },
     status: function () { return request("GET", "/status"); },
     events: function (query) { return request("GET", "/events" + (query ? "?" + query : "")); },
     explain: function (kind) { return request("GET", "/explain/" + kind + "?lang=" + state.lang); },
     bans: function () { return request("GET", "/bans"); },
     suspects: function () { return request("GET", "/suspects"); },
-    incidents: function () { return request("GET", "/incidents"); },
+    incidents: function (state) { return request("GET", "/incidents?state=" + encodeURIComponent(state || "open")); },
     update: function () { return request("GET", "/update?lang=" + state.lang); },
     updateCheck: function () { return request("POST", "/update/check"); },
+    updateApply: function (commit) { return request("POST", "/update/apply", { commit: commit }); },
+    updateTask: function (id) { return request("GET", "/update/tasks/" + encodeURIComponent(id)); },
     access: function () { return request("GET", "/access"); },
     accessCheck: function (p) { return request("POST", "/access/check", p); },
     accessApply: function (p) { return request("POST", "/access/apply", p); },

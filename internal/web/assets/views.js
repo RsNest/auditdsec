@@ -1,7 +1,5 @@
-/* auditdsec panel: the sign-in form, the page itself and the scroll engine.
-   Everything the portal hero does is a function of scroll position, so it
-   plays backwards when the reader scrolls back up; entry reveals elsewhere
-   fire once and stay. */
+/* auditdsec workspace: hash routes, operational overview and existing actions.
+   Pages keep their forms and filters when navigating; log values are text only. */
 (function () {
   "use strict";
 
@@ -12,7 +10,7 @@
   var R = {};
   var model = { status: null, events: [], incidents: [], exceptions: [], bans: [], allow: [], suspects: null, cfg: null, diag: null };
   var pendingBans = Object.create(null), modelRevision = 0;
-  var deck = null, journal = null, engine = null, poll = null, observer = null, uid = 0;
+  var journal = null, poll = null, uid = 0, route = "overview", incidentFilter = "open";
 
   function errText(e) {
     if (!e) { return t("err.generic"); }
@@ -28,9 +26,13 @@
     return el("div", { class: "fld" }, [el("label", { class: "lbl", for: id, text: label }), control]);
   }
   function go(id) {
-    var node = document.getElementById(id);
-    if (node) { node.scrollIntoView({ behavior: S.reduced ? "auto" : "smooth", block: "start" }); }
+    var aliases = { top: "overview", journal: "events", kinds: "events", access: "settings", alerts: "settings" };
+    var target = aliases[id] || id;
+    if (location.hash === "#" + target) { navigate(); }
+    else { location.hash = target; }
+    if (id === "access" || id === "alerts") { setSettingsTab(id); }
   }
+
   function tone(lv) { return lv === "down" ? "crit" : lv; }
 
   /* ---------------- actions the deck, journal and tables share ---------------- */
@@ -53,7 +55,7 @@
             model.bans = model.bans.filter(function (old) { return old.ip !== b.ip; }).concat([b]);
             // Repaint before polling: ordinary cards for a blocked IP disappear now.
             paintAll();
-            if (b.applied && deck) { deck.advanceFromIP(b.ip); }
+
             A.toast(t(b.applied ? "bans.form.done" : "bans.form.recorded", { ip: b.ip }), b.applied ? "ok" : "warn");
             refresh();
             return !!b.applied;
@@ -244,209 +246,163 @@
   }
 
   function signOut() {
+    A.api.logout().catch(function () {});
+    A.Updates.reset();
     S.token = null;
     A.put("sessionStorage", "ads.token", null);
     showGate();
     window.scrollTo(0, 0);
   }
 
-  /* ---------------- the bar ---------------- */
+  /* ---------------- workspace and navigation ---------------- */
 
-  var SECTIONS = [["overview", "nav.overview"], ["events", "nav.events"], ["incidents", "nav.incidents"], ["exceptions", "nav.exceptions"], ["access", "nav.access"], ["addresses", "nav.addresses"], ["alerts", "nav.alerts"], ["system", "nav.system"]];
+  var SECTIONS = [["overview", "nav.overview", "grid"], ["events", "nav.events", "list"],
+    ["incidents", "nav.incidents", "layers"], ["addresses", "ui.blocks", "shield"],
+    ["exceptions", "nav.exceptions", "filter"], ["system", "ui.diagnostics", "activity"],
+    ["settings", "ui.settings", "settings"], ["updates", "ui.updates", "download"]];
 
+  function icon(name) {
+    var paths = {
+      grid: ["M3 3h7v7H3z", "M14 3h7v7h-7z", "M3 14h7v7H3z", "M14 14h7v7h-7z"],
+      list: ["M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"],
+      layers: ["m12 3 10 5-10 5L2 8z", "m2 12 10 5 10-5M2 16l10 5 10-5"],
+      shield: ["M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z", "m8 12 3 3 5-6"],
+      filter: ["M3 4h18l-7 8v7l-4 2v-9Z"],
+      activity: ["M2 12h5l3-8 4 16 3-8h5"],
+      settings: ["M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z", "M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"],
+      download: ["M12 3v12m-5-5 5 5 5-5", "M4 16v5h16v-5"],
+      menu: ["M4 6h16M4 12h16M4 18h16"], refresh: ["M20 7v5h-5M4 17v-5h5", "M6 7a7 7 0 0 1 12-2l2 2M18 17a7 7 0 0 1-12 2l-2-2"]
+    };
+    var node = sv("svg", { viewBox: "0 0 24 24", class: "icon", fill: "none", stroke: "currentColor", "stroke-width": 1.6, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" });
+    (paths[name] || paths.grid).forEach(function (d) { node.appendChild(sv("path", { d: d })); });
+    return node;
+  }
   function setLang() {
     S.lang = S.lang === "ru" ? "en" : "ru";
-    A.put("localStorage", "ads.lang", S.lang);
-    document.documentElement.lang = S.lang;
-    A.resetExplain();
-    $("#skip").textContent = t("a11y.skip");
-    rebuild();
+    A.put("localStorage", "ads.lang", S.lang); document.documentElement.lang = S.lang;
+    A.resetExplain(); $("#skip").textContent = t("a11y.skip"); rebuild();
   }
   function setTheme() {
     S.theme = S.theme === "dark" ? "light" : "dark";
     A.put("localStorage", "ads.theme", S.theme);
-    document.documentElement.setAttribute("data-theme", S.theme);
-    buildBar();
+    document.documentElement.setAttribute("data-theme", S.theme); buildBar(); navigate(false);
   }
-
+  function syncNav() {
+    var open = $("#shell").classList.contains("nav-open");
+    $("#sidebar").inert = window.matchMedia("(max-width: 900px)").matches && !open;
+    var menu = $(".menu-btn"); if (menu) { menu.setAttribute("aria-expanded", String(open)); }
+  }
   function buildBar() {
-    var bar = clear($("#bar"));
-    var sheet = $("#sheet");
-    if (sheet) { sheet.parentNode.removeChild(sheet); }
-    var menu = el("button", {
-      class: "lnk menu-btn", type: "button", "aria-expanded": "false", text: t("nav.menu"),
-      onclick: function () { toggleSheet(menu); }
-    });
-    add(bar, [
-      el("a", { class: "wm", href: "#top", onclick: function (e) { e.preventDefault(); window.scrollTo({ top: 0, behavior: S.reduced ? "auto" : "smooth" }); } },
-        ["auditdsec", el("i", { text: "." })]),
-      el("nav", { class: "links", "aria-label": t("a11y.nav") }, SECTIONS.map(function (s) {
-        return el("a", { class: "lnk", href: "#" + s[0], dataset: { sec: s[0] }, text: t(s[1]) });
+    var side = clear($("#sidebar")), bar = clear($("#bar"));
+    add(side, [el("a", { class: "brand", href: "#overview" }, [el("span", { class: "brand-icon" }, icon("shield")), logo()]),
+      el("p", { class: "nav-label", text: t("ui.workspace") }),
+      el("nav", { class: "side-links", "aria-label": t("a11y.nav") }, SECTIONS.map(function (s) {
+        if (s[0] === "updates") {
+          var b = A.Updates.button("side-link"); add(b, icon(s[2])); b.dataset.sec = "updates"; return b;
+        }
+        return el("a", { class: "side-link", href: "#" + s[0], dataset: { sec: s[0] } }, [icon(s[2]), el("span", { text: t(s[1]) })]);
       })),
-      el("div", { class: "bar-right" }, [
-        el("button", { class: "lnk hide-s", type: "button", "aria-label": t("nav.lang"), title: t("nav.lang"), text: S.lang === "ru" ? "EN" : "RU", onclick: setLang }),
-        el("button", { class: "lnk hide-s", type: "button", text: S.theme === "dark" ? t("nav.theme.light") : t("nav.theme.dark"), onclick: setTheme }),
-        A.Updates.button("lnk hide-s"),
-        menu,
-        el("button", { class: "pill pill-sm", type: "button", text: t("nav.signout"), onclick: signOut })
-      ])
-    ]);
+      el("div", { class: "sidebar-foot" }, [R.sideHost = el("span", { class: "mono" }), el("a", { href: "https://github.com/RsNest/auditdsec", target: "_blank", rel: "noopener noreferrer", text: "GitHub ↗" })])]);
+    var account = el("details", { class: "account-menu" }, [el("summary", { "aria-label": t("ui.account") }, [el("span", { class: "avatar", text: "A" }), el("span", { class: "account-label", text: t("ui.account") }), "⌄"]),
+      el("div", { class: "account-options" }, [
+        el("button", { type: "button", text: S.lang === "ru" ? "English" : "Русский", onclick: setLang }),
+        el("button", { type: "button", text: S.theme === "dark" ? t("nav.theme.light") : t("nav.theme.dark"), onclick: setTheme }),
+        el("button", { type: "button", text: t("nav.signout"), onclick: signOut })])]);
+    add(bar, [el("div", { class: "bar-title" }, [el("button", { class: "menu-btn icon-btn", type: "button", "aria-label": t("nav.menu"), "aria-controls": "sidebar", "aria-expanded": "false", onclick: function (e) {
+      $("#shell").classList.toggle("nav-open"); syncNav();
+    } }, icon("menu")), R.pageTitle = el("span", { class: "bar-page" })]),
+      el("div", { class: "bar-right" }, [R.headerStatus = el("span", { class: "health-badge" }), account])]);
+    syncNav(); paintHero();
   }
-
-  function toggleSheet(btn) {
-    var open = $("#sheet");
-    if (open) { open.parentNode.removeChild(open); btn.setAttribute("aria-expanded", "false"); return; }
-    var close = function () { var s = $("#sheet"); if (s) { s.parentNode.removeChild(s); } btn.setAttribute("aria-expanded", "false"); };
-    var items = SECTIONS.map(function (s) {
-      return el("a", { class: "lnk", href: "#" + s[0], text: t(s[1]), onclick: close });
+  function navigate(focus) {
+    var aliases = { top: "overview", journal: "events", kinds: "events", access: "settings", alerts: "settings" };
+    var id = location.hash.slice(1) || "overview";
+    if (id === "alerts" || id === "access") { setSettingsTab(id); }
+    id = aliases[id] || id;
+    route = SECTIONS.some(function (s) { return s[0] === id; }) ? id : "overview";
+    Array.prototype.forEach.call($("#main").children, function (n) { n.hidden = n.id !== route; });
+    Array.prototype.forEach.call(document.querySelectorAll("[data-sec]"), function (n) {
+      if (n.dataset.sec === route) { n.setAttribute("aria-current", "page"); } else { n.removeAttribute("aria-current"); }
     });
-    items.push(el("button", { class: "lnk", type: "button", text: t("upd.title") + (A.Updates.pending() ? " • " + t("upd.new") : ""), onclick: function () { close(); A.Updates.open(); } }));
-    items.push(el("button", { class: "lnk", type: "button", text: S.lang === "ru" ? "English" : "Русский", onclick: function () { close(); setLang(); } }));
-    items.push(el("button", { class: "lnk", type: "button", text: S.theme === "dark" ? t("nav.theme.light") : t("nav.theme.dark"), onclick: function () { close(); setTheme(); } }));
-    $("#shell").appendChild(el("div", { class: "sheet", id: "sheet" }, items));
-    btn.setAttribute("aria-expanded", "true");
+    var label = SECTIONS.filter(function (s) { return s[0] === route; })[0][1];
+    if (R.pageTitle) { R.pageTitle.textContent = t(label); }
+    document.title = t(label) + " · auditdsec";
+    $("#shell").classList.remove("nav-open");
+    syncNav();
+    if (focus !== false) { window.scrollTo(0, 0); $("#main").focus({ preventScroll: true }); }
+    if (route === "events" && journal) { journal.refresh(); }
   }
+  window.addEventListener("hashchange", function () { if (!$("#shell").hidden) { navigate(); } });
+  window.addEventListener("resize", syncNav);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && $("#shell").classList.contains("nav-open")) { $("#shell").classList.remove("nav-open"); syncNav(); var m = $(".menu-btn"); if (m) { m.focus(); } }
+  });
+  document.addEventListener("click", function (e) {
+    if ($("#shell").classList.contains("nav-open") && !e.target.closest("#sidebar, .menu-btn")) {
+      $("#shell").classList.remove("nav-open"); syncNav();
+    }
+    var account = $(".account-menu"); if (account && !account.contains(e.target)) { account.open = false; }
+  });
+  A.navigate = go;
+  A.icon = icon;
 
-  /* ---------------- the page ---------------- */
-
-  function section(id, cls, kids) { return el("section", { id: id, class: cls }, kids); }
+  function section(id, cls, kids) { return el("section", { id: id, class: "page " + cls, hidden: true }, kids); }
   function head(label, title, extra) {
-    return el("div", { class: "sec-head" }, [
-      el("span", { class: "lbl rv", text: label }),
-      el("h2", { class: "sec-h rv", text: title }),
-      extra || null
-    ]);
+    return el("div", { class: "page-head" }, [el("div", null, [el("span", { class: "eyebrow", text: label }), el("h1", { text: title })]), extra || null]);
   }
-
+  function card(title, kids, action) {
+    return el("div", { class: "card" }, [el("div", { class: "card-head" }, [el("h2", { text: title }), action || null]), el("div", { class: "card-body" }, kids)]);
+  }
+  function setSettingsTab(id) {
+    Array.prototype.forEach.call(document.querySelectorAll(".settings-pane"), function (n) { n.hidden = n.id !== id; });
+    Array.prototype.forEach.call(document.querySelectorAll(".settings-tab"), function (n) { n.setAttribute("aria-selected", String(n.dataset.tab === id)); });
+  }
   function buildMain() {
     var main = clear($("#main"));
-    R = {};
-
-    /* portal hero */
-    R.hero = el("section", { id: "top", class: "hero" + (S.reduced ? " still" : "") },
-      el("div", { class: "stage" }, [
-        R.hImg = el("div", { class: "h-img", "aria-hidden": "true" }),
-        R.hWash = el("div", { class: "h-wash", "aria-hidden": "true" }),
-        el("div", { class: "h-veil", "aria-hidden": "true" }),
-        R.dotA = el("div", { class: "h-dot a", "aria-hidden": "true" }),
-        R.dotB = el("div", { class: "h-dot b", "aria-hidden": "true" }),
-        R.panL = el("div", { class: "panel panel-l", "aria-hidden": "true" }),
-        R.panR = el("div", { class: "panel panel-r", "aria-hidden": "true" }),
-        R.title = el("h1", { class: "h-title", "aria-label": "auditdsec" }, [
-          R.t1 = el("span", { text: "audit", "aria-hidden": "true" }),
-          R.t2 = el("span", { "aria-hidden": "true" }, ["dsec", el("i", { text: "." })])
-        ]),
-        R.hTL = el("div", { class: "h-meta h-tl" }),
-        R.hTR = el("div", { class: "h-meta h-tr" }),
-        R.hBR = el("div", { class: "h-meta h-br", text: t("hero.scroll") + " ↓" }),
-        R.hStatus = el("div", { class: "h-status" }, [
-          el("span", { class: "h-meta", text: t("hero.status") }),
-          R.hStatusB = el("b"),
-          R.hSub = el("p", { class: "h-sub" })
-        ])
-      ]));
-
-    /* statement fold */
-    R.fold = section("overview", "fold", [
-      R.dial = el("div", { class: "dial", "aria-hidden": "true" }),
-      el("span", { class: "lbl rv", text: t("stmt.label") }),
-      R.stmt = el("h2", { class: "stmt rv" }),
-      R.numeral = el("div", { class: "numeral rv", "aria-hidden": "true" }),
-      R.facts = el("div", { class: "facts rv" }),
-      R.notes = el("div", { class: "rv" }),
-      R.chart = el("div", { class: "chart-wrap rv" })
-    ]);
-    drawDial(R.dial);
-
-    /* the deck */
-    var deckHost = el("div", { class: "deck-wrap rv" });
-    R.events = section("events", "split", [
-      el("div", { class: "head" }, [
-        el("span", { class: "lbl rv", text: t("deck.label") }),
-        el("h2", { class: "rv", text: t("deck.title") }),
-        el("p", { class: "rv", text: t("deck.lede") }),
-        el("div", { class: "btns rv" }, [
-          el("button", { class: "pill pill-solid", type: "button", text: t("deck.btn.journal"), onclick: function () { go("journal"); } }),
-          el("button", { class: "pill", type: "button", text: t("deck.btn.critical"), onclick: function () { journal.setSeverity("critical"); go("journal"); } })
-        ])
-      ]),
-      deckHost
-    ]);
-    deck = new A.feed.Deck(deckHost, actions);
-
-    /* the journal */
-    var jHost = el("div", { class: "rv" });
-    R.journal = section("journal", "sec", [head(t("journal.label"), t("journal.title")), jHost]);
+    var barRefs = { sideHost: R.sideHost, pageTitle: R.pageTitle, headerStatus: R.headerStatus };
+    R = barRefs;
+    R.stmt = el("p", { class: "overview-sub" }); R.facts = el("div", { class: "metrics" });
+    R.notes = el("div", { class: "overview-notices" }); R.chart = el("div", { class: "chart-wrap" });
+    R.recent = el("div", { class: "recent-events" }); R.health = el("div", { class: "health-list" });
+    R.fold = section("overview", "", [head(t("ui.workspace"), t("ui.overview.title"), el("button", { class: "pill pill-quiet", type: "button", onclick: function () { go("events"); }, text: t("ui.all_events") })),
+      R.stmt, R.notes, R.facts, el("div", { class: "overview-grid" }, [
+        card(t("chart.title"), R.chart), card(t("ui.health"), R.health),
+        card(t("ui.latest_events"), R.recent, el("button", { class: "lnk", type: "button", text: t("ui.all_events") + " →", onclick: function () { go("events"); } }))])]);
+    var jHost = el("div", { class: "card journal-card" });
+    R.roster = el("div", { class: "roster" });
+    R.journal = section("events", "", [head(t("journal.label"), t("journal.title")), jHost,
+      el("details", { class: "card roster-card" }, [el("summary", { text: t("roster.title") }), R.roster])]);
     journal = new A.feed.Journal(jHost, actions);
-
-    /* the roster */
-    R.roster = el("div", { class: "roster rv" });
-    R.rosterSec = section("kinds", "sec", [head(t("roster.label"), t("roster.title"), el("p", { class: "callout rv", text: t("roster.hint") })), R.roster]);
-
-    /* incidents */
-    R.incTbl = el("div", { class: "tbl-wrap rv" });
-    R.incSec = section("incidents", "sec", [head(t("inc.label"), t("inc.title"), el("p", { class: "callout rv", text: t("inc.lede") })), R.incTbl]);
-
-    /* exceptions */
-    R.excTbl = el("div", { class: "tbl-wrap rv" });
-    R.excForm = excForm();
-    R.excSec = section("exceptions", "sec", [head(t("exc.label"), t("exc.title"), el("p", { class: "callout rv", text: t("exc.lede") })), R.excTbl, el("div", { class: "tbl-wrap rv" }, [R.excForm.node])]);
-
-    /* access and HTTPS */
-    R.accessHost = el("div", { class: "tbl-wrap rv" });
-    R.accessSec = section("access", "sec", [head(t("acc.label"), t("acc.title")), R.accessHost]);
+    R.incTbl = el("div", { class: "card table-card" });
+    var incFilter = el("select", { class: "sel", onchange: function (e) { incidentFilter = e.target.value; modelRevision++; refresh(); } }, ["open", "all", "new", "acknowledged", "resolved"].map(function (s) {
+      return el("option", { value: s, selected: s === incidentFilter, text: t("inc.state." + s) });
+    }));
+    R.incSec = section("incidents", "", [head(t("inc.label"), t("inc.title"), fieldOf(t("inc.filter"), incFilter)), el("p", { class: "page-lede", text: t("inc.lede") }), R.incTbl]);
+    R.excTbl = el("div", { class: "card table-card" }); R.excForm = excForm();
+    R.excSec = section("exceptions", "", [head(t("exc.label"), t("exc.title")), el("p", { class: "page-lede", text: t("exc.lede") }),
+      R.excTbl, card(t("exc.form.title"), R.excForm.node)]);
+    R.bansTbl = el("div"); R.allowTbl = el("div"); R.suspectsTbl = el("div"); R.suspectsNote = el("p", { class: "callout" });
+    R.addr = section("addresses", "", [head(t("addr.label"), t("ui.blocks")), el("p", { class: "page-lede", text: t("allow.note") }),
+      card(t("suspects.title"), [R.suspectsNote, R.suspectsTbl]), card(t("bans.title"), [R.bansTbl, el("details", { class: "form-disclosure" }, [el("summary", { text: t("bans.form.title") }), banForm()])]),
+      card(t("addr.allow.title"), [R.allowTbl, allowForm()])]);
+    R.accessHost = el("div", { class: "card-body" });
+    var accessPane = el("div", { id: "access", class: "settings-pane card", role: "tabpanel" }, R.accessHost);
     A.Access.mount(R.accessHost);
-
-    /* addresses */
-    R.bansTbl = el("div");
-    R.allowTbl = el("div");
-    R.suspectsTbl = el("div");
-    R.suspectsNote = el("p", { class: "callout" });
-    R.addr = section("addresses", "sec", [
-      head(t("addr.label"), t("addr.title"), el("p", { class: "callout rv", text: t("allow.note") })),
-      el("div", { class: "tbl-wrap rv" }, [el("h3", { class: "sub-h", text: t("suspects.title") }), R.suspectsNote, R.suspectsTbl]),
-      el("div", { class: "tbl-wrap rv" }, [el("h3", { class: "sub-h", text: t("bans.title") }), R.bansTbl, banForm()]),
-      el("div", { class: "tbl-wrap rv" }, [el("h3", { class: "sub-h", text: t("addr.allow.title") }), R.allowTbl, allowForm()])
-    ]);
-
-    /* alerts */
-    R.alerts = el("div", { class: "tbl-wrap rv" });
-    R.telegram = el("div", { class: "tbl-wrap rv" });
-    R.alertSec = section("alerts", "sec", [head(t("alerts.label"), t("alerts.title")), R.telegram, R.alerts]);
-
-    /* system */
-    R.sysKv = el("div", { class: "kvs" });
-    R.sysNote = el("p", { class: "callout", text: "" });
-    R.checks = el("div", { class: "checks" });
-    R.confPre = el("pre");
-    R.system = section("system", "sec", [
-      head(t("sys.label"), t("sys.title")),
-      el("div", { class: "tbl-wrap rv" }, [R.sysKv, el("div", { class: "callout" }, [el("b", { text: t("diag.debug.title") + ". " }), t("diag.debug.body")])]),
-      el("div", { class: "tbl-wrap rv" }, [el("h3", { class: "sub-h", text: t("setup.label") }), R.checks]),
-      el("details", { class: "conf rv" }, [
-        el("summary", null, [el("span", { class: "lbl", text: t("diag.config") })]),
-        el("p", { class: "callout", text: t("diag.config.note") }),
-        R.confPre
-      ])
-    ]);
-
-    /* close */
-    R.fine = el("p");
-    R.close = el("footer", { id: "close", class: "close" }, [
-      el("h2", { class: "rv", text: t("close.title") }),
-      el("div", { class: "close-row rv" }, [
-        R.fine,
-        el("div", { class: "btns" }, [
-          el("button", { class: "pill", type: "button", text: t("close.top"), onclick: function () { window.scrollTo({ top: 0, behavior: S.reduced ? "auto" : "smooth" }); } }),
-          el("button", { class: "pill pill-solid", type: "button", text: t("nav.signout"), onclick: signOut })
-        ])
-      ]),
-      el("div", { class: "foot" }, [el("span", { text: "MIT" }), el("span", { text: "github.com/RsNest/auditdsec" })]),
-      R.bigWm = el("div", { class: "big-wm", "aria-hidden": "true" }, ["auditdsec", el("i", { text: "." })])
-    ]);
-
-    add(main, [R.hero, R.fold, R.events, R.journal, R.rosterSec, R.incSec, R.excSec, R.addr, R.accessSec, R.alertSec, R.system, R.close]);
-    setupReveals();
+    R.alerts = el("div", { class: "card card-body" }); R.telegram = el("div", { class: "card card-body" });
+    var alertsPane = el("div", { id: "alerts", class: "settings-pane", role: "tabpanel", hidden: true }, [R.telegram, R.alerts]);
+    var tabs = el("div", { class: "settings-nav", role: "tablist", "aria-label": t("ui.settings") }, [["access", "nav.access"], ["alerts", "nav.alerts"]].map(function (p) {
+      return el("button", { class: "settings-tab", type: "button", role: "tab", dataset: { tab: p[0] }, "aria-controls": p[0], "aria-selected": String(p[0] === "access"), text: t(p[1]), onclick: function () { setSettingsTab(p[0]); } });
+    }));
+    R.settings = section("settings", "", [head(t("ui.workspace"), t("ui.settings")), el("div", { class: "settings-layout" }, [tabs, el("div", { class: "settings-content" }, [accessPane, alertsPane])])]);
+    R.sysKv = el("div", { class: "kvs" }); R.checks = el("div", { class: "checks" }); R.confPre = el("pre");
+    R.system = section("system", "", [head(t("sys.label"), t("ui.diagnostics")),
+      card(t("setup.label"), R.checks), card(t("ui.runtime"), [R.sysKv, el("p", { class: "callout", text: t("diag.debug.body") })]),
+      el("details", { class: "conf card" }, [el("summary", { text: t("diag.config") }), el("div", { class: "card-body" }, [el("p", { class: "callout", text: t("diag.config.note") }), R.confPre])])]);
+    R.updatesHost = el("div");
+    R.updates = section("updates", "updates-page", [head(t("ui.workspace"), t("ui.updates")), R.updatesHost]);
+    A.Updates.mount(R.updatesHost);
+    add(main, [R.fold, R.journal, R.incSec, R.addr, R.excSec, R.system, R.settings, R.updates]);
+    navigate(false);
   }
 
   /* ---------------- forms ---------------- */
@@ -507,82 +463,15 @@
 
   /* ---------------- painting ---------------- */
 
-  var INK = "#EDE7DC", AMBER = "#E8913C", TEAL = "#5FB0B8", RED = "#E5604D";
-
-  function drawField(host, hourly) {
-    clear(host);
-    var svg = sv("svg", { viewBox: "0 0 1000 1000", preserveAspectRatio: "xMidYMid slice" });
-    var seed = 11;
-    function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
-
-    var logs = sv("g", { transform: "rotate(-7 500 500)" });
-    for (var i = 0; i < 96; i++) {
-      var accent = i % 17 === 0 ? AMBER : i % 23 === 0 ? TEAL : INK;
-      logs.appendChild(sv("rect", {
-        x: Math.round(rnd() * 880 - 60), y: i * 11 + Math.round(rnd() * 5), width: Math.round(40 + rnd() * 280), height: 1.2,
-        fill: accent, opacity: (accent === INK ? 0.05 + rnd() * 0.1 : 0.55).toFixed(2)
-      }));
-    }
-    svg.appendChild(logs);
-
-    [150, 250, 350, 450].forEach(function (r) {
-      svg.appendChild(sv("circle", { cx: 500, cy: 500, r: r, fill: "none", stroke: INK, "stroke-opacity": 0.12, "stroke-width": 1 }));
-    });
-
-    var data = (hourly || []).slice(-24);
-    var max = 1;
-    data.forEach(function (h) { max = Math.max(max, (h.info || 0) + (h.warn || 0) + (h.critical || 0)); });
-    data.forEach(function (h, idx) {
-      var total = (h.info || 0) + (h.warn || 0) + (h.critical || 0);
-      var a = (-90 + idx * 15) * Math.PI / 180;
-      var inner = 130, len = total ? 24 + 290 * (total / max) : 7;
-      var color = h.critical ? RED : h.warn ? AMBER : INK;
-      svg.appendChild(sv("line", {
-        x1: (500 + Math.cos(a) * inner).toFixed(1), y1: (500 + Math.sin(a) * inner).toFixed(1),
-        x2: (500 + Math.cos(a) * (inner + len)).toFixed(1), y2: (500 + Math.sin(a) * (inner + len)).toFixed(1),
-        stroke: color, "stroke-width": total ? 5 : 2, "stroke-linecap": "round", "stroke-opacity": total ? 0.95 : 0.3
-      }));
-      if (idx % 6 === 0) {
-        svg.appendChild(sv("text", {
-          x: (500 + Math.cos(a) * 482).toFixed(1), y: (500 + Math.sin(a) * 482 + 4).toFixed(1), "text-anchor": "middle",
-          fill: INK, "fill-opacity": 0.4, "font-size": 13, "font-family": "ui-monospace,monospace"
-        }, A.hourLabel(h.hour)));
-      }
-    });
-    svg.appendChild(sv("circle", { cx: 500, cy: 500, r: 4, fill: TEAL }));
-    host.appendChild(svg);
-  }
-
-  function drawDial(host) {
-    var svg = sv("svg", { viewBox: "0 0 100 100" });
-    for (var i = 0; i < 60; i++) {
-      var a = i * 6 * Math.PI / 180, long = i % 5 === 0;
-      svg.appendChild(sv("line", {
-        x1: (50 + Math.cos(a) * (long ? 41 : 44)).toFixed(2), y1: (50 + Math.sin(a) * (long ? 41 : 44)).toFixed(2),
-        x2: (50 + Math.cos(a) * 48).toFixed(2), y2: (50 + Math.sin(a) * 48).toFixed(2),
-        stroke: "currentColor", "stroke-width": long ? 0.5 : 0.25, "stroke-opacity": long ? 0.9 : 0.5
-      }));
-    }
-    svg.appendChild(sv("circle", { cx: 50, cy: 50, r: 30, fill: "none", stroke: "currentColor", "stroke-opacity": 0.35, "stroke-width": 0.25 }));
-    svg.appendChild(sv("circle", { cx: 50, cy: 50, r: 16, fill: "none", stroke: "currentColor", "stroke-opacity": 0.25, "stroke-width": 0.25 }));
-    svg.appendChild(sv("line", { x1: 50, y1: 50, x2: 50, y2: 6, stroke: AMBER, "stroke-width": 0.5 }));
-    svg.appendChild(sv("circle", { cx: 50, cy: 6, r: 1.1, fill: AMBER }));
-    host.style.color = "var(--ink)";
-    host.appendChild(svg);
-  }
-
   function paintHero() {
-    var s = model.status;
-    if (!s || !R.hero) { return; }
-    var lv = A.level(s);
-    clear(R.hTL);
-    add(R.hTL, [el("i", { class: "dot", dataset: { lv: tone(lv) } }), el("span", { text: t("hero.host") + " · " + (s.host || t("common.unknown")) })]);
-    R.hTR.textContent = t("hero.profile", { profile: s.profile || "—", version: s.version || "—" });
-    R.hStatus.dataset.lv = tone(lv);
-    R.hStatusB.textContent = t("status." + lv);
-    R.hSub.textContent = t("hero.updated", { time: A.clock(new Date().toISOString()) });
-    drawField(R.hImg, s.hourly);
-    update();
+    var s = model.status || S.status;
+    if (!s) { return; }
+    S.version = s.version;
+    if (R.sideHost) { R.sideHost.textContent = s.host || t("common.unknown"); }
+    if (R.headerStatus) {
+      clear(R.headerStatus);
+      add(R.headerStatus, [el("i", { class: "dot", dataset: { lv: tone(A.level(s)) } }), el("span", { text: t("status." + A.level(s)) })]);
+    }
   }
 
   function note(dotAttrs, strong, body) {
@@ -594,14 +483,14 @@
 
   function hourlyChart(hourly) {
     var data = (hourly || []).slice(-24);
-    var W = 960, H = 150, BASE = 124, TOP = 14;
+    var W = 720, H = 220, BASE = 178, TOP = 20;
     var svg = sv("svg", { viewBox: "0 0 " + W + " " + H, class: "chart", role: "img", "aria-label": t("chart.title") });
     var max = 1;
     data.forEach(function (h) { max = Math.max(max, (h.info || 0) + (h.warn || 0) + (h.critical || 0)); });
     svg.appendChild(sv("line", { x1: 0, y1: BASE + 0.5, x2: W, y2: BASE + 0.5 }));
     svg.appendChild(sv("line", { x1: 0, y1: TOP + 0.5, x2: W, y2: TOP + 0.5 }));
     svg.appendChild(sv("text", { x: 0, y: TOP - 4 }, String(max)));
-    var slot = W / Math.max(1, data.length), bw = Math.min(7, slot * 0.4);
+    var slot = W / Math.max(1, data.length), bw = Math.min(14, slot * 0.4);
     data.forEach(function (h, i) {
       var info = h.info || 0, warn = h.warn || 0, crit = h.critical || 0, total = info + warn + crit;
       var x = i * slot + (slot - bw) / 2;
@@ -626,47 +515,30 @@
   function paintFold() {
     var s = model.status;
     if (!s || !R.fold) { return; }
-    var lv = A.level(s), c = s.counters || {}, ban = s.ban || {};
-    var count = lv === "crit" ? c.critical_24h : c.warn_24h;
-    clear(R.stmt);
-    R.stmt.dataset.lv = tone(lv);
-    add(R.stmt, [
-      t("stmt." + lv + ".lead", { host: s.host || "", events: A.num(c.events_24h) }),
-      el("mark", { text: t("stmt." + lv + ".mark", { count: A.num(count) }) })
-    ]);
-    R.numeral.textContent = A.num(c.events_24h).replace(/\s/g, "");
-
+    var c = s.counters || {}, ban = s.ban || {}, lv = A.level(s);
+    R.stmt.textContent = (s.host || t("common.unknown")) + " · " + t("ui.overview.subtitle");
     clear(R.facts);
-    [
-      ["fact.events", A.num(c.events_24h), null],
-      ["fact.critical", A.num(c.critical_24h), c.critical_24h > 0 ? "crit" : null],
-      ["fact.warn", A.num(c.warn_24h), c.warn_24h > 0 ? "warn" : null],
-      ["fact.bans", A.num(s.bans_active), null],
-      ["fact.allow", A.num(s.allowlist_count), null],
-      ["fact.uptime", A.duration(s.uptime_seconds), null],
-      ["fact.alerts", A.num(c.alerts_sent), null]
-    ].forEach(function (f) {
-      add(R.facts, el("div", { dataset: { tone: f[2] } }, [el("span", { class: "lbl", text: t(f[0]) }), el("b", { text: f[1] })]));
+    [["fact.events", c.events_24h, "list", ""], ["fact.critical", c.critical_24h, "activity", "critical"],
+      ["fact.warn", c.warn_24h, "filter", "warn"], ["fact.bans", s.bans_active, "shield", ""]].forEach(function (f) {
+      add(R.facts, el("div", { class: "metric card", dataset: { sev: f[3] } }, [el("div", { class: "metric-top" }, [el("span", { text: t(f[0]) }), icon(f[2])]),
+        el("b", { class: "metric-value", text: A.num(f[1]) }), el("span", { class: "metric-caption", text: f[0] === "fact.bans" ? t("ui.active_now") : t("ev.period.24h") })]));
     });
-
     clear(R.notes);
-    if (lv === "down") {
-      add(R.notes, note({ lv: "crit" }, t("note.audit") + ".", t("health.stale", { time: A.dateTime(s.auditd && s.auditd.last_write) })));
-    }
-    if (!ban.enforcing) {
-      add(R.notes, note({ sev: "warn" }, t("enforce.title") + ".", t("enforce.body") + " " + t("enforce.howto")));
-    } else if (ban.dry_run) {
-      add(R.notes, note({ sev: "warn" }, t("note.bans") + ".", t("enforce.dry_run")));
-    }
-
+    if (lv === "down") { add(R.notes, note({ lv: "crit" }, t("note.audit"), t("health.stale", { time: A.dateTime(s.auditd && s.auditd.last_write) }))); }
+    if (!ban.enforcing || ban.dry_run) { add(R.notes, note({ sev: "warn" }, t("enforce.title"), ban.dry_run ? t("enforce.dry_run") : t("enforce.body"))); }
     clear(R.chart);
-    add(R.chart, [
-      el("span", { class: "lbl", text: t("chart.title") + " — " + t("chart.cap") }),
-      hourlyChart(s.hourly),
-      el("div", { class: "legend" }, A.SEVS.map(function (sev) {
-        return el("span", { dataset: { sev: sev } }, [el("i", { class: "dot" }), el("span", { text: t("sev." + sev) })]);
-      }))
-    ]);
+    add(R.chart, [hourlyChart(s.hourly), el("div", { class: "legend" }, A.SEVS.map(function (sev) {
+      return el("span", { dataset: { sev: sev } }, [el("i", { class: "dot" }), t("sev." + sev)]);
+    }))]);
+    clear(R.health);
+    add(R.health, [checkRow(!(s.auditd && s.auditd.healthy === false), "auditd"),
+      checkRow(!!(model.telegram && model.telegram.status === "connected"), "telegram"),
+      el("div", { class: "health-fact" }, [el("span", { text: t("fact.uptime") }), el("b", { text: A.duration(s.uptime_seconds) })]),
+      el("div", { class: "health-fact" }, [el("span", { text: t("ui.profile") }), el("b", { text: s.profile || "—" })])]);
+    clear(R.recent);
+    var events = model.events.slice(0, 5);
+    if (!events.length) { add(R.recent, el("div", { class: "empty", text: t("ev.empty") })); }
+    events.forEach(function (ev) { add(R.recent, A.feed.row(ev, actions)); });
   }
 
   function countsByKind() {
@@ -740,16 +612,38 @@
     clear(R.incTbl);
     if (!model.incidents.length) { add(R.incTbl, el("div", { class: "tbl-empty", text: t("inc.empty") })); return; }
     var act = function (id, action) {
-      A.api.incidentAction(id, action).then(function () { A.toast(t("inc.state." + (action === "ack" ? "acknowledged" : action === "resolve" ? "resolved" : "new")), "ok"); refresh(); },
+      A.api.incidentAction(id, action).then(function () { A.feed.closeDetail(); A.toast(t("inc.state." + (action === "ack" ? "acknowledged" : action === "resolve" ? "resolved" : "new")), "ok"); refresh(); },
         function (e) { A.toast(errText(e), "err"); });
     };
     var btn = function (i, name, action) { return el("button", { class: "pill pill-quiet pill-sm", type: "button", text: t("inc.act." + name), onclick: function () { act(i.id, action); } }); };
+    function openIncident(i) {
+      var dlg = A.feed.showDetail(i.reason, el("p", { class: "callout", text: t("common.loading") }));
+      A.api.incident(i.id).then(function (full) {
+        if (!dlg.isConnected) { return; }
+        var body = clear(dlg.querySelector(".drawer-body"));
+        add(body, [
+          el("div", { class: "facts-inline" }, [
+            kvRow(t("inc.col.sev"), t("sev." + full.severity)), kvRow(t("inc.col.state"), t("inc.state." + full.state)),
+            kvRow(t("ev.ip"), full.src_ip || "—"), kvRow(t("inc.col.events"), A.num(full.total))
+          ]),
+          el("h3", { text: t("nav.events") }),
+          el("ol", { class: "incident-timeline" }, (full.events || []).map(function (e) {
+            return el("li", null, [el("span", { class: "lbl", text: A.dateTime(e.time) }),
+              el("p", { text: t("kind." + e.kind) + (e.user ? " · " + e.user : "") }), A.feed.sevTag(e.severity)]);
+          })),
+          el("div", { class: "btns" }, [
+            full.state === "new" ? btn(full, "acknowledged", "ack") : null,
+            full.state !== "resolved" ? btn(full, "resolved", "resolve") : btn(full, "new", "reopen")
+          ])
+        ]);
+      }, function (e) { if (dlg.isConnected) { var b = clear(dlg.querySelector(".drawer-body")); add(b, el("p", { class: "err", text: errText(e) })); } });
+    }
     add(R.incTbl, el("table", { class: "tbl" }, [
       el("thead", null, el("tr", null, [el("th", { text: t("inc.col.reason") }), el("th", { text: t("inc.col.sev") }), el("th", { text: t("inc.col.state") }), el("th", { text: t("inc.col.events") }), el("th", { class: "r" })])),
       el("tbody", null, model.incidents.map(function (i) {
         var kinds = Object.keys(i.kinds || {}).map(function (k) { return t("kind." + k) + " ×" + i.kinds[k]; }).join(" · ");
         return el("tr", null, [
-          cell(t("inc.col.reason"), [i.reason, el("small", { text: A.relative(i.last_seen) + (kinds ? " · " + kinds : "") + ((i.bans || []).length ? " · " + t("inc.bans") + " " + i.bans.join(", ") : "") })]),
+          cell(t("inc.col.reason"), [el("button", { class: "lnk", type: "button", "aria-haspopup": "dialog", text: i.reason, onclick: function () { openIncident(i); } }), el("small", { text: A.relative(i.last_seen) + (kinds ? " · " + kinds : "") + ((i.bans || []).length ? " · " + t("inc.bans") + " " + i.bans.join(", ") : "") })]),
           cell(t("inc.col.sev"), A.feed.sevTag(i.severity)),
           cell(t("inc.col.state"), t("inc.state." + i.state)),
           cell(t("inc.col.events"), A.num(i.total)),
@@ -959,23 +853,12 @@
     R.confPre.textContent = model.cfg ? JSON.stringify(model.cfg, null, 2) : t("common.unknown");
   }
 
-  function paintClose() {
-    var s = model.status || {};
-    if (R.fine) { R.fine.textContent = t("close.fine", { version: s.version || "—", host: s.host || "—" }); }
-  }
 
-  function paintDeck(force) {
-    if (!deck) { return; }
-    var pickd = A.feed.selectDeck(model.events, model.suspects, model.bans, model.allow);
-    var sig = A.feed.deckSignature(pickd);
-    if (force || sig !== deck.signature()) { deck.set(pickd); }
-  }
 
   function paintAll() {
     model.status = S.status;
     if (R.telegram) { A.Telegram.paint(R.telegram, model.telegram); }
-    paintHero(); paintFold(); paintRoster(); paintSuspects(); paintIncidents(); paintExceptions(); paintBans(); paintAllow(); paintAlerts(); paintSystem(); paintClose();
-    paintDeck(false);
+    paintHero(); paintFold(); paintRoster(); paintSuspects(); paintIncidents(); paintExceptions(); paintBans(); paintAllow(); paintAlerts(); paintSystem();
     syncBanButtons();
   }
 
@@ -985,22 +868,23 @@
     var revision = modelRevision, session = S.token;
     function current() { return revision === modelRevision && session === S.token; }
     return A.loadStatus().then(function () {
+      if (!current()) { return; }
       var since = new Date(Date.now() - 86400e3).toISOString();
       return Promise.all([
-        A.api.events("limit=200&since=" + encodeURIComponent(since)).then(function (p) { model.events = (p && p.items) || []; A.announceCritical(model.events); }, function () { }),
+        A.api.events("limit=200&since=" + encodeURIComponent(since)).then(function (p) { if (current()) { model.events = (p && p.items) || []; A.announceCritical(model.events); } }, function () { }),
         A.api.bans().then(function (v) { if (current()) { model.bans = v || []; } }, function () { }),
-        A.api.incidents().then(function (v) { if (current()) { model.incidents = (v && v.items) || []; } }, function () { }),
+        A.api.incidents(incidentFilter).then(function (v) { if (current()) { model.incidents = (v && v.items) || []; } }, function () { }),
         A.api.update().then(function (v) { if (current()) { A.Updates.set(v); } }, function () { }),
         A.api.access().then(function (v) { if (current()) { A.Access.update(v); } }, function () { }),
         A.api.exceptions().then(function (v) { if (current()) { model.exceptions = (v && v.items) || []; } }, function () { }),
         A.api.allowlist().then(function (v) { if (current()) { model.allow = v || []; } }, function () { }),
         A.api.suspects().then(function (v) { if (current()) { model.suspects = v; model.suspectsError = false; } },
           function () { if (current()) { model.suspectsError = true; } }),
-        A.api.config().then(function (v) { model.cfg = v; }, function () { }),
-        A.api.telegram().then(function (v) { model.telegram = v; }, function () { }),
-        A.api.diagnostics().then(function (v) { model.diag = v; }, function () { })
+        A.api.config().then(function (v) { if (current()) { model.cfg = v; } }, function () { }),
+        A.api.telegram().then(function (v) { if (current()) { model.telegram = v; } }, function () { }),
+        A.api.diagnostics().then(function (v) { if (current()) { model.diag = v; } }, function () { })
       ]);
-    }).then(paintAll);
+    }).then(function () { if (current()) { paintAll(); } });
   }
 
   function refresh() {
@@ -1013,96 +897,7 @@
   }
   function stopPoll() { if (poll) { clearInterval(poll); poll = null; } }
 
-  /* ---------------- scroll engine ---------------- */
 
-  function update() {
-    if (!R.hero) { return; }
-    var y = window.scrollY, vh = window.innerHeight, vw = window.innerWidth;
-
-    if (!S.reduced) {
-      var range = R.hero.offsetHeight - vh;
-      var p = A.clamp(range > 0 ? y / range : 1, 0, 1);
-      var q = A.easeOut(A.clamp(p / 0.7, 0, 1));
-      R.panL.style.transform = "translate3d(" + (-q * 104) + "%,0,0)";
-      R.panR.style.transform = "translate3d(" + q * 104 + "%,0,0)";
-      R.hImg.style.transform = "scale(" + (1.14 - 0.14 * q) + ")";
-      R.hWash.style.opacity = String(0.34 * q);
-      var dx = q * vw * 0.36, dy = q * vh * 0.32;
-      R.dotA.style.transform = "translate3d(" + -dx + "px," + -dy + "px,0)";
-      R.dotB.style.transform = "translate3d(" + dx + "px," + dy + "px,0)";
-      /* The title opens: it grows and tightens at the same time, and its
-         halves part by about half their own width. */
-      var g = A.easeOut(p);
-      R.title.style.transform = "scale(" + (1 + 0.28 * g) + ")";
-      R.title.style.letterSpacing = (-0.02 - 0.05 * g) + "em";
-      R.t1.style.transform = "translate3d(" + -0.5 * R.t1.offsetWidth * g + "px,0,0)";
-      R.t2.style.transform = "translate3d(" + 0.5 * R.t2.offsetWidth * g + "px,0,0)";
-      var so = A.clamp((p - 0.45) / 0.3, 0, 1);
-      R.hStatus.style.opacity = String(so);
-      R.hStatus.style.transform = "translateY(" + (1 - so) * 16 + "px)";
-      R.hBR.style.opacity = String(1 - A.clamp(p * 4, 0, 1));
-    }
-
-    if (R.dial && R.fold) {
-      var r = R.fold.getBoundingClientRect();
-      var prog = (vh - r.top) / (vh + r.height);
-      R.dial.style.transform = "translate3d(0," + (prog - 0.5) * -120 + "px,0) rotate(" + prog * 140 + "deg)";
-    }
-
-    var current = "";
-    [["overview", "overview"], ["events", "events"], ["journal", "events"], ["kinds", "events"], ["incidents", "incidents"], ["exceptions", "exceptions"], ["access", "access"], ["addresses", "addresses"], ["alerts", "alerts"], ["system", "system"]].forEach(function (pair) {
-      var node = document.getElementById(pair[0]);
-      if (node && node.getBoundingClientRect().top <= vh * 0.4) { current = pair[1]; }
-    });
-    Array.prototype.forEach.call(document.querySelectorAll(".bar .lnk[data-sec]"), function (a) {
-      if (a.dataset.sec === current) { a.setAttribute("aria-current", "true"); } else { a.removeAttribute("aria-current"); }
-    });
-  }
-
-  /* The closing wordmark spans the page exactly, whatever the font ends up
-     measuring: it is sized from its own width, then translated down so the
-     page edge crops it. */
-  function fitWordmark() {
-    var w = R.bigWm;
-    if (!w || !R.close) { return; }
-    var target = R.close.clientWidth;
-    w.style.fontSize = "100px";
-    var natural = w.scrollWidth;
-    if (natural > 0 && target > 0) { w.style.fontSize = (100 * target / natural * 0.985).toFixed(1) + "px"; }
-  }
-
-  function startEngine() {
-    stopEngine();
-    var ticking = false;
-    function onScroll() {
-      if (ticking) { return; }
-      ticking = true;
-      requestAnimationFrame(function () { ticking = false; fitWordmark(); update(); });
-    }
-    window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onScroll);
-    engine = function () {
-      window.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onScroll);
-    };
-    fitWordmark();
-    if (document.fonts && document.fonts.ready) { document.fonts.ready.then(function () { fitWordmark(); update(); }); }
-    update();
-  }
-  function stopEngine() { if (engine) { engine(); engine = null; } }
-
-  function setupReveals() {
-    if (observer) { observer.disconnect(); observer = null; }
-    var root = document.documentElement;
-    if (S.reduced || !("IntersectionObserver" in window)) { root.classList.remove("reveal-on"); return; }
-    root.classList.add("reveal-on");
-    observer = new IntersectionObserver(function (entries) {
-      entries.forEach(function (en) {
-        if (en.isIntersecting) { en.target.classList.add("shown"); observer.unobserve(en.target); }
-      });
-    }, { rootMargin: "0px 0px -8% 0px" });
-    Array.prototype.forEach.call(document.querySelectorAll(".rv"), function (n) { observer.observe(n); });
-  }
 
   /* ---------------- lifecycle ---------------- */
 
@@ -1110,23 +905,25 @@
     modelRevision++;
     pendingBans = Object.create(null);
     A.Telegram.close();
-    stopPoll(); stopEngine();
-    if (observer) { observer.disconnect(); observer = null; }
-    document.documentElement.classList.remove("reveal-on");
+    stopPoll();
+    A.Updates.unmount();
+    A.Access.unmount();
+    A.feed.closeDetail();
     var sheet = $("#sheet");
     if (sheet) { sheet.parentNode.removeChild(sheet); }
     clear($("#main"));
-    R = {}; deck = null; journal = null;
-    model = { status: null, events: [], bans: [], allow: [], suspects: null, cfg: null, diag: null };
+    R = {}; journal = null;
+    model = { status: null, events: [], incidents: [], exceptions: [], bans: [], allow: [], suspects: null, cfg: null, diag: null };
     S.status = null;
   }
 
   function rebuild() {
-    stopEngine();
+    modelRevision++;
+    A.Updates.unmount(); A.Access.unmount(); A.feed.closeDetail();
     buildBar(); buildMain(); setupDemo();
     paintAll();
     journal.reload();
-    startEngine();
+    loadAll();
   }
 
   function setupDemo() {
@@ -1136,7 +933,7 @@
     var sel = el("select", { class: "sel", "aria-label": t("mock.scenario"), onchange: function (e) {
       window.AUDITDSEC_MOCK.setScenario(e.target.value);
       S.announced = null;
-      loadAll().then(function () { paintDeck(true); journal.reload(); });
+      loadAll().then(function () { journal.reload(); });
     } }, [["quiet", "mock.sc.quiet"], ["warn", "mock.sc.warn"], ["alert", "mock.sc.alert"], ["degraded", "mock.sc.degraded"]].map(function (o) {
       return el("option", { value: o[0], text: t(o[1]), selected: o[0] === window.AUDITDSEC_MOCK.scenario });
     }));
@@ -1152,7 +949,6 @@
     A.hooks.unauthorized = showGate;
     window.scrollTo(0, 0);
     buildBar(); buildMain(); setupDemo();
-    startEngine();
     loadAll().then(function () { journal.reload(); startPoll(); });
   }
 

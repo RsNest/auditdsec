@@ -31,7 +31,7 @@ func ControlHandler(r *Runner, token string) http.Handler {
 		})
 	}
 	mux.Handle("GET /v1/health", auth(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "pinned_updates": true})
 	}))
 	mux.Handle("GET /v1/status", auth(func(w http.ResponseWriter, req *http.Request) {
 		ctx, cancel := context.WithTimeout(req.Context(), 30*time.Second)
@@ -180,6 +180,15 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 // Ping reports whether the control service answers.
 func (c *Client) Ping(ctx context.Context) error {
 	return c.do(ctx, http.MethodGet, "/v1/health", nil, nil)
+}
+
+// SupportsUpdates distinguishes an older access-only service. The UI must
+// never offer an update that the installed control binary cannot execute.
+func (c *Client) SupportsUpdates(ctx context.Context) bool {
+	var out struct {
+		PinnedUpdates bool `json:"pinned_updates"`
+	}
+	return c.do(ctx, http.MethodGet, "/v1/health", nil, &out) == nil && out.PinnedUpdates
 }
 
 // Status returns the installer's report of the current setup.

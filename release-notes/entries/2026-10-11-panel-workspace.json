@@ -1,0 +1,20 @@
+{
+  "id": "2026-10-11-panel-workspace",
+  "date": "2026-10-11",
+  "title": { "en": "A new panel workspace and updates in one click", "ru": "Новое рабочее пространство панели и обновление в один клик" },
+  "added": {
+    "en": ["A sidebar and separate pages for overview, events, incidents, addresses, exceptions, diagnostics, settings and updates.", "Event and incident details open in a side panel. Dark and light themes, Russian and English, and mobile layouts are supported.", "Update from the panel through the local control service, with persistent progress and verification of the installed commit."],
+    "ru": ["Боковое меню и отдельные страницы обзора, событий, инцидентов, адресов, исключений, диагностики, настроек и обновлений.", "Детали событий и инцидентов открываются сбоку. Доступны тёмная и светлая темы, русский и английский языки, мобильная версия.", "Обновление через локальную службу управления с сохранением хода операции и проверкой установленного коммита."]
+  },
+  "fixed": {
+    "en": ["Update descriptions fit readable cards; full versions and operation logs are expandable.", "Only the update initiator can retain access across one restart, for up to 30 minutes. Tokens and passwords are never written to the checkpoint."],
+    "ru": ["Описание обновления разбито на читаемые карточки; полные версии и журнал операции можно развернуть.", "Только инициатор обновления сохраняет доступ на один перезапуск, максимум на 30 минут. Токен и пароль в запись восстановления не попадают."]
+  },
+  "actions": {
+    "en": ["Upgrade the application and run sudo ./install.sh --enable-panel-control to enable one-click updates with the current control service."],
+    "ru": ["Обновите приложение и выполните sudo ./install.sh --enable-panel-control, чтобы включить обновление в один клик через актуальную службу управления."]
+  },
+  "breaking": [],
+  "requires": { "installer_update": true, "migration": "none" },
+  "evidence": ["internal/web/assets/views.js", "internal/web/assets/updates.js", "internal/api/update.go", "internal/api/update_session.go", "internal/access/runner.go", "internal/access/update_exec_test.go", "docs/PANEL.md"]
+}

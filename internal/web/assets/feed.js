@@ -319,10 +319,26 @@
     return b;
   }
 
+  var drawer = null;
+  function closeDetail() { if (drawer) { drawer.close(); } }
+  function showDetail(title, kids) {
+    closeDetail();
+    var trigger = document.activeElement;
+    var dlg = el("dialog", { class: "drawer", "aria-labelledby": "detail-title" });
+    drawer = dlg;
+    add(dlg, [
+      el("div", { class: "drawer-head" }, [el("h2", { id: "detail-title", text: title }),
+        el("button", { class: "icon-btn", type: "button", "aria-label": t("common.close"), text: "×", onclick: function () { dlg.close(); } })]),
+      el("div", { class: "drawer-body" }, kids)
+    ]);
+    dlg.addEventListener("close", function () { dlg.remove(); if (drawer === dlg) { drawer = null; } if (trigger && trigger.isConnected) { trigger.focus(); } }, { once: true });
+    dlg.addEventListener("click", function (e) { if (e.target === dlg && e.clientX < dlg.getBoundingClientRect().left) { dlg.close(); } });
+    add(document.body, dlg); dlg.showModal();
+    return dlg;
+  }
   function row(ev, actions) {
     var wrap = el("div");
-    var open = null;
-    var btn = el("button", { class: "jrow", type: "button", "aria-expanded": "false" }, [
+    var btn = el("button", { class: "jrow", type: "button", "aria-haspopup": "dialog" }, [
       el("span", { class: "t", text: A.clock(ev.time) }),
       sevTag(ev.severity),
       el("span", { class: "s", text: ev.summary || t("kind." + ev.kind) }),
@@ -330,11 +346,7 @@
       el("span", { class: "chev", "aria-hidden": "true", text: "⌄" })
     ]);
     btn.addEventListener("click", function () {
-      var isOpen = btn.getAttribute("aria-expanded") === "true";
-      btn.setAttribute("aria-expanded", isOpen ? "false" : "true");
-      if (isOpen) { if (open) { wrap.removeChild(open); open = null; } return; }
-      open = detail(ev, actions);
-      wrap.appendChild(open);
+      showDetail(ev.summary || t("kind." + ev.kind), detail(ev, actions));
     });
     add(wrap, btn);
     return wrap;
@@ -344,7 +356,7 @@
 
   function Journal(host, actions) {
     var f = { severity: "", kind: "", ip: "", user: "", q: "", period: "24h" };
-    var items = [], next = null, loading = false;
+    var items = [], next = null, loading = false, request = 0;
 
     var ipIn = el("input", { class: "in", type: "text", placeholder: "203.0.113.7", autocomplete: "off", spellcheck: "false" });
     var userIn = el("input", { class: "in", type: "text", placeholder: "root", autocomplete: "off", spellcheck: "false" });
@@ -367,7 +379,7 @@
       ["1h", "24h", "7d", "all"].map(function (p) { return el("option", { value: p, text: t("ev.period." + p), selected: p === f.period }); }));
 
     function fld(label, control) {
-      return el("div", { class: "fld" }, [el("label", { class: "lbl", text: label }), control]);
+      return el("label", { class: "fld" }, [el("span", { class: "lbl", text: label }), control]);
     }
     var count = el("span", { class: "count" });
     var list = el("div", { class: "jlist" });
@@ -418,16 +430,23 @@
     }
 
     function load(append) {
+      if (append && loading) { return Promise.resolve(); }
+      var version = ++request;
       loading = true;
+      more.disabled = true;
       return A.api.events(query(append ? next : null)).then(function (page) {
+        if (version !== request || !host.isConnected) { return; }
         loading = false;
+        more.disabled = false;
         var batch = (page && page.items) || [];
         items = append ? items.concat(batch) : batch;
         next = (page && page.next) || null;
         A.announceCritical(items);
         paint();
       }, function (e) {
+        if (version !== request || !host.isConnected) { return; }
         loading = false;
+        more.disabled = false;
         paint();
         if (e.code !== "offline") { A.toast(e.message || t("err.generic"), "err"); }
       });
@@ -437,12 +456,12 @@
     paint();
     return {
       reload: reset,
-      refresh: function () { if (!next && !list.querySelector("[aria-expanded=true]") && document.activeElement.tagName !== "INPUT") { return load(false); } },
+      refresh: function () { if (!next && !drawer && !host.closest("[hidden]") && !host.contains(document.activeElement)) { return load(false); } },
       setKind: function (k) { f.kind = k; kindSel.value = k; return reset(); },
       setSeverity: setSeverity
     };
   }
 
-  window.ADS.feed = { contextRows: contextRows, Deck: Deck, Journal: Journal, row: row, sevTag: sevTag,
+  window.ADS.feed = { contextRows: contextRows, Deck: Deck, Journal: Journal, row: row, sevTag: sevTag, detail: detail, showDetail: showDetail, closeDetail: closeDetail,
     selectDeck: selectDeck, deckSignature: deckSignature, blocked: blocked, protectedIP: protectedIP, banButton: banButton };
 })();

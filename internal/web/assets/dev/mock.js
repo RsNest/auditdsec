@@ -373,6 +373,42 @@ window.AUDITDSEC_MOCK = (function () {
     var path = req.path;
     var d = data();
     var result;
+    if (path === "/update" && method === "GET") { return Promise.resolve(updateDemo()); }
+    if (path === "/update/check" && method === "POST") { return Promise.resolve(updateDemo()); }
+    if (path === "/update/apply" && method === "POST") {
+      updateStarted = Date.now(); updateDone = false;
+      return Promise.resolve(updateTask());
+    }
+    if (path.indexOf("/update/tasks/") === 0) { return Promise.resolve(updateTask()); }
+    if (path === "/access") { return Promise.resolve({
+      current: { mode: "domain", site: "panel.example.com", url: "https://panel.example.com", issuer: "Let's Encrypt", not_after: "2026-12-09", renewal: "Automatic", running: "yes", source: "installer" },
+      control: { available: true }
+    }); }
+    if (path === "/access/check") { return Promise.resolve({ plan: {
+      plan_id: "demo-plan", changes: [{ what: "Panel address", from: "panel.example.com", to: body.site }],
+      kept: ["Events", "Credentials", "Certificates"], interruption: "A brief interruption is expected.", rollback: "The previous configuration is kept."
+    }, preflight: { dns_ok: true, records: [{ type: "A", name: body.site, value: "203.0.113.10" }], checks: [], problems: [] } }); }
+    if (path === "/access/draft") { return Promise.resolve(body); }
+    if (path === "/access/apply") { return Promise.resolve({ id: "demo-access", state: "succeeded", params: body, events: [] }); }
+    if (path.indexOf("/access/tasks/") === 0) { return Promise.resolve({ id: "demo-access", state: "succeeded", params: { action: "domain" }, events: [] }); }
+    if (path === "/exceptions" && method === "GET") { return Promise.resolve({ items: demoExceptions.slice() }); }
+    if (path === "/exceptions" && method === "POST") {
+      var rule = Object.assign({}, body, { id: "demo-exception-" + (demoExceptions.length + 1), expires_at: new Date(Date.now() + body.hours * 3600e3).toISOString(), created_by: "demo", hits: 0 });
+      demoExceptions.push(rule); return Promise.resolve(rule);
+    }
+    if (path.indexOf("/exceptions/") === 0 && method === "DELETE") { demoExceptions = demoExceptions.filter(function (r) { return r.id !== path.slice(12); }); return Promise.resolve(null); }
+    if (path === "/suspects") { return Promise.resolve({ items: [], threshold: 10, window_seconds: 600, auto_enforcing: d.enforcing }); }
+    if (path.indexOf("/settings/telegram") === 0) { return Promise.resolve({
+      status: "connected", enabled: true, has_token: true, chat_ids: [123456789], read_only_chat_ids: [], min_severity: "warn",
+      kinds: ["ssh_login_fail", "authorized_keys_change"], available_kinds: Object.keys(EXPLAIN.en), quiet_from: "23:00", quiet_to: "07:00", rate_per_minute: 10,
+      bans: true, startup_notice: true, bot: { username: "auditdsec_demo_bot" }
+    }); }
+    if (path === "/incidents") { return Promise.resolve({ items: demoIncidents().filter(function (i) { var state = req.query.state || "open"; return state === "all" || state === "open" && i.state !== "resolved" || state === i.state; }) }); }
+    if (path.indexOf("/incidents/") === 0) {
+      var inc = demoIncidents()[0];
+      if (method === "POST") { incidentState = body.action === "resolve" ? "resolved" : body.action === "ack" ? "acknowledged" : "new"; inc.state = incidentState; }
+      return Promise.resolve(inc);
+    }
 
     if (method === "POST" && path === "/login") {
       if (body && body.login === "admin" && body.password === "demo") {
@@ -442,6 +478,39 @@ window.AUDITDSEC_MOCK = (function () {
     return new Promise(function (resolve) {
       setTimeout(function () { resolve(result); }, 140);
     });
+  }
+
+  var updateStarted = 0, updateDone = false, incidentState = "new", demoExceptions = [];
+  function updateTask() {
+    var age = (Date.now() - updateStarted) / 1000;
+    var stage = age < 2 ? "source" : age < 5 ? "image" : age < 8 ? "apply" : "verify";
+    if (age > 10) { updateDone = true; }
+    return { id: "demo-update", trace_id: "demo-update-trace", params: { action: "update", commit: "b".repeat(40) },
+      state: updateDone ? "succeeded" : "running", started: new Date(updateStarted).toISOString(), stage: stage,
+      events: [{ code: stage, state: "running", text: "Demo: " + stage }], log_tail: "Demonstration only. No containers are modified." };
+  }
+  function updateDemo() {
+    var ru = lang() === "ru";
+    return { state: updateDone ? "up_to_date" : "available", pending: !updateDone, channel: "main",
+      installed: { version: updateDone ? "0.3.0-dev+bbbbbbbbbbbb" : "0.3.0-dev+aaaaaaaaaaaa", commit: (updateDone ? "b" : "a").repeat(40) },
+      latest: { version: "0.3.0-dev+bbbbbbbbbbbb", commit: "b".repeat(40), published: new Date().toISOString() },
+      last_checked: new Date().toISOString(), last_success: new Date().toISOString(), control: { available: true },
+      requires: { installer_update: true, migration: "reversible" }, breaking: [],
+      changes: [
+        { title: ru ? "Новое рабочее пространство" : "A new workspace", date: "2026-10-11",
+          added: ru ? ["Боковое меню и отдельные страницы для событий, настроек и обновлений.", "Обзор безопасности с состоянием сервисов и последними событиями."] : ["Sidebar navigation and dedicated events, settings and updates pages.", "Security overview with service health and recent events."] },
+        { title: ru ? "Обновления в один клик" : "One-click updates", date: "2026-10-11",
+          added: ru ? ["Обновление через локальную службу управления с сохранением хода операции."] : ["Updates through the local control service with persistent operation progress."],
+          fixed: ru ? ["Длинные версии и описания больше не выходят за границы карточек."] : ["Long versions and descriptions stay inside their cards."] }
+      ] };
+  }
+  function demoIncidents() {
+    var d = data(), ev = d.events.filter(function (e) { return e.severity === "critical" && e.src_ip; })[0] || d.events[0];
+    if (!ev) { return []; }
+    var related = [ev].concat(d.events.filter(function (e) { return e.src_ip === ev.src_ip && e.id !== ev.id; }).slice(0, 5)), kinds = {};
+    related.forEach(function (e) { kinds[e.kind] = (kinds[e.kind] || 0) + 1; });
+    return [{ id: "demo-incident", state: incidentState, severity: ev.severity, src_ip: ev.src_ip, reason: ev.summary,
+      opened: ev.time, last_seen: ev.time, total: related.length, kinds: kinds, events: related }];
   }
 
   return {

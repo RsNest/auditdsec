@@ -36,6 +36,7 @@ const (
 // Params are the structured parameters of a change. Nothing else is accepted:
 // no free-form argument, no path, no command.
 type Params struct {
+	Commit    string `json:"commit,omitempty"` // exact update build from verified metadata
 	Action    string `json:"action"`
 	Site      string `json:"site,omitempty"`       // a domain (domain) or an address (ip, optional)
 	Email     string `json:"email,omitempty"`      // Let's Encrypt contact
@@ -51,8 +52,9 @@ type Params struct {
 var ErrInvalid = errors.New("invalid parameters")
 
 var (
-	labelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	emailRe = regexp.MustCompile(`^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,}$`)
+	labelRe  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	emailRe  = regexp.MustCompile(`^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,}$`)
+	commitRe = regexp.MustCompile(`^[a-f0-9]{40}$`)
 )
 
 func bad(format string, a ...any) error {
@@ -87,6 +89,9 @@ func NormalizeDomain(in string) (string, error) {
 // Validate checks and normalizes parameters. A rejected value is never passed
 // on, even in part.
 func Validate(p Params) (Params, error) {
+	if p.Commit != "" && (p.Action != ActionUpdate || !commitRe.MatchString(p.Commit)) {
+		return Params{}, bad("commit must be a full lowercase SHA for an update")
+	}
 	if !logging.ValidID(p.TraceID) {
 		p.TraceID = logging.NewID()
 	}
@@ -134,6 +139,9 @@ func Validate(p Params) (Params, error) {
 // fixed template. eventsFile is a path chosen by the control service.
 func Args(p Params, eventsFile string) []string {
 	args := []string{"--yes", "--lang", firstNonEmpty(p.Lang, "en"), "--action", p.Action}
+	if p.Commit != "" {
+		args = append(args, "--update-commit", p.Commit)
+	}
 	if p.Site != "" {
 		args = append(args, "--site", p.Site)
 	}
