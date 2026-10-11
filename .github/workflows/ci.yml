@@ -33,6 +33,7 @@ env:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -60,6 +61,7 @@ jobs:
   images:
     needs: test
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -85,9 +87,20 @@ jobs:
           esac
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: check Docker daemon
+        timeout-minutes: 1
+        run: timeout --signal=TERM --kill-after=5s 30s docker info
+      # Go is cross-compiled on BUILDPLATFORM; scratch targets only copy files.
+      # Only enforce runs apk inside the ARM64 image and needs emulation.
       - uses: docker/setup-qemu-action@v3
+        if: matrix.target == 'enforce'
+        timeout-minutes: 2
+        with:
+          platforms: arm64
       - uses: docker/setup-buildx-action@v3
+        timeout-minutes: 2
       - uses: docker/login-action@v3
+        timeout-minutes: 2
         if: github.event_name != 'pull_request'
         with:
           registry: ${{ env.REGISTRY }}
@@ -103,6 +116,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
       - uses: docker/build-push-action@v6
+        timeout-minutes: 10
         with:
           context: .
           file: deploy/Dockerfile
@@ -124,8 +138,15 @@ jobs:
     needs: images
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
+      - name: check Docker daemon
+        timeout-minutes: 1
+        run: timeout --signal=TERM --kill-after=5s 30s docker info
       - uses: docker/setup-qemu-action@v3
+        timeout-minutes: 2
+        with:
+          platforms: arm64
       - name: pull without credentials and check the commit
         run: |
           docker logout ghcr.io || true
