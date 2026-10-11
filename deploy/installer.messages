@@ -363,3 +363,53 @@ Telegram is optional. You can configure it later in the panel, under Alerts.	Tel
 To configure it now, make a bot with @BotFather, send /start to your bot,	Для настройки сейчас создайте бота через @BotFather, отправьте ему /start,
 then read your chat id from	затем узнайте свой chat id по адресу
 Configure Telegram now? (y/N)	Настроить Telegram сейчас? (д/Н)
+  --status [--json]                    show the current mode, address and certificate; change nothing	  --status [--json]                    показать режим, адрес и сертификат; ничего не менять
+  --action ACTION                      on an existing installation, without the menu: check, domain,	  --action ACTION                      для существующей установки без меню: check, domain,
+                                       ip, tunnel, credentials or update. Saved settings (Telegram,	                                       ip, tunnel, credentials или update. Сохранённые настройки (Telegram,
+                                       credentials, e-mail, enforcement) are reused, not asked again.	                                       учётные данные, e-mail, блокировки) используются повторно.
+  --events-file PATH                   append progress events (JSON lines) for the panel	  --events-file PATH                   дописывать события хода работы (JSON-строки) для панели
+  20 operation_in_progress       another installer run or panel change is running	  20 operation_in_progress       уже выполняется другой запуск установщика или изменение из панели
+another change is already running	уже выполняется другое изменение
+  Another installer run or a change started from the panel is in progress.\n	  Уже выполняется другой запуск установщика или изменение, начатое из панели.\n
+  Wait for it to finish, then run this again.\n	  Дождитесь его завершения и повторите запуск.\n
+\n%sCurrent setup%s\n	\n%sТекущая настройка%s\n
+  Mode:         %s\n	  Режим:        %s\n
+  Address:      %s\n	  Адрес:        %s\n
+  Link:         %s\n	  Ссылка:       %s\n
+  Certificate CA: %s\n	  Центр сертификации: %s\n
+  Issuer:       %s\n	  Издатель:     %s\n
+  Valid until:  %s\n	  Действует до: %s\n
+  Renewal:      %s\n	  Продление:    %s\n
+  Running:      %s\n	  Запущено:     %s\n
+  A verified configuration is saved (./install.sh --restore goes back to it).\n	  Сохранена проверенная конфигурация (./install.sh --restore возвращает к ней).\n
+automatic: the proxy renews the certificate about 30 days before it ends	автоматическое: прокси продлевает сертификат примерно за 30 дней до окончания
+automatic: the certbot container renews the short-lived address certificate	автоматическое: контейнер certbot продлевает короткоживущий сертификат адреса
+none: a self-signed certificate is not renewed	нет: самоподписанный сертификат не продлевается
+not needed: the connection runs inside an SSH tunnel	не нужно: соединение идёт внутри SSH-туннеля
+What do you want to do?	Что вы хотите сделать?
+  1) Check the current state	  1) Проверить текущее состояние
+  2) Connect or change the domain	  2) Подключить или сменить домен
+  3) Switch to access by IP address	  3) Перейти на доступ по IP-адресу
+  4) Switch to an SSH tunnel (no public access)	  4) Перейти на SSH-туннель (без публичного доступа)
+  5) Change the login and password	  5) Изменить логин и пароль
+  6) Update the application	  6) Обновить приложение
+  0) Leave	  0) Выйти
+Choose 0-6	Выберите 0-6
+pick a number from 0 to 6	выберите число от 0 до 6
+The public port will be closed: the panel will open only through an SSH	Публичный порт будет закрыт: панель будет открываться только через SSH-
+tunnel from your computer. Anyone using the current address will lose access.	туннель с вашего компьютера. Все, кто пользуется текущим адресом, потеряют доступ.
+Switch to an SSH tunnel?	Перейти на SSH-туннель?
+Nothing was changed.	Ничего не изменено.
+\n%sChange:%s %s %s  ->  %s %s\n	\n%sИзменение:%s %s %s  ->  %s %s\n
+  The panel is restarted behind its proxy; expect a short interruption.\n	  Панель перезапускается за прокси; возможен короткий перерыв.\n
+  Events, bans, the allowlist, credentials and settings are kept.\n	  События, блокировки, доверенные адреса, учётные данные и настройки сохраняются.\n
+  If the new address cannot be verified, the previous configuration is restored.\n	  Если новый адрес не удастся проверить, прежняя конфигурация будет восстановлена.\n
+The login and password will be reset: the next sign-in is admin / admin and	Логин и пароль будут сброшены: следующий вход — admin / admin, он открывает
+opens only the screen where you choose new ones. Events, bans, the allowlist,	только экран выбора новых. События, блокировки, доверенные адреса,
+Telegram and every other setting are kept.	Telegram и все остальные настройки сохраняются.
+Reset the login and password?	Сбросить логин и пароль?
+reset; open the panel and choose a new login and password	сброшено; откройте панель и выберите новые логин и пароль
+the agent did not reset the credentials	агент не сбросил учётные данные
+Fetch the latest version of the installer and application sources (git pull --ff-only)?	Получить свежую версию установщика и исходников (git pull --ff-only)?
+git pull did not succeed; continuing with the sources that are here	git pull не удался; продолжаем с имеющимися исходниками
+--action needs an existing installation; run ./install.sh without it first	--action требует существующей установки; сначала запустите ./install.sh без него

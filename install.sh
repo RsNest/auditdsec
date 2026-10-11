@@ -36,7 +36,7 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
 ORIG_ARGS=("$@")
 
@@ -74,6 +74,9 @@ CACERT="${PANEL_CACERT:-}"   # a CA file to verify the panel's certificate again
 NO_BUILD=no
 BUILD_LOCAL=no
 RESTORE=no
+ACTION=""           # check | domain | ip | tunnel | credentials | update (a repeated run)
+STATUS_ONLY=no
+JSON=no
 PORT_DEPRECATED=no
 PORT_RANGE_LO="${PANEL_PORT_RANGE_LO:-}"
 PORT_RANGE_HI="${PANEL_PORT_RANGE_HI:-}"
@@ -94,6 +97,8 @@ source deploy/installer-i18n.sh
 INSTALLER_LANG=ru
 installer_choose_language "$@"
 installer_load_messages
+# shellcheck source=deploy/installer-access.sh
+source deploy/installer-access.sh
 
 say()  { printf '%s\n' "$(installer_text "$*")"; }
 step() { printf '\n%s==>%s %s\n' "$B" "$N" "$(installer_text "$*")"; }
@@ -153,6 +158,11 @@ Technical modes (never reported as "published and ready")
   --build-local                        DEVELOPERS: build the images from this tree on this
                                        machine instead of downloading the published ones
   --restore                            put back the last configuration that was verified
+  --status [--json]                    show the current mode, address and certificate; change nothing
+  --action ACTION                      on an existing installation, without the menu: check, domain,
+                                       ip, tunnel, credentials or update. Saved settings (Telegram,
+                                       credentials, e-mail, enforcement) are reused, not asked again.
+  --events-file PATH                   append progress events (JSON lines) for the panel
   --yes                                ask nothing that already has an answer
   -h, --help                           this text
 
@@ -169,6 +179,7 @@ first failure:
   17 service_start_failed        the containers did not start or the page is silent
   18 bootstrap_persistence_failed the panel cannot save its credentials
   19 image_unavailable           the image for this commit cannot be downloaded
+  20 operation_in_progress       another installer run or panel change is running
    1 anything else (bad input, Docker missing, ...)
 EOF
 }
@@ -195,6 +206,10 @@ while [ $# -gt 0 ]; do
         --production) ACME=production; shift ;;
         --cacert) CACERT="${2:-}"; shift 2 ;;
         --restore) RESTORE=yes; shift ;;
+        --action) ACTION="${2:-}"; shift 2 ;;
+        --status) STATUS_ONLY=yes; shift ;;
+        --json) JSON=yes; shift ;;
+        --events-file) EVENTS_FILE="${2:-}"; shift 2 ;;
         --no-build) NO_BUILD=yes; shift ;;
         --build-local) BUILD_LOCAL=yes; shift ;;
         --yes|-y) ASSUME_YES=yes; shift ;;
@@ -261,6 +276,7 @@ code_status() {
         service_start_failed) echo 17 ;;
         bootstrap_persistence_failed) echo 18 ;;
         image_unavailable) echo 19 ;;
+        operation_in_progress) echo 20 ;;
         *) echo 1 ;;
     esac
 }
@@ -281,6 +297,7 @@ report() {
     local code="$1" endpoint="$2" check="$3" cause="$4" fix="$5"
     [ -n "$FAIL_CODE" ] || FAIL_CODE="$code"
     [ -n "$FAIL_REASON" ] || FAIL_REASON="$code: $(installer_text "$cause")"
+    emit_event failure failed "$code" "$(installer_text "$cause")" "$(installer_text "$fix")"
     {
         installer_printf '\n%sFAILED: %s%s\n' "$R$B" "$code" "$N"
         installer_printf '  endpoint: %s\n' "$endpoint"
@@ -1469,13 +1486,14 @@ load_state_from_env() {
 # The failed one is kept beside it as .env.failed for diagnosis; no volume is
 # touched, so certificates and stored events are exactly as they were.
 restore_last_good() {
-    [ -s "$LAST_GOOD" ] || return 1
+    local src="${1:-$LAST_GOOD}"
+    [ -s "$src" ] || return 1
     step "Restoring the last configuration that was verified working"
     if [ -f "$ENV_FILE" ]; then
         cp "$ENV_FILE" "${ENV_FILE}.failed"
         chmod 0600 "${ENV_FILE}.failed"
     fi
-    cp "$LAST_GOOD" "$ENV_FILE"
+    cp "$src" "$ENV_FILE"
     chmod 0600 "$ENV_FILE"
     # A configuration saved before images were published names none: it ran
     # the locally built one, which is what it gets back.
@@ -1960,6 +1978,12 @@ exit_status() {
 }
 
 main() {
+    if [ "$STATUS_ONLY" = yes ]; then
+        if [ "$JSON" = yes ]; then status_json; else print_status; fi
+        return 0
+    fi
+    acquire_lock
+    emit_event stage running start "started"
     if [ "$RESTORE" = yes ]; then
         preflight_light
         [ -s "$LAST_GOOD" ] || die "there is no verified configuration to go back to ($LAST_GOOD)"
@@ -1972,11 +1996,31 @@ main() {
         return "$(exit_status "$rrc")"
     fi
 
+    if is_installed; then
+        if [ -z "$ACTION" ] && [ -z "$MODE" ] && interactive; then
+            choose_action
+            if [ -z "$ACTION" ]; then say "Nothing was changed."; return 0; fi
+        fi
+        if [ -n "$ACTION" ]; then
+            valid_action "$ACTION" || die "unknown action '$ACTION': use check, domain, ip, tunnel, credentials or update"
+            local arc=0
+            run_action || arc=$?
+            [ "$arc" != 99 ] || arc=0   # 99: the action continues as an ordinary change
+            if [ "$ACTION_DONE" = yes ]; then return "$arc"; fi
+        fi
+    elif [ -n "$ACTION" ]; then
+        die "--action needs an existing installation; run ./install.sh without it first"
+    fi
+
+    stage preflight "checking this server"
     preflight
     choose_mode                       # 2. domain or IP
+    stage dns "checking the address"
     ask_site                          # 3. DNS or the address
     setup_probe
+    stage port "checking the public port"
     select_port                       # 4. the public port, checked from outside
+    stage challenge "checking what the certificate needs"
     check_challenge                   # 5. what the certificate needs
     ask_email
     settle_acme
@@ -1986,6 +2030,9 @@ main() {
     ask_password
     ensure_enforce_image              # before anything is written
 
+    announce_change
+    backup_current                    # what a rollback goes back to
+    stage apply "writing the configuration and starting"
     write_config                      # 6. configure and start
     build_compose_files
 
@@ -1994,6 +2041,7 @@ main() {
         started=no
         [ -n "$FAIL_CODE" ] || report service_start_failed "$(compose_prefix)" "starting the stack" "it did not start" "see the messages above"
     else
+        stage verify "checking the new address"
         verify_stack || vrc=$?
     fi
 
@@ -2001,9 +2049,11 @@ main() {
     # put it back rather than leave a person with nothing; the failed one is
     # kept for diagnosis.
     if [ "$started" = no ] || [ "$vrc" = 1 ]; then
-        if [ -s "$LAST_GOOD" ] && ! cmp -s "$ENV_FILE" "$LAST_GOOD"; then
+        local rsrc; rsrc="$(rollback_source)"
+        if [ -n "$rsrc" ] && ! cmp -s "$ENV_FILE" "$rsrc"; then
             local code="$FAIL_CODE" reason="$FAIL_REASON"
-            if restore_last_good; then
+            stage rollback "restoring the previous configuration"
+            if restore_last_good "$rsrc"; then
                 TLS_UNTRUSTED=no; LOGIN_STATE=""; LOGIN_ROUTE=""; TLS_STATE=""; RENEW_STATE=""; RELOAD_PROBLEM=no
                 PAGE_STATE=""; PASSWORD=""; EXT_TLS_STATE=""; NO_EXTERNAL=yes
                 verify_stack || true
@@ -2014,6 +2064,7 @@ main() {
             say "There is no earlier working configuration to go back to."
         fi
         summary
+        if [ "$RESTORED" = yes ]; then emit_event result rolled_back "$FAIL_CODE" "$FAIL_REASON"; else emit_event result failed "$FAIL_CODE" "$FAIL_REASON"; fi
         return "$(exit_status 1)"
     fi
 
@@ -2021,7 +2072,58 @@ main() {
         save_last_good
     fi
     summary
+    if [ -n "$FAIL_CODE" ] || [ "$vrc" != 0 ]; then emit_event result failed "$FAIL_CODE" "$FAIL_REASON"; else emit_event result ok "" "$PANEL_URL"; fi
     return "$(exit_status "$vrc")"
+}
+
+# run_action performs the part of a chosen action that is not an ordinary
+# change. check and credentials finish here (ACTION_DONE=yes); domain, ip,
+# tunnel and update set the mode and continue as a normal change, which
+# reuses everything saved.
+ACTION_DONE=no
+run_action() {
+    case "$ACTION" in
+        check)
+            ACTION_DONE=yes
+            preflight_light
+            load_state_from_env
+            NO_EXTERNAL=yes
+            [ -z "$PROBE_URL" ] || [ -z "$PROBE_TOKEN_FILE" ] || [ ! -r "$PROBE_TOKEN_FILE" ] || NO_EXTERNAL=no
+            local crc=0
+            verify_stack || crc=$?
+            summary
+            emit_event result "$([ "$crc" = 0 ] && echo ok || echo failed)" "$FAIL_CODE" "$FAIL_REASON"
+            return "$(exit_status "$crc")" ;;
+        credentials)
+            ACTION_DONE=yes
+            preflight_light
+            load_state_from_env
+            installer_lines <<'EOF'
+
+The login and password will be reset: the next sign-in is admin / admin and
+opens only the screen where you choose new ones. Events, bans, the allowlist,
+Telegram and every other setting are kept.
+EOF
+            confirm "Reset the login and password?" || { say "Nothing was changed."; return 0; }
+            stage apply "resetting the credentials"
+            if compose run --rm auditdsec reset-credentials -yes; then
+                ok "reset; open the panel and choose a new login and password"
+                emit_event result ok "" "credentials reset"
+                return 0
+            fi
+            report service_start_failed "$(compose_prefix)" "reset-credentials" "the agent did not reset the credentials" "run: $(compose_prefix) run --rm auditdsec reset-credentials -yes"
+            emit_event result failed "$FAIL_CODE" "$FAIL_REASON"
+            return "$(exit_status 1)" ;;
+        update)
+            if [ -d .git ] && command -v git >/dev/null 2>&1 && interactive && confirm "Fetch the latest version of the installer and application sources (git pull --ff-only)?"; then
+                git pull --ff-only || warn "git pull did not succeed; continuing with the sources that are here"
+            fi
+            apply_action_defaults
+            return 99 ;;
+        domain|ip|tunnel)
+            apply_action_defaults
+            return 99 ;;
+    esac
 }
 
 # preflight_light is what --restore needs: Docker, and nothing built.
@@ -2030,4 +2132,4 @@ preflight_light() {
     $DOCKER info >/dev/null 2>&1 || die "cannot talk to the Docker daemon"
 }
 
-main
+if [ -z "${AUDITDSEC_INSTALL_SOURCED:-}" ]; then main; fi

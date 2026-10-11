@@ -20,3 +20,6 @@ __pycache__/
 agent.pid
 config.yaml
 vendor/
+.env.*
+.install.lock
+.install.lock.d/
