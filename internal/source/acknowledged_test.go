@@ -56,6 +56,61 @@ func nextSourceLine(t *testing.T, ch <-chan Line) Line {
 	}
 }
 
+func TestTruncationDuringEmitKeepsGenerationFingerprint(t *testing.T) {
+	skipOnWindows(t)
+	for _, tc := range []struct {
+		name, prefix string
+		empty        bool
+	}{
+		{name: "short"},
+		{name: "same-head", prefix: strings.Repeat("p", headSize)},
+		{name: "initially-empty", empty: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "audit.log")
+			first, second := tc.prefix+"first-generation", tc.prefix+"second-generation"
+			initial := first + "\n"
+			if tc.empty {
+				initial = ""
+			}
+			if err := os.WriteFile(path, []byte(initial), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var delivered []Line
+			r := &acknowledgedReader{t: New(Options{Path: path, FromStart: true}), first: true}
+			r.emit = func(l Line) error {
+				delivered = append(delivered, l)
+				if l.Boundary && len(delivered) == 1 && tc.empty {
+					return os.WriteFile(path, []byte(first+"\n"), 0600)
+				}
+				if !l.Boundary && l.Text == first {
+					// Reproduce copytruncate after delivery, before drain reaches
+					// EOF: the replacement is longer than the old read offset.
+					return os.WriteFile(path, []byte(second+"\n"), 0600)
+				}
+				return nil
+			}
+			t.Cleanup(func() {
+				if r.f != nil {
+					_ = r.f.Close()
+				}
+			})
+			if err := r.open(); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.step(); err != nil {
+				t.Fatal(err)
+			}
+			if len(delivered) != 4 || !delivered[0].Boundary || delivered[1].Text != first || !delivered[2].Boundary || delivered[3].Text != second {
+				t.Fatalf("expected two complete generations, got %+v", delivered)
+			}
+			if delivered[1].End.Generation == delivered[3].End.Generation || delivered[3].Start.Offset != 0 {
+				t.Fatal("replacement reused the old generation or offset")
+			}
+		})
+	}
+}
+
 func TestReadAheadDoesNotAcknowledge(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")

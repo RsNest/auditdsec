@@ -301,6 +301,7 @@ func (r *acknowledgedReader) open() error {
 		r.discard = true
 	}
 	c := r.position()
+	r.anchor = append([]byte(nil), c.Anchor...)
 	if r.first && r.resume == nil {
 		// Persist the initial baseline, including offset zero, before read-ahead.
 		if err := r.t.SaveCursor(c); err != nil {
@@ -352,11 +353,7 @@ func (r *acknowledgedReader) step() error {
 	if err != nil {
 		return err
 	}
-	changed := fi.Size() < r.offset || !bytes.Equal(fingerprint(r.f, 0, len(r.head)), r.head)
-	if !changed && len(r.anchor) > 0 {
-		changed = !bytes.Equal(fingerprint(r.f, r.offset-int64(len(r.anchor)), len(r.anchor)), r.anchor)
-	}
-	if changed {
+	if r.changed(fi.Size()) {
 		_ = r.f.Close()
 		r.f = nil
 		r.gap = "copytruncate or in-place replacement detected; starting a new source generation"
@@ -365,20 +362,60 @@ func (r *acknowledgedReader) step() error {
 	return r.drain()
 }
 
+func (r *acknowledgedReader) changed(size int64) bool {
+	return size < r.offset ||
+		!bytes.Equal(fingerprint(r.f, 0, len(r.head)), r.head) ||
+		!bytes.Equal(fingerprint(r.f, r.offset-int64(len(r.anchor)), len(r.anchor)), r.anchor)
+}
+
+func (r *acknowledgedReader) remember(part []byte) {
+	if len(part) >= headSize {
+		r.anchor = append(r.anchor[:0], part[len(part)-headSize:]...)
+		return
+	}
+	r.anchor = append(r.anchor, part...)
+	if len(r.anchor) > headSize {
+		r.anchor = append([]byte(nil), r.anchor[len(r.anchor)-headSize:]...)
+	}
+}
+
 func (r *acknowledgedReader) drain() error {
 	buf := make([]byte, 64*1024)
 	for {
+		// Delivery may block while the writer copytruncates and regrows the
+		// file. Do not read the replacement using the old offset; step will
+		// reopen it as a new generation on the next poll.
+		fi, err := r.f.Stat()
+		if err != nil {
+			return err
+		}
+		if r.changed(fi.Size()) {
+			return nil
+		}
 		n, err := r.f.Read(buf)
 		if n > 0 {
+			fi, statErr := r.f.Stat()
+			if statErr != nil {
+				return statErr
+			}
+			if r.changed(fi.Size()) {
+				return nil
+			}
+			// Extend the fingerprint with bytes we actually read, before emit
+			// can let a writer replace them. Rereading at EOF would bless the
+			// replacement as part of the old generation.
+			if r.offset <= int64(len(r.head)) && len(r.head) < headSize {
+				start := len(r.head) - int(r.offset)
+				end := min(n, headSize-int(r.offset))
+				if start < end {
+					r.head = append(r.head, buf[start:end]...)
+				}
+			}
 			if err := r.consume(buf[:n]); err != nil {
 				return err
 			}
 		}
 		if err == io.EOF || n == 0 {
-			if len(r.head) < headSize {
-				r.head = fingerprint(r.f, 0, headSize)
-			}
-			r.anchor = r.position().Anchor
 			return nil
 		}
 		if err != nil {
@@ -403,6 +440,7 @@ func (r *acknowledgedReader) consume(b []byte) error {
 			}
 		}
 		if i < 0 {
+			r.remember(part)
 			r.offset += int64(len(part))
 			break
 		}
@@ -410,8 +448,10 @@ func (r *acknowledgedReader) consume(b []byte) error {
 		end := r.offset + int64(len(part))
 		r.offset = r.lineStart
 		from := r.position()
+		r.remember(part)
 		r.offset = end
 		to := r.position()
+		to.Anchor = append([]byte(nil), r.anchor...)
 		text := ""
 		if !r.discard {
 			text = string(r.partial[:len(r.partial)-1])
