@@ -21,35 +21,39 @@ import (
 // Settings is the persisted notification policy. Token is only accepted on
 // writes; View deliberately has a separate shape without a token field.
 type Settings struct {
-	Version       int          `json:"version"`
-	Enabled       bool         `json:"enabled"`
-	Token         string       `json:"token"`
-	ChatIDs       []int64      `json:"chat_ids"`
-	Kinds         []model.Kind `json:"kinds"`
-	MinSeverity   string       `json:"min_severity"`
-	QuietFrom     string       `json:"quiet_from"`
-	QuietTo       string       `json:"quiet_to"`
-	RatePerMinute int          `json:"rate_per_minute"`
-	Bans          bool         `json:"bans"`
-	StartupNotice bool         `json:"startup_notice"`
+	Version int     `json:"version"`
+	Enabled bool    `json:"enabled"`
+	Token   string  `json:"token"`
+	ChatIDs []int64 `json:"chat_ids"`
+	// ReadOnlyChatIDs are recipients (a subset of ChatIDs) that receive
+	// messages and may use read-only commands, but cannot change anything.
+	ReadOnlyChatIDs []int64      `json:"read_only_chat_ids,omitempty"`
+	Kinds           []model.Kind `json:"kinds"`
+	MinSeverity     string       `json:"min_severity"`
+	QuietFrom       string       `json:"quiet_from"`
+	QuietTo         string       `json:"quiet_to"`
+	RatePerMinute   int          `json:"rate_per_minute"`
+	Bans            bool         `json:"bans"`
+	StartupNotice   bool         `json:"startup_notice"`
 }
 
 type SettingsView struct {
-	Enabled        bool         `json:"enabled"`
-	HasToken       bool         `json:"has_token"`
-	ChatIDs        []int64      `json:"chat_ids"`
-	Kinds          []model.Kind `json:"kinds"`
-	AvailableKinds []model.Kind `json:"available_kinds"`
-	MinSeverity    string       `json:"min_severity"`
-	QuietFrom      string       `json:"quiet_from"`
-	QuietTo        string       `json:"quiet_to"`
-	RatePerMinute  int          `json:"rate_per_minute"`
-	Bans           bool         `json:"bans"`
-	StartupNotice  bool         `json:"startup_notice"`
-	Status         string       `json:"status"`
-	BotUsername    string       `json:"bot_username"`
-	LastDelivery   time.Time    `json:"last_delivery"`
-	LastError      string       `json:"last_error"`
+	Enabled         bool         `json:"enabled"`
+	HasToken        bool         `json:"has_token"`
+	ChatIDs         []int64      `json:"chat_ids"`
+	ReadOnlyChatIDs []int64      `json:"read_only_chat_ids"`
+	Kinds           []model.Kind `json:"kinds"`
+	AvailableKinds  []model.Kind `json:"available_kinds"`
+	MinSeverity     string       `json:"min_severity"`
+	QuietFrom       string       `json:"quiet_from"`
+	QuietTo         string       `json:"quiet_to"`
+	RatePerMinute   int          `json:"rate_per_minute"`
+	Bans            bool         `json:"bans"`
+	StartupNotice   bool         `json:"startup_notice"`
+	Status          string       `json:"status"`
+	BotUsername     string       `json:"bot_username"`
+	LastDelivery    time.Time    `json:"last_delivery"`
+	LastError       string       `json:"last_error"`
 }
 
 // Managed swaps immutable clients, draining old sends and bot commands before
@@ -151,6 +155,16 @@ func validateSettings(s Settings) error {
 		}
 		seen[id] = true
 	}
+	readOnly := map[int64]bool{}
+	for _, id := range s.ReadOnlyChatIDs {
+		if !seen[id] || readOnly[id] {
+			return errors.New("read-only recipients must be unique and also listed as recipients")
+		}
+		readOnly[id] = true
+	}
+	if len(s.ChatIDs) > 0 && len(readOnly) == len(s.ChatIDs) {
+		return errors.New("at least one recipient must be able to control the agent")
+	}
 	seenKinds := map[model.Kind]bool{}
 	for _, k := range s.Kinds {
 		if !model.ValidKind(k) || seenKinds[k] {
@@ -177,6 +191,7 @@ func validateSettings(s Settings) error {
 func (m *Managed) build(s Settings) (*Client, error) {
 	o := m.base
 	o.Token, o.ChatIDs = s.Token, append([]int64{}, s.ChatIDs...)
+	o.ReadOnlyChatIDs = append([]int64{}, s.ReadOnlyChatIDs...)
 	o.OffsetKey = fmt.Sprintf("tg_update_offset_%x", sha256.Sum256([]byte(s.Token)))
 	o.MinSeverity, _ = model.ParseSeverity(s.MinSeverity)
 	o.QuietFrom, _ = clockMinutes(s.QuietFrom)
@@ -214,7 +229,7 @@ func (m *Managed) View() SettingsView {
 			status = "connected"
 		}
 	}
-	return SettingsView{Enabled: s.Enabled, HasToken: s.Token != "", ChatIDs: append([]int64{}, s.ChatIDs...),
+	return SettingsView{Enabled: s.Enabled, HasToken: s.Token != "", ChatIDs: append([]int64{}, s.ChatIDs...), ReadOnlyChatIDs: append([]int64{}, s.ReadOnlyChatIDs...),
 		Kinds: append([]model.Kind{}, s.Kinds...), AvailableKinds: append([]model.Kind{}, model.AllKinds...),
 		MinSeverity: s.MinSeverity, QuietFrom: s.QuietFrom, QuietTo: s.QuietTo, RatePerMinute: s.RatePerMinute,
 		Bans: s.Bans, StartupNotice: s.StartupNotice, Status: status, BotUsername: m.username,
@@ -301,7 +316,7 @@ func (m *Managed) Apply(ctx context.Context, s Settings, operation string) (Sett
 	}
 	m.mu.Lock()
 	m.stopLocked()
-	if client != nil && m.client != nil && s.Token == m.settings.Token && slices.Equal(s.ChatIDs, m.settings.ChatIDs) {
+	if client != nil && m.client != nil && s.Token == m.settings.Token && slices.Equal(s.ChatIDs, m.settings.ChatIDs) && slices.Equal(s.ReadOnlyChatIDs, m.settings.ReadOnlyChatIDs) {
 		m.client.mu.Lock()
 		client.lastDelivery, client.lastError = m.client.lastDelivery, m.client.lastError
 		m.client.mu.Unlock()
@@ -318,7 +333,7 @@ func (m *Managed) recordTest(s Settings, err error) {
 	defer m.mu.RUnlock()
 	// Testing an unsaved bot or different recipient list is not proof that
 	// the configured delivery path works.
-	if m.client == nil || s.Token != m.settings.Token || !slices.Equal(s.ChatIDs, m.settings.ChatIDs) {
+	if m.client == nil || s.Token != m.settings.Token || !slices.Equal(s.ChatIDs, m.settings.ChatIDs) && slices.Equal(s.ReadOnlyChatIDs, m.settings.ReadOnlyChatIDs) {
 		return
 	}
 	m.client.mu.Lock()

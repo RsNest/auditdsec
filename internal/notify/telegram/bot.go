@@ -184,6 +184,11 @@ func (c *Client) handleCommand(ctx context.Context, m *tgMessage) {
 	}
 	args := fields[1:]
 	chat := m.Chat.ID
+	if writeCommands[strings.ToLower(cmd)] && !c.opt.canControl(chat) {
+		c.log.Info("a read-only chat tried to change state", "chat_id", chat, "command", strings.ToLower(cmd))
+		c.reply(ctx, chat, c.tr("ui.role.readonly", nil))
+		return
+	}
 
 	switch strings.ToLower(cmd) {
 	case "/start":
@@ -232,6 +237,14 @@ func (c *Client) handleCommand(ctx context.Context, m *tgMessage) {
 
 func (c *Client) handleCallback(ctx context.Context, q *callbackQuery, chat int64) {
 	kind, arg, _ := strings.Cut(q.Data, ":")
+	if !c.opt.canControl(chat) {
+		// Every button changes state; a read-only chat only gets the explanation.
+		c.log.Info("a read-only chat pressed a button", "chat_id", chat, "data", kind)
+		if err := c.call(ctx, c.send, "answerCallbackQuery", answerCallbackRequest{ID: q.ID, Text: stripTags(c.tr("ui.role.readonly", nil))}, nil); err != nil {
+			c.log.Warn("cannot answer the callback query", "error", err)
+		}
+		return
+	}
 	var answer string
 
 	switch kind {
@@ -476,3 +489,19 @@ func stripTags(s string) string {
 	}
 	return strings.TrimSpace(b.String())
 }
+
+// canControl reports whether a chat may change state (bans, allowlist, mute,
+// incident status). Chats listed as read-only still get every message and the
+// read-only commands. With no read-only list, every recipient controls the
+// agent, as before.
+func (o Options) canControl(chatID int64) bool {
+	for _, id := range o.ReadOnlyChatIDs {
+		if id == chatID {
+			return false
+		}
+	}
+	return true
+}
+
+// writeCommands change state; everything else only reads.
+var writeCommands = map[string]bool{"/ban": true, "/allow": true, "/unallow": true, "/unban": true, "/mute": true, "/unmute": true}

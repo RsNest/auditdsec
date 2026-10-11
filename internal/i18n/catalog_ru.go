@@ -8,6 +8,7 @@ var catalogRU = map[string]string{
 	"event.ssh_login_fail":                   "Неудачная попытка входа: {user} с адреса {ip}",
 	"event.auth_ok":                          "Вход через {service}: {user}",
 	"event.auth_fail":                        "Неудачная аутентификация через {service}: {user}",
+	"ui.role.readonly":                       "Этот чат только для чтения: он получает уведомления, но не может банить, разбанивать, менять белый список, глушить и принимать инциденты.",
 	"ui.inc.none":                            "Открытых инцидентов нет.",
 	"ui.inc.more":                            "…и ещё открытых инцидентов: {n} (см. панель).",
 	"ui.inc.line":                            "<b>{id}</b> · {sev} · {state}\n{reason}\nСобытий: {total} · последнее <code>{last}</code>",

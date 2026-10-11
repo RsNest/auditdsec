@@ -41,17 +41,19 @@ type Options struct {
 	Token     string
 	OffsetKey string
 	ChatIDs   []int64
-	APIBase   string
-	Lang      i18n.Lang
-	Host      string
-	Profile   string
-	BanHint   string // what to say about enforcement not being wired up yet
-	Store     *store.Store
-	Logger    *slog.Logger
-	HTTP      *http.Client
-	Now       func() time.Time
-	Started   time.Time
-	Location  *time.Location
+	// ReadOnlyChatIDs may read but not change anything; see canControl.
+	ReadOnlyChatIDs []int64
+	APIBase         string
+	Lang            i18n.Lang
+	Host            string
+	Profile         string
+	BanHint         string // what to say about enforcement not being wired up yet
+	Store           *store.Store
+	Logger          *slog.Logger
+	HTTP            *http.Client
+	Now             func() time.Time
+	Started         time.Time
+	Location        *time.Location
 
 	// Debug reports whether the agent runs in debug mode, and LogLevel the
 	// level its own log is written at. Both are shown by /debug.

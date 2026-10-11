@@ -7,6 +7,7 @@ var catalogEN = map[string]string{
 	"event.ssh_login_fail":                   "Failed login attempt: {user} from {ip}",
 	"event.auth_ok":                          "Login via {service}: {user}",
 	"event.auth_fail":                        "Failed authentication via {service}: {user}",
+	"ui.role.readonly":                       "This chat is read-only: it receives alerts but cannot ban, unban, change the allowlist, mute or acknowledge.",
 	"ui.inc.none":                            "No open incidents.",
 	"ui.inc.more":                            "…and {n} more open incidents (see the panel).",
 	"ui.inc.line":                            "<b>{id}</b> · {sev} · {state}\n{reason}\nEvents: {total} · last <code>{last}</code>",

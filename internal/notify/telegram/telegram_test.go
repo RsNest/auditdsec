@@ -1193,3 +1193,82 @@ func TestIncidentsCommandAndButtons(t *testing.T) {
 		t.Errorf("nothing open: %+v", s)
 	}
 }
+
+func TestReadOnlyChatReceivesAndReadsButCannotChange(t *testing.T) {
+	f := newClient(t, func(o *Options) {
+		o.ChatIDs = []int64{100, 200}
+		o.ReadOnlyChatIDs = []int64{200}
+		o.Enforcer = &fakeEnforcer{}
+		o.Enforcing = true
+	})
+	ctx := context.Background()
+	as := func(chat int64, text string) {
+		f.api.reset()
+		f.client.handleUpdate(ctx, update{Message: &tgMessage{Chat: tgChat{ID: chat}, Text: text}})
+	}
+	pressAs := func(chat int64, data string) {
+		f.api.reset()
+		f.client.handleUpdate(ctx, update{Callback: &callbackQuery{ID: "cb", Data: data, Message: &tgMessage{Chat: tgChat{ID: chat}}}})
+	}
+	last := func() string {
+		s := f.api.sent()
+		if len(s) == 0 {
+			return ""
+		}
+		return s[len(s)-1].Text
+	}
+
+	// Reading works.
+	as(200, "/status")
+	if last() == "" {
+		t.Error("a read-only chat must be able to read")
+	}
+	// Every state change is refused and changes nothing.
+	for _, cmd := range []string{"/ban 198.51.100.7", "/allow 203.0.113.9", "/unban 198.51.100.7", "/mute 1", "/unmute", "/unallow 203.0.113.9"} {
+		as(200, cmd)
+		if !strings.Contains(last(), "только для чтения") {
+			t.Errorf("%s was not refused: %q", cmd, last())
+		}
+	}
+	pressAs(200, "ban:198.51.100.7")
+	pressAs(200, "allow:198.51.100.7")
+	pressAs(200, "inc:resolve:inc-1")
+	if len(f.store.Bans()) != 0 || f.store.IsAllowed("198.51.100.7") || !f.store.MutedUntil().IsZero() {
+		t.Errorf("a read-only chat changed state: bans=%v", f.store.Bans())
+	}
+	// The controlling chat is unaffected, and an unlisted chat is still ignored.
+	as(100, "/ban 198.51.100.7")
+	if len(f.store.Bans()) != 1 {
+		t.Error("the controlling chat can no longer ban")
+	}
+	as(300, "/status")
+	if last() != "" {
+		t.Error("an unknown chat got an answer")
+	}
+	// Alerts still go to every recipient, including the read-only one.
+	f.api.reset()
+	f.client.Notify(ctx, model.Event{Time: f.now, Host: "web01", Kind: model.KindSudo, Severity: model.SevInfo, SummaryKey: "event.sudo", Args: map[string]string{"user": "root", "cmd": "id"}})
+	got := map[int64]bool{}
+	for _, m := range f.api.sent() {
+		got[m.ChatID] = true
+	}
+	if !got[100] || !got[200] {
+		t.Errorf("alerts must reach both recipients: %v", got)
+	}
+}
+
+func TestReadOnlySettingsValidation(t *testing.T) {
+	base := Settings{Enabled: true, Token: "123:abc", ChatIDs: []int64{1, 2}, Kinds: []model.Kind{model.KindSudo}, MinSeverity: "info", RatePerMinute: 10}
+	ok := base
+	ok.ReadOnlyChatIDs = []int64{2}
+	if err := validateSettings(ok); err != nil {
+		t.Fatal(err)
+	}
+	for name, ro := range map[string][]int64{"not a recipient": {9}, "duplicate": {2, 2}, "everyone read-only": {1, 2}} {
+		s := base
+		s.ReadOnlyChatIDs = ro
+		if err := validateSettings(s); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}

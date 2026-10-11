@@ -16,6 +16,7 @@
       dialog = dlg;
       var token = el("input", { class: "in", type: "password", autocomplete: "new-password", spellcheck: "false", maxlength: 256, placeholder: saved.has_token ? t("tg.token.saved") : "123456:..." });
       var ids = el("input", { class: "in", type: "text", value: saved.chat_ids.join(", "), autocomplete: "off", spellcheck: "false", placeholder: "123456789, -1001234567890" });
+      var ro = el("input", { class: "in", type: "text", value: (saved.read_only_chat_ids || []).join(", "), autocomplete: "off", spellcheck: "false" });
       var enabled = el("input", { type: "checkbox", checked: saved.enabled });
       var bans = el("input", { type: "checkbox", checked: saved.bans });
       var startup = el("input", { type: "checkbox", checked: saved.startup_notice });
@@ -30,13 +31,16 @@
         var input = el("input", { type: "checkbox", checked: saved.kinds.indexOf(kind) >= 0 });
         categories.push({ kind: kind, input: input }); add(kindFields, check(input, t("kind." + kind)));
       });
-      function draft() {
-        var values = ids.value.trim() ? ids.value.trim().split(/[\s,;]+/) : [];
-        var chatIDs = values.map(function (v) {
+      function parseIDs(text) {
+        var values = text.trim() ? text.trim().split(/[\s,;]+/) : [];
+        return values.map(function (v) {
           if (!/^-?[0-9]+$/.test(v) || !Number.isSafeInteger(Number(v)) || Number(v) === 0) { throw new Error(t("tg.ids.invalid")); }
           return Number(v);
         });
-        return { enabled: enabled.checked, token: token.value.trim(), chat_ids: chatIDs,
+      }
+      function draft() {
+        var chatIDs = parseIDs(ids.value);
+        return { enabled: enabled.checked, token: token.value.trim(), chat_ids: chatIDs, read_only_chat_ids: parseIDs(ro.value),
           kinds: categories.filter(function (v) { return v.input.checked; }).map(function (v) { return v.kind; }),
           min_severity: severity.value, quiet_from: from.value, quiet_to: to.value,
           rate_per_minute: Number(rate.value), bans: bans.checked, startup_notice: startup.checked };
@@ -69,7 +73,7 @@
         show.textContent = t(visible ? "tg.hide" : "tg.show"); show.setAttribute("aria-pressed", String(visible));
       } });
       controls = el("fieldset", { class: "tg-controls" }, [check(enabled, t("tg.enabled")), field(t("tg.token"), token), show,
-        field(t("tg.ids"), ids), kindFields, check(bans, t("tg.bans")), check(startup, t("tg.startup")),
+        field(t("tg.ids"), ids), field(t("tg.ro"), ro), kindFields, check(bans, t("tg.bans")), check(startup, t("tg.startup")),
         el("div", { class: "form-row" }, [field(t("policy.min_sev"), severity), field(t("policy.rate"), rate)]),
         el("div", { class: "form-row" }, [field(t("tg.quiet.from"), from), field(t("tg.quiet.to"), to)])]);
       form = el("form", { class: "dlg", onsubmit: function (ev) { ev.preventDefault(); perform("save"); } }, [
