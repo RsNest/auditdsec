@@ -1,4 +1,6 @@
 #!/bin/bash
+# NOT UPDATED (2026-10-11): the expectations below describe the installer before the rework (mandatory
+# RemoteProbe, 'The panel is published', exit codes 11/12 from the install itself). Update them before use.
 # scenarios.sh [NAME...] — ./install.sh against a real Docker daemon on the
 # stand from lab.sh (run `lab.sh up` first, on the same disposable machine).
 # Prints PASS/FAIL per assertion; exits non-zero if anything failed.
