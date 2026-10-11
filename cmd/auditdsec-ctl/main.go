@@ -16,7 +16,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,6 +25,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/access"
+	"github.com/RsNest/auditdsec/internal/logging"
 )
 
 func main() {
@@ -41,6 +41,7 @@ func run(args []string) error {
 	runDir := fs.String("run-dir", "", "directory for the socket and the token (default DIR/.ctl)")
 	stateDir := fs.String("state-dir", "", "directory for the task records (default DIR/.ctl/state)")
 	mode := fs.String("socket-mode", "0660", "permissions of the socket, octal")
+	logDir := fs.String("log-dir", os.Getenv("AUDITDSEC_LOG_DIR"), "central log directory (control.jsonl); empty: standard error only")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -77,8 +78,14 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	log.Info("control service listening", "socket", sock, "installation", root)
+	logs, err := logging.Open(logging.Options{Dir: *logDir, Service: "control", Stdout: true, MaxSizeMB: 10, MaxBackups: 5, MaxAgeDays: 14, BudgetMB: 512})
+	if err != nil {
+		return err
+	}
+	defer logs.Close()
+	log := logs.Main
+	runner.Log = log
+	log.Info("control service listening", "event", "start", "socket", sock, "installation", root)
 	srv := &http.Server{Handler: access.ControlHandler(runner, token), ReadHeaderTimeout: 5 * time.Second}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

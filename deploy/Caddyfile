@@ -51,10 +51,16 @@
 	}
 
 	log {
-		output file /var/log/caddy/panel.log {
+		output file /var/log/auditseclogs/caddy.jsonl {
 			roll_size 10MiB
-			roll_keep 3
+			roll_keep 5
+			roll_keep_for 336h
+			mode 0640
 		}
-		format json
+		format json {
+			time_key ts
+			time_format rfc3339_nano
+			message_key message
+		}
 	}
 }

@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/RsNest/auditdsec/internal/logging"
 )
 
 func TestValidateParams(t *testing.T) {
@@ -403,5 +405,39 @@ func TestDefaultExecRunsOnlyInstallSh(t *testing.T) {
 	out := sink.String()
 	if !strings.Contains(out, "args=--action check; id") || !strings.Contains(out, "secret=unset") {
 		t.Errorf("arguments must reach the script as data and the environment must be scrubbed: %q", out)
+	}
+}
+
+// The trace ID of the request that asked for a change reaches the installer's
+// environment, so the panel's log, the control service's log and the
+// installer's log can be followed with one ID.
+func TestTraceIDReachesTheInstaller(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "install.sh")
+	_ = os.WriteFile(script, []byte("#!/bin/sh\necho \"trace=${AUDITDSEC_TRACE_ID:-none}\"\n"), 0o755)
+	var sink strings.Builder
+	id := "0123456789abcdef0123456789abcdef"
+	if code, err := DefaultExec(logging.WithTrace(context.Background(), id), dir, nil, &sink); err != nil || code != 0 {
+		t.Skipf("cannot run scripts here: %d %v", code, err)
+	}
+	if !strings.Contains(sink.String(), "trace="+id) {
+		t.Errorf("the installer did not get the trace: %q", sink.String())
+	}
+	sink.Reset()
+	_, _ = DefaultExec(logging.WithTrace(context.Background(), "x; rm -rf /"), dir, nil, &sink)
+	if !strings.Contains(sink.String(), "trace=none") {
+		t.Errorf("an invalid ID must not reach the environment: %q", sink.String())
+	}
+}
+
+func TestParamsKeepAValidTraceAndReplaceAnInvalidOne(t *testing.T) {
+	good := "fedcba9876543210fedcba9876543210"
+	p, err := Validate(Params{Action: ActionCheck, TraceID: good})
+	if err != nil || p.TraceID != good {
+		t.Errorf("a valid trace must be kept: %+v %v", p, err)
+	}
+	p, err = Validate(Params{Action: ActionCheck, TraceID: "bad id;"})
+	if err != nil || !logging.ValidID(p.TraceID) || p.TraceID == "bad id;" {
+		t.Errorf("an invalid trace must be replaced: %+v %v", p, err)
 	}
 }

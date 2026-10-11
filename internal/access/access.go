@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/RsNest/auditdsec/internal/logging"
 )
 
 // Actions a change can ask for.
@@ -39,6 +41,10 @@ type Params struct {
 	Email     string `json:"email,omitempty"`      // Let's Encrypt contact
 	HTTPSPort string `json:"https_port,omitempty"` // "auto" or 1..65535
 	Lang      string `json:"lang,omitempty"`       // ru or en, for the installer's texts
+	// TraceID joins this change to the request that asked for it (the panel's
+	// request ID); the installer logs under it. Anything that is not an ID is
+	// replaced by a fresh one.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // ErrInvalid wraps every validation failure.
@@ -81,6 +87,9 @@ func NormalizeDomain(in string) (string, error) {
 // Validate checks and normalizes parameters. A rejected value is never passed
 // on, even in part.
 func Validate(p Params) (Params, error) {
+	if !logging.ValidID(p.TraceID) {
+		p.TraceID = logging.NewID()
+	}
 	switch p.Action {
 	case ActionCheck, ActionUpdate, ActionTunnel:
 		if p.Site != "" || p.Email != "" || p.HTTPSPort != "" {
@@ -195,6 +204,7 @@ type Event struct {
 // restart of the control service; it contains no secret.
 type Task struct {
 	ID       string    `json:"id"`
+	TraceID  string    `json:"trace_id,omitempty"` // find every log line of this change with it
 	Params   Params    `json:"params"`
 	State    string    `json:"state"`
 	Stage    string    `json:"stage,omitempty"`

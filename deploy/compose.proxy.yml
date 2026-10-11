@@ -68,7 +68,8 @@ services:
       # Staging and production use separate ones (PANEL_ACME_SUFFIX).
       - caddy-data${PANEL_ACME_SUFFIX:-}:/data
       - caddy-config${PANEL_ACME_SUFFIX:-}:/config
-      - caddy-logs:/var/log/caddy
+      # The proxy's own access log, rotated by Caddy (10 MiB, 5 files, 14 days).
+      - ${AUDITSEC_LOG_DIR:-/var/log/auditseclogs}:/var/log/auditseclogs
       - ${PANEL_ACME_CA_ROOT:-/dev/null}:/acme-ca.pem:ro
     logging:
       driver: json-file
@@ -81,6 +82,5 @@ volumes:
   caddy-data-staging:
   caddy-config:
   caddy-config-staging:
-  caddy-logs:
   panel-certs:
   panel-certs-staging:

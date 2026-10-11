@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/access"
+	"github.com/RsNest/auditdsec/internal/logging"
 )
 
 // How the panel is reached, and how that is changed.
@@ -151,7 +152,7 @@ func (s *Server) accessParams(w http.ResponseWriter, r *http.Request, extra any)
 	}); ok {
 		e.PlanID, e.Confirm = in.PlanID, in.Confirm
 	}
-	p, err := access.Validate(access.Params{Action: in.Action, Site: in.Site, Email: in.Email, HTTPSPort: in.HTTPSPort, Lang: string(s.lang(r))})
+	p, err := access.Validate(access.Params{Action: in.Action, Site: in.Site, Email: in.Email, HTTPSPort: in.HTTPSPort, Lang: string(s.lang(r)), TraceID: logging.RequestID(r.Context())})
 	if err != nil {
 		fail(w, http.StatusBadRequest, "bad_access", err.Error())
 		return access.Params{}, false

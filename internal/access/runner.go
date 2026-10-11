@@ -10,12 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/RsNest/auditdsec/internal/logging"
 	"github.com/RsNest/auditdsec/internal/redact"
 )
 
@@ -42,6 +44,7 @@ type Runner struct {
 	Exec     ExecFunc
 	Now      func() time.Time
 	Poll     time.Duration
+	Log      *slog.Logger // the service's own log (control.jsonl); may be nil
 
 	mu    sync.Mutex
 	tasks []Task
@@ -129,7 +132,7 @@ func (r *Runner) Start(p Params) (Task, error) {
 			return Task{}, ErrBusy
 		}
 	}
-	t := Task{ID: newID(), Params: p, State: StateRunning, Started: r.Now(), ExitCode: -1}
+	t := Task{ID: newID(), TraceID: p.TraceID, Params: p, State: StateRunning, Started: r.Now(), ExitCode: -1}
 	r.tasks = append(r.tasks, t)
 	if len(r.tasks) > maxTasks {
 		r.tasks = r.tasks[len(r.tasks)-maxTasks:]
@@ -188,7 +191,8 @@ func (r *Runner) run(id string, p Params) {
 			}
 		}
 	}()
-	code, err := r.Exec(context.Background(), r.Dir, Args(p, eventsPath), &capWriter{w: logf, max: maxLog})
+	r.logf(slog.LevelInfo, p.TraceID, "change started", "event", "task_start", "task", id, "action", p.Action)
+	code, err := r.Exec(logging.WithTrace(context.Background(), p.TraceID), r.Dir, Args(p, eventsPath), &capWriter{w: logf, max: maxLog})
 	close(done)
 	poller.Wait()
 	r.readEvents(id, eventsPath, offset)
@@ -220,13 +224,28 @@ func (r *Runner) readEvents(id, path string, offset int64) int64 {
 			continue
 		}
 		e.Text, e.Fix = redact.String(e.Text), redact.String(e.Fix)
-		r.update(id, func(t *Task) { t.Apply(e) })
+		var trace string
+		r.update(id, func(t *Task) { t.Apply(e); trace = t.TraceID })
+		level := slog.LevelInfo
+		if e.Kind == "failure" || e.State == "failed" {
+			level = slog.LevelError
+		}
+		r.logf(level, trace, "installer "+e.Kind+" "+e.State, "event", "task_"+e.Kind, "task", id, "code", e.Code, "text", e.Text)
 	}
 }
 
 // finish settles a task that the installer did not settle itself, and records
 // the exit status and the end of the log.
 func (r *Runner) finish(id string, code int, cause, logTail string) {
+	defer func() {
+		if t, ok := r.Get(id); ok {
+			level := slog.LevelInfo
+			if t.State == StateFailed || t.State == StateInterrupted {
+				level = slog.LevelError
+			}
+			r.logf(level, t.TraceID, "change finished: "+t.State, "event", "task_end", "task", id, "exit_code", t.ExitCode, "code", t.Code, "cause", t.Cause)
+		}
+	}()
 	r.update(id, func(t *Task) {
 		t.ExitCode, t.Finished = code, r.Now()
 		if logTail != "" {
@@ -336,6 +355,9 @@ func DefaultExec(ctx context.Context, dir string, args []string, log io.Writer) 
 	cmd := exec.CommandContext(ctx, script, args...)
 	cmd.Dir = dir
 	cmd.Env = cleanEnv()
+	if id := logging.TraceID(ctx); logging.ValidID(id) {
+		cmd.Env = append(cmd.Env, "AUDITDSEC_TRACE_ID="+id) // the installer logs under the same trace
+	}
 	cmd.Stdout, cmd.Stderr = log, log
 	err := cmd.Run()
 	var ee *exec.ExitError
@@ -347,6 +369,14 @@ func DefaultExec(ctx context.Context, dir string, args []string, log io.Writer) 
 	default:
 		return -1, err
 	}
+}
+
+// logf writes one record to the service's own log, under the change's trace.
+func (r *Runner) logf(level slog.Level, trace, msg string, args ...any) {
+	if r.Log == nil {
+		return
+	}
+	r.Log.Log(logging.WithTrace(context.Background(), trace), level, msg, args...)
 }
 
 // cleanEnv passes through only what the installer and Docker need.

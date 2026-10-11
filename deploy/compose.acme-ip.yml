@@ -62,6 +62,8 @@ services:
       - ./deploy/certbot-deploy-hook.sh:/hooks/deploy.sh:ro
       - ./deploy/certtool.py:/hooks/certtool.py:ro
       - ./deploy/certbot-loop.sh:/hooks/loop.sh:ro
+      # certs.jsonl: renewals and reloads, one JSON record each.
+      - ${AUDITSEC_LOG_DIR:-/var/log/auditseclogs}:/var/log/auditseclogs
       # Posted back to Caddy's admin API after a renewal, to make it read the
       # new certificate without a restart.
       - ${PANEL_CADDYFILE:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro

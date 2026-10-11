@@ -260,7 +260,7 @@ After=docker.service
 [Service]
 User=$3
 WorkingDirectory=$2
-ExecStart=$1 -dir $2 -run-dir $2/$CTL_ROOT/run -state-dir $2/$CTL_ROOT/state -socket-mode 0660
+ExecStart=$1 -dir $2 -run-dir $2/$CTL_ROOT/run -state-dir $2/$CTL_ROOT/state -socket-mode 0660 -log-dir ${LOG_DIR:-/var/log/auditseclogs}
 Restart=on-failure
 NoNewPrivileges=yes
 PrivateTmp=yes
