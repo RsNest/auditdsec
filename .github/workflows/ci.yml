@@ -57,6 +57,10 @@ jobs:
         run: bash scripts/check-installer-access.sh
       - name: panel review policy
         run: node scripts/check-panel-review.cjs
+      - name: release notes
+        run: node scripts/release-notes.cjs check
+      - name: update tooling
+        run: node --test scripts/test-update-tooling.cjs
 
   images:
     needs: test
@@ -164,3 +168,103 @@ jobs:
           done
           docker run --rm --platform linux/arm64 "ghcr.io/${OWNER}/auditdsec:sha-${GITHUB_SHA}" version
           docker run --rm "ghcr.io/${OWNER}/auditdsec:sha-${GITHUB_SHA}" version | grep -q "commit ${GITHUB_SHA}"
+
+  # Tells installed copies that a new version exists. It runs only after the
+  # tests passed, every image was pushed and was pulled back without credentials
+  # (anonymous-pull), so the document can never name an image that is not there.
+  # Publications are serialized, and a slower run for an older commit never moves
+  # the channel back. The document is a rolling release asset: public, HTTPS,
+  # no token needed to read it.
+  publish-update:
+    needs: [test, images, anonymous-pull]
+    if: github.event_name == 'push' && github.repository == 'RsNest/auditdsec'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: update-metadata
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: channel and version
+        id: v
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) channel=stable; version="${GITHUB_REF#refs/tags/v}" ;;
+            *)            channel=main;   version="$(cat VERSION)-dev+${GITHUB_SHA::12}" ;;
+          esac
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: describe the published images
+        run: |
+          set -euo pipefail
+          args=()
+          for name in auditdsec auditdsec-enforce auditdsec-probe; do
+            ref="ghcr.io/${OWNER}/${name}:sha-${GITHUB_SHA}"
+            docker buildx imagetools inspect --raw "$ref" > "raw-$name.json"
+            args+=("$name=$ref=raw-$name.json")
+          done
+          node scripts/describe-images.cjs images.json "${args[@]}"
+          # Each digest must be readable without credentials, as users will read it.
+          docker logout ghcr.io || true
+          for name in auditdsec auditdsec-enforce auditdsec-probe; do
+            digest="$(node -e 'const i=require("./images.json");console.log(i[process.argv[1]].digest)' "$name")"
+            docker manifest inspect "ghcr.io/${OWNER}/${name}@${digest}" > /dev/null
+          done
+      - name: fetch the previous document
+        run: |
+          curl -fsSL --retry 3 -o previous.json "https://github.com/${GITHUB_REPOSITORY}/releases/download/updates/${{ steps.v.outputs.channel }}.json" || : > previous.json
+      - name: build the document
+        id: build
+        run: |
+          set +e
+          node scripts/make-update-metadata.cjs --channel "${{ steps.v.outputs.channel }}" --commit "$GITHUB_SHA" \
+            --version "${{ steps.v.outputs.version }}" --published "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --images images.json --previous previous.json --out out.json
+          rc=$?
+          if [ "$rc" = 3 ]; then echo "skip=yes" >> "$GITHUB_OUTPUT"; exit 0; fi
+          exit "$rc"
+      - name: sign and validate
+        if: steps.build.outputs.skip != 'yes'
+        run: |
+          set -euo pipefail
+          if grep -qvE '^(#|$)' internal/update/publickey.txt; then
+            [ -n "$UPDATE_SIGNING_KEY" ] || { echo "::error::a public key is built into the agent but the UPDATE_SIGNING_KEY secret is not set: installed copies would reject the metadata"; exit 1; }
+            node scripts/sign-update.cjs out.json
+            go run ./cmd/auditdsec update-validate -sig out.json.sig out.json
+          else
+            echo "::notice::no signing key is built in: the metadata is trusted by HTTPS alone (see docs/UPDATES.md)"
+            go run ./cmd/auditdsec update-validate out.json
+          fi
+      - name: publish
+        if: steps.build.outputs.skip != 'yes'
+        run: |
+          set -euo pipefail
+          channel="${{ steps.v.outputs.channel }}"
+          cp out.json "$channel.json"
+          files=("$channel.json")
+          if [ -f out.json.sig ]; then cp out.json.sig "$channel.json.sig"; files+=("$channel.json.sig"); fi
+          gh release view updates > /dev/null 2>&1 || gh release create updates --title "Update metadata" --prerelease \
+            --notes "Rolling metadata that installed copies of auditdsec read to learn about new versions. Not a release; do not edit."
+          gh release upload updates "${files[@]}" --clobber
+      - name: read it back from the public address
+        if: steps.build.outputs.skip != 'yes'
+        run: |
+          set -euo pipefail
+          channel="${{ steps.v.outputs.channel }}"
+          for i in 1 2 3 4 5 6 7 8; do
+            if curl -fsSL -o check.json "https://github.com/${GITHUB_REPOSITORY}/releases/download/updates/$channel.json" && cmp -s check.json out.json; then ok=yes; break; fi
+            sleep 5
+          done
+          [ "${ok:-no}" = yes ] || { echo "::error::the published document does not match what was uploaded"; exit 1; }
+          sigarg=""; [ -f out.json.sig ] && sigarg="-sig out.json.sig"
+          go run ./cmd/auditdsec update-validate $sigarg check.json
