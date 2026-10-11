@@ -267,6 +267,7 @@
         if (!res.ok) {
           var failure = fail((data && data.error) || String(res.status), (data && data.message) || t("err.generic"));
           failure.reasons = (data && data.reasons) || [];
+          failure.data = data;
           throw failure;
         }
         return data;
@@ -286,6 +287,11 @@
     bans: function () { return request("GET", "/bans"); },
     suspects: function () { return request("GET", "/suspects"); },
     incidents: function () { return request("GET", "/incidents"); },
+    access: function () { return request("GET", "/access"); },
+    accessCheck: function (p) { return request("POST", "/access/check", p); },
+    accessApply: function (p) { return request("POST", "/access/apply", p); },
+    accessDraft: function (p) { return request("PUT", "/access/draft", p); },
+    accessTask: function (id) { return request("GET", "/access/tasks/" + encodeURIComponent(id)); },
     exceptions: function () { return request("GET", "/exceptions"); },
     addException: function (p) { return request("POST", "/exceptions", p); },
     removeException: function (id) { return request("DELETE", "/exceptions/" + encodeURIComponent(id)); },

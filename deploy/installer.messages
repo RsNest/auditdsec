@@ -413,3 +413,22 @@ the agent did not reset the credentials	агент не сбросил учёт�
 Fetch the latest version of the installer and application sources (git pull --ff-only)?	Получить свежую версию установщика и исходников (git pull --ff-only)?
 git pull did not succeed; continuing with the sources that are here	git pull не удался; продолжаем с имеющимися исходниками
 --action needs an existing installation; run ./install.sh without it first	--action требует существующей установки; сначала запустите ./install.sh без него
+  --enable-panel-control               let the panel apply access changes: runs a small local	  --enable-panel-control               разрешить панели применять изменения доступа: запускает небольшую локальную
+                                       service on this server (no root, no Docker socket for the	                                       службу на этом сервере (без root и без Docker-сокета для
+                                       agent); --disable-panel-control removes the link	                                       агента); --disable-panel-control убирает связь
+Setting up the local control service	Настройка локальной службы управления
+there is no installed image to take the control service from; run ./install.sh first	нет установленного образа, из которого можно взять службу управления; сначала запустите ./install.sh
+this image does not contain the control service; update the application first (./install.sh, then 'Update')	в этом образе нет службы управления; сначала обновите приложение (./install.sh, затем «Обновить»)
+the control service is in %s (from %s)	служба управления лежит в %s (из %s)
+Restart the panel now to link it to the control service? (a short interruption)	Перезапустить панель сейчас, чтобы связать её со службой управления? (короткий перерыв)
+the panel did not start with the control link; undo with ./install.sh --disable-panel-control	панель не запустилась со связью со службой; отмена: ./install.sh --disable-panel-control
+the panel is linked to the control service socket	панель связана с сокетом службы управления
+the service is enabled	служба включена
+could not enable the service; do it by hand (below)	не удалось включить службу; сделайте это вручную (ниже)
+Start the service once, as root (the installer never uses sudo on its own):	Запустите службу один раз от root (установщик сам никогда не вызывает sudo):
+After that the panel (Settings -> Access and HTTPS) can apply access changes.	После этого панель (Настройки -> Доступ и HTTPS) сможет применять изменения доступа.
+Without the service it only shows the command to run here.	Без службы она только показывает команду, которую нужно выполнить здесь.
+Removing the panel's link to the control service	Удаление связи панели со службой управления
+Restart the panel now? (a short interruption)	Перезапустить панель сейчас? (короткий перерыв)
+the panel did not start	панель не запустилась
+The panel no longer reaches the service. To stop it on this server:	Панель больше не обращается к службе. Чтобы остановить её на этом сервере:

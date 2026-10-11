@@ -352,3 +352,11 @@ Startup and automatic ban/allowlist notices are included. Bot command replies an
 explicit settings test send remain immediate operations and are excluded from outbox
 counters. Provider confirmation means Telegram accepted the message, not that the owner
 read it. See [DELIVERY.md](DELIVERY.md).
+
+## Access and HTTPS
+
+Settings → Access and HTTPS shows how the panel is reached and changes it (connect or change a domain,
+switch to IP or an SSH tunnel). The change is carried out by the installer; the panel asks the local control
+service, or shows the exact `./install.sh --action …` command when that service is not enabled. See
+[ACCESS.md](ACCESS.md). API: `GET /api/v1/access`, `PUT|DELETE /api/v1/access/draft`,
+`POST /api/v1/access/check`, `POST /api/v1/access/apply`, `GET /api/v1/access/tasks/{id}`.

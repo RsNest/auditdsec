@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RsNest/auditdsec/internal/access"
 	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/auditlog"
 	"github.com/RsNest/auditdsec/internal/config"
@@ -53,11 +54,16 @@ type Options struct {
 	Decisions *decision.Service
 	Runtime   Runtime // may be nil in tests
 	Telegram  *telegram.Managed
-	Host      string
-	Version   string
-	Started   time.Time
-	Logger    *slog.Logger
-	Now       func() time.Time
+	// Control reaches the local control service that applies access changes; nil
+	// when it is not set up, and then the panel only shows the installer command.
+	Control AccessControl
+	// PreflightDeps replaces the real DNS and address lookups (tests).
+	PreflightDeps *access.Deps
+	Host          string
+	Version       string
+	Started       time.Time
+	Logger        *slog.Logger
+	Now           func() time.Time
 }
 
 // Server is the panel's HTTP server.
@@ -192,6 +198,12 @@ func (s *Server) routes() {
 	api("POST /api/v1/incidents/{id}", true, s.handleIncidentAction)
 	api("GET /api/v1/export/events", true, s.handleExportEvents)
 	api("GET /api/v1/export/incidents", true, s.handleExportIncidents)
+	api("GET /api/v1/access", true, s.handleAccess)
+	api("PUT /api/v1/access/draft", true, s.handleAccessDraft)
+	api("DELETE /api/v1/access/draft", true, s.handleAccessDraft)
+	api("POST /api/v1/access/check", true, s.handleAccessCheck)
+	api("POST /api/v1/access/apply", true, s.handleAccessApply)
+	api("GET /api/v1/access/tasks/{id}", true, s.handleAccessTask)
 	api("GET /api/v1/exceptions", true, s.handleExceptions)
 	api("POST /api/v1/exceptions", true, s.handleExceptionAdd)
 	api("DELETE /api/v1/exceptions/{id}", true, s.handleExceptionDelete)

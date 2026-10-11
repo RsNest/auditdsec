@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/RsNest/auditdsec/internal/access"
 	"github.com/RsNest/auditdsec/internal/action"
 	"github.com/RsNest/auditdsec/internal/api"
 	"github.com/RsNest/auditdsec/internal/auditlog"
@@ -660,10 +661,17 @@ func cmdRun(args []string) error {
 
 	// The panel, when it is switched on. It refuses to start without a
 	// password, which is why this happens before anything else is launched.
+	// The local control service, when the installer set it up: its socket and
+	// token are mounted into the container read-only. Without it the panel only
+	// shows the installer command for access changes.
+	var control api.AccessControl
+	if sock := os.Getenv("AUDITDSEC_CTL_SOCKET"); sock != "" {
+		control = &access.Client{Socket: sock, TokenFile: os.Getenv("AUDITDSEC_CTL_TOKEN_FILE")}
+	}
 	var panel *api.Server
 	if cfg.Web.Enabled {
 		panel, err = api.New(api.Options{
-			Config: cfg, Store: st, Enforcer: enforcer, Decisions: dec, Runtime: pl, Telegram: bot,
+			Config: cfg, Store: st, Enforcer: enforcer, Decisions: dec, Runtime: pl, Telegram: bot, Control: control,
 			Host: host, Version: version, Started: started, Logger: log,
 		})
 		if err != nil {

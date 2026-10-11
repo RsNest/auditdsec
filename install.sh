@@ -158,6 +158,9 @@ Technical modes (never reported as "published and ready")
   --build-local                        DEVELOPERS: build the images from this tree on this
                                        machine instead of downloading the published ones
   --restore                            put back the last configuration that was verified
+  --enable-panel-control               let the panel apply access changes: runs a small local
+                                       service on this server (no root, no Docker socket for the
+                                       agent); --disable-panel-control removes the link
   --status [--json]                    show the current mode, address and certificate; change nothing
   --action ACTION                      on an existing installation, without the menu: check, domain,
                                        ip, tunnel, credentials or update. Saved settings (Telegram,
@@ -206,6 +209,8 @@ while [ $# -gt 0 ]; do
         --production) ACME=production; shift ;;
         --cacert) CACERT="${2:-}"; shift 2 ;;
         --restore) RESTORE=yes; shift ;;
+        --enable-panel-control) ACTION=enable-control; shift ;;
+        --disable-panel-control) ACTION=disable-control; shift ;;
         --action) ACTION="${2:-}"; shift 2 ;;
         --status) STATUS_ONLY=yes; shift ;;
         --json) JSON=yes; shift ;;
@@ -385,6 +390,8 @@ build_compose_files() {
         tunnel)               COMPOSE_FILES+=(-f deploy/compose.tunnel.yml) ;;
     esac
     if [ "$MODE" = ip ]; then COMPOSE_FILES+=(-f deploy/compose.acme-ip.yml); fi
+    # The panel's link to the local control service, when it was enabled.
+    if [ "$(env_get PANEL_CONTROL)" = 1 ]; then COMPOSE_FILES+=(-f deploy/compose.control.yml); fi
     # Extra overlays, for a test harness or a site-specific tweak. Last, so
     # they can override anything above.
     local extra
@@ -2120,6 +2127,12 @@ EOF
             fi
             apply_action_defaults
             return 99 ;;
+        enable-control|disable-control)
+            ACTION_DONE=yes
+            preflight_light
+            load_state_from_env
+            if [ "$ACTION" = enable-control ]; then enable_control; else disable_control; fi
+            return $? ;;
         domain|ip|tunnel)
             apply_action_defaults
             return 99 ;;

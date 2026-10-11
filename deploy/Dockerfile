@@ -31,7 +31,9 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOFLAGS=-trimpath go build \
         -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
         -o /out/auditdsec ./cmd/auditdsec && \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOFLAGS=-trimpath go build \
-        -ldflags "-s -w" -o /out/auditdsec-probe ./cmd/auditdsec-probe
+        -ldflags "-s -w" -o /out/auditdsec-probe ./cmd/auditdsec-probe && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOFLAGS=-trimpath go build \
+        -ldflags "-s -w" -o /out/auditdsec-ctl ./cmd/auditdsec-ctl
 
 # ---------------------------------------------------------------------------
 # The enforcing image. It carries the nft command line, which is the only
@@ -101,6 +103,9 @@ LABEL org.opencontainers.image.source="https://github.com/RsNest/auditdsec" \
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=build /out/auditdsec /usr/local/bin/auditdsec
+# The local control service is never run inside the container: ./install.sh
+# --enable-panel-control copies this commit-matched binary out and runs it on the host.
+COPY --from=build /out/auditdsec-ctl /usr/local/bin/auditdsec-ctl
 
 VOLUME ["/var/lib/auditdsec"]
 

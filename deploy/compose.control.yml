@@ -1,0 +1,16 @@
+# The agent's link to the local control service (cmd/auditdsec-ctl), which runs
+# on the host and applies access changes by running ./install.sh. Added by
+# ./install.sh when PANEL_CONTROL=1 (./install.sh --enable-panel-control).
+#
+# Only the directory with the socket and the token is shared, read-only; the
+# agent gets no root, no Docker socket and no other host path. The supplementary
+# group lets the agent reach the socket, which is owned by the user who runs
+# the service (mode 0660), and nobody else.
+services:
+  auditdsec:
+    group_add: ["${PANEL_CTL_GID:?run ./install.sh --enable-panel-control}"]
+    environment:
+      AUDITDSEC_CTL_SOCKET: /run/auditdsec-ctl/ctl.sock
+      AUDITDSEC_CTL_TOKEN_FILE: /run/auditdsec-ctl/token
+    volumes:
+      - ${PANEL_CTL_DIR:?run ./install.sh --enable-panel-control}:/run/auditdsec-ctl:ro

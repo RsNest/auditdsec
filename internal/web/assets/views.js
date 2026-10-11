@@ -252,7 +252,7 @@
 
   /* ---------------- the bar ---------------- */
 
-  var SECTIONS = [["overview", "nav.overview"], ["events", "nav.events"], ["incidents", "nav.incidents"], ["exceptions", "nav.exceptions"], ["addresses", "nav.addresses"], ["alerts", "nav.alerts"], ["system", "nav.system"]];
+  var SECTIONS = [["overview", "nav.overview"], ["events", "nav.events"], ["incidents", "nav.incidents"], ["exceptions", "nav.exceptions"], ["access", "nav.access"], ["addresses", "nav.addresses"], ["alerts", "nav.alerts"], ["system", "nav.system"]];
 
   function setLang() {
     S.lang = S.lang === "ru" ? "en" : "ru";
@@ -390,6 +390,11 @@
     R.excForm = excForm();
     R.excSec = section("exceptions", "sec", [head(t("exc.label"), t("exc.title"), el("p", { class: "callout rv", text: t("exc.lede") })), R.excTbl, el("div", { class: "tbl-wrap rv" }, [R.excForm.node])]);
 
+    /* access and HTTPS */
+    R.accessHost = el("div", { class: "tbl-wrap rv" });
+    R.accessSec = section("access", "sec", [head(t("acc.label"), t("acc.title")), R.accessHost]);
+    A.Access.mount(R.accessHost);
+
     /* addresses */
     R.bansTbl = el("div");
     R.allowTbl = el("div");
@@ -438,7 +443,7 @@
       R.bigWm = el("div", { class: "big-wm", "aria-hidden": "true" }, ["auditdsec", el("i", { text: "." })])
     ]);
 
-    add(main, [R.hero, R.fold, R.events, R.journal, R.rosterSec, R.incSec, R.excSec, R.addr, R.alertSec, R.system, R.close]);
+    add(main, [R.hero, R.fold, R.events, R.journal, R.rosterSec, R.incSec, R.excSec, R.addr, R.accessSec, R.alertSec, R.system, R.close]);
     setupReveals();
   }
 
@@ -983,6 +988,7 @@
         A.api.events("limit=200&since=" + encodeURIComponent(since)).then(function (p) { model.events = (p && p.items) || []; A.announceCritical(model.events); }, function () { }),
         A.api.bans().then(function (v) { if (current()) { model.bans = v || []; } }, function () { }),
         A.api.incidents().then(function (v) { if (current()) { model.incidents = (v && v.items) || []; } }, function () { }),
+        A.api.access().then(function (v) { if (current()) { A.Access.update(v); } }, function () { }),
         A.api.exceptions().then(function (v) { if (current()) { model.exceptions = (v && v.items) || []; } }, function () { }),
         A.api.allowlist().then(function (v) { if (current()) { model.allow = v || []; } }, function () { }),
         A.api.suspects().then(function (v) { if (current()) { model.suspects = v; model.suspectsError = false; } },
@@ -1041,7 +1047,7 @@
     }
 
     var current = "";
-    [["overview", "overview"], ["events", "events"], ["journal", "events"], ["kinds", "events"], ["incidents", "incidents"], ["exceptions", "exceptions"], ["addresses", "addresses"], ["alerts", "alerts"], ["system", "system"]].forEach(function (pair) {
+    [["overview", "overview"], ["events", "events"], ["journal", "events"], ["kinds", "events"], ["incidents", "incidents"], ["exceptions", "exceptions"], ["access", "access"], ["addresses", "addresses"], ["alerts", "alerts"], ["system", "system"]].forEach(function (pair) {
       var node = document.getElementById(pair[0]);
       if (node && node.getBoundingClientRect().top <= vh * 0.4) { current = pair[1]; }
     });

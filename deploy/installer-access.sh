@@ -186,7 +186,7 @@ EOF
     esac
 }
 
-valid_action() { case "$1" in check|domain|ip|tunnel|credentials|update) return 0 ;; *) return 1 ;; esac; }
+valid_action() { case "$1" in check|domain|ip|tunnel|credentials|update|enable-control|disable-control) return 0 ;; *) return 1 ;; esac; }
 
 # apply_action_defaults sets MODE/SITE for the chosen action, from the flags
 # of this run and otherwise from the saved installation, so nothing that is
@@ -224,4 +224,98 @@ announce_change() {
         installer_printf '  If the new address cannot be verified, the previous configuration is restored.\n'
         emit_event plan ready change "$old_mode $old_site -> $MODE $SITE"
     fi
+}
+
+# ----------------------------------------------------- the control service ---
+#
+# The panel cannot change Compose or the proxy, and the agent gets neither root
+# nor the Docker socket. What applies a change from the panel is a small
+# service, cmd/auditdsec-ctl, run on this server as the user who runs the
+# installer. It starts ./install.sh with parameters it has validated and does
+# nothing else. The binary comes out of the commit-matched image, so it needs no
+# Go toolchain and always matches this checkout.
+
+CTL_ROOT=".ctl"
+
+# control_unit_text BIN DIR USER — the systemd unit for the service.
+control_unit_text() {
+    cat <<EOF
+[Unit]
+Description=auditdsec local control service (applies panel access changes by running ./install.sh)
+After=docker.service
+
+[Service]
+User=$3
+WorkingDirectory=$2
+ExecStart=$1 -dir $2 -run-dir $2/$CTL_ROOT/run -state-dir $2/$CTL_ROOT/state -socket-mode 0660
+Restart=on-failure
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+enable_control() {
+    local here img cid bin unit user
+    here="$(pwd -P)"
+    case "$here" in *[!A-Za-z0-9_./-]*) die "the installation path ($here) has characters a service file cannot hold; move the installation to a plain path" ;; esac
+    img="${IMAGE:-$(env_get AUDITDSEC_IMAGE)}"
+    [ -n "$img" ] || die "there is no installed image to take the control service from; run ./install.sh first"
+    step "Setting up the local control service"
+    mkdir -p "$CTL_ROOT/bin" "$CTL_ROOT/run" "$CTL_ROOT/state"
+    chmod 0750 "$CTL_ROOT" "$CTL_ROOT/run" "$CTL_ROOT/state"
+    cid="$($DOCKER create "$img" 2>/dev/null)" || die "cannot create a container from $img to copy the control service out"
+    bin="$CTL_ROOT/bin/auditdsec-ctl"
+    if ! $DOCKER cp "$cid:/usr/local/bin/auditdsec-ctl" "$bin" >/dev/null 2>&1; then
+        $DOCKER rm "$cid" >/dev/null 2>&1 || true
+        die "this image does not contain the control service; update the application first (./install.sh, then 'Update')"
+    fi
+    $DOCKER rm "$cid" >/dev/null 2>&1 || true
+    chmod 0755 "$bin"
+    user="$(id -un)"
+    unit="$CTL_ROOT/auditdsec-ctl.service"
+    control_unit_text "$here/$bin" "$here" "$user" > "$unit"
+    env_set PANEL_CONTROL 1
+    env_set PANEL_CTL_DIR "$here/$CTL_ROOT/run"
+    env_set PANEL_CTL_GID "$(id -g)"
+    ok "the control service is in $bin (from $img)"
+
+    build_compose_files
+    if confirm "Restart the panel now to link it to the control service? (a short interruption)"; then
+        compose up -d --no-build --remove-orphans || die "the panel did not start with the control link; undo with ./install.sh --disable-panel-control"
+        ok "the panel is linked to the control service socket"
+    fi
+    if [ "$(id -u)" = 0 ] && command -v systemctl >/dev/null 2>&1; then
+        cp "$unit" /etc/systemd/system/auditdsec-ctl.service && systemctl daemon-reload && systemctl enable --now auditdsec-ctl \
+            && ok "the service is enabled" || warn "could not enable the service; do it by hand (below)"
+    else
+        installer_lines <<'EOF'
+
+Start the service once, as root (the installer never uses sudo on its own):
+EOF
+        installer_printf '  sudo cp %s /etc/systemd/system/auditdsec-ctl.service\n' "$here/$unit"
+        installer_printf '  sudo systemctl daemon-reload && sudo systemctl enable --now auditdsec-ctl\n'
+    fi
+    installer_lines <<'EOF'
+
+After that the panel (Settings -> Access and HTTPS) can apply access changes.
+Without the service it only shows the command to run here.
+EOF
+    emit_event result ok "" "control service set up"
+}
+
+disable_control() {
+    step "Removing the panel's link to the control service"
+    env_unset PANEL_CONTROL; env_unset PANEL_CTL_DIR; env_unset PANEL_CTL_GID
+    build_compose_files
+    if confirm "Restart the panel now? (a short interruption)"; then
+        compose up -d --no-build --remove-orphans || die "the panel did not start"
+    fi
+    installer_lines <<'EOF'
+The panel no longer reaches the service. To stop it on this server:
+  sudo systemctl disable --now auditdsec-ctl
+EOF
+    emit_event result ok "" "control link removed"
 }

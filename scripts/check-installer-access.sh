@@ -122,6 +122,26 @@ PY
     MODE=domain; SITE=panel.example.com
     equal "$(announce_change)" "" "no change, no announcement"
 )
+
+# --- the control service link -----------------------------------------------
+(
+    load
+    unit="$(control_unit_text /srv/a/.ctl/bin/auditdsec-ctl /srv/a alice)"
+    contains "$unit" "User=alice" "unit user"
+    contains "$unit" "ExecStart=/srv/a/.ctl/bin/auditdsec-ctl -dir /srv/a -run-dir /srv/a/.ctl/run" "unit command"
+    contains "$unit" "NoNewPrivileges=yes" "unit hardening"
+    MODE=domain; ENFORCE=no; COMPOSE_BASE=docker-compose.yml
+    printf "PANEL_CONTROL='1'
+" >> "$ENV_FILE"
+    build_compose_files
+    case " ${COMPOSE_FILES[*]} " in *"deploy/compose.control.yml"*) ;; *) fail "the control overlay must be used when enabled" ;; esac
+    sed -i "/^PANEL_CONTROL=/d" "$ENV_FILE"
+    build_compose_files
+    case " ${COMPOSE_FILES[*]} " in *"deploy/compose.control.yml"*) fail "the control overlay must not be used by default" ;; esac
+)
+valid_ok="enable-control disable-control"
+for a in $valid_ok; do ( load; valid_action "$a" ) || fail "$a must be a valid action"; done
+
 # --action without an installation is refused.
 rc=0
 ENV_FILE="$tmp/empty.env" bash ./install.sh --lang en --yes --action check >/dev/null 2>&1 || rc=$?
