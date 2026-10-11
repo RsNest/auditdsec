@@ -23,6 +23,7 @@ func TestValidateParams(t *testing.T) {
 		{Action: ActionDomain, Site: "xn--e1afmkfd.xn--p1ai", HTTPSPort: "8443"},
 		{Action: ActionIP}, {Action: ActionIP, Site: "203.0.113.9"}, {Action: ActionIP, Site: "[2001:db8::1]"},
 		{Action: ActionTunnel}, {Action: ActionCheck}, {Action: ActionUpdate, Lang: "ru"},
+		{Action: ActionUpdate, Commit: strings.Repeat("a", 40)},
 	}
 	for _, p := range good {
 		if _, err := Validate(p); err != nil {
@@ -50,6 +51,8 @@ func TestValidateParams(t *testing.T) {
 		{Action: ActionIP, Site: "not-an-ip"}, {Action: ActionIP, Site: "fe80::1%eth0"},
 		{Action: ActionTunnel, Site: "a.example.com"}, {Action: ActionCheck, Email: "a@b.cc"},
 		{Action: ActionUpdate, HTTPSPort: "443"}, {Action: ActionCheck, Lang: "de"},
+		{Action: ActionUpdate, Commit: "main"}, {Action: ActionUpdate, Commit: "--upload-pack=id"},
+		{Action: ActionUpdate, Commit: strings.Repeat("A", 40)}, {Action: ActionCheck, Commit: strings.Repeat("a", 40)},
 	}
 	for _, p := range bad {
 		if _, err := Validate(p); !errors.Is(err, ErrInvalid) {

@@ -34,9 +34,13 @@ def main() -> None:
     )
     scripts = "".join(
         "<script>\n" + read(name) + "\n</script>\n"
-        for name in ("i18n.js", "dev/mock.js", "core.js", "feed.js", "views.js")
+        for name in ("i18n.js", "dev/mock.js", "core.js", "telegram.js", "access.js", "updates.js", "feed.js", "views.js")
     )
-    for tag in ('<script src="i18n.js"></script>',
+    for tag in ('<script src="report.js"></script>',
+                '<script src="telegram.js"></script>',
+                '<script src="access.js"></script>',
+                '<script src="updates.js"></script>',
+                '<script src="i18n.js"></script>',
                 '<script src="core.js"></script>',
                 '<script src="feed.js"></script>',
                 '<script src="views.js"></script>'):

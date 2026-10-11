@@ -91,9 +91,10 @@ type Server struct {
 	frontLog   *slog.Logger
 	clientLog  clientLogState
 
-	statMu  sync.Mutex
-	statAt  time.Time
-	statVal statusDigest
+	statMu   sync.Mutex
+	updateMu sync.Mutex
+	statAt   time.Time
+	statVal  statusDigest
 }
 
 // New builds the server. It fails on a missing or malformed password rather
@@ -142,6 +143,7 @@ func New(o Options) (*Server, error) {
 	if err := s.loadCreds(); err != nil {
 		return nil, err
 	}
+	s.restoreUpdateSession()
 	s.routes()
 	s.handler = s.withRequestLog(s.mux)
 	return s, nil
@@ -219,6 +221,8 @@ func (s *Server) routes() {
 	api("GET /api/v1/export/incidents", true, s.handleExportIncidents)
 	api("GET /api/v1/update", true, s.handleUpdate)
 	api("POST /api/v1/update/check", true, s.handleUpdateCheck)
+	api("POST /api/v1/update/apply", true, s.handleUpdateApply)
+	api("GET /api/v1/update/tasks/{id}", true, s.handleUpdateTask)
 	api("GET /api/v1/access", true, s.handleAccess)
 	api("PUT /api/v1/access/draft", true, s.handleAccessDraft)
 	api("DELETE /api/v1/access/draft", true, s.handleAccessDraft)
@@ -439,6 +443,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	s.clearUpdateSession(bearer(r))
 	s.sessions.revoke(bearer(r))
 	w.WriteHeader(http.StatusNoContent)
 }

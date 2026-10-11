@@ -348,6 +348,30 @@ func (c *capWriter) Write(p []byte) (int, error) {
 // shell, no inherited environment beyond what Docker and the installer need,
 // no standard input. The script is always dir/install.sh.
 func DefaultExec(ctx context.Context, dir string, args []string, log io.Writer) (int, error) {
+	// The update pin is a control-service parameter, not an installer flag.
+	// Prepare the exact repository revision before invoking the new installer.
+	var commit, events string
+	clean := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--update-commit" && i+1 < len(args) {
+			commit = args[i+1]
+			i++
+			continue
+		}
+		if args[i] == "--events-file" && i+1 < len(args) {
+			events = args[i+1]
+		}
+		clean = append(clean, args[i])
+	}
+	if commit != "" {
+		if _, err := Validate(Params{Action: ActionUpdate, Commit: commit}); err != nil {
+			return -1, err
+		}
+		if err := prepareUpdate(ctx, dir, commit, events, log); err != nil {
+			return -1, err
+		}
+	}
+	args = clean
 	script := filepath.Join(dir, "install.sh")
 	if fi, err := os.Stat(script); err != nil || !fi.Mode().IsRegular() {
 		return -1, fmt.Errorf("%s is not a regular file", script)
@@ -369,6 +393,63 @@ func DefaultExec(ctx context.Context, dir string, args []string, log io.Writer) 
 	default:
 		return -1, err
 	}
+}
+
+// A fixed repository and a fast-forward preserve local tracked edits and keep
+// the selected image and installer at the same commit. No shell is involved.
+func prepareUpdate(ctx context.Context, dir, commit, events string, log io.Writer) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	if events != "" {
+		f, err := os.OpenFile(events, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		_ = json.NewEncoder(f).Encode(Event{At: time.Now().UTC(), Kind: "stage", State: "running", Code: "source", Text: "Preparing the selected release"})
+		_ = f.Close()
+	}
+	run := func(args ...string) error {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir, cmd.Env = dir, cleanEnv()
+		cmd.Stdout, cmd.Stderr = log, log
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("update preparation failed: %w; check the operation log", err)
+		}
+		return nil
+	}
+	// git merge can preserve a local edit and still advance HEAD. Refuse all
+	// tracked edits first so a modified installer cannot be executed as root.
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "--untracked-files=no")
+	cmd.Dir, cmd.Env = dir, cleanEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("cannot inspect the installation checkout: %w", err)
+	}
+	if len(bytes.TrimSpace(out)) > 0 {
+		return errors.New("tracked files have local changes; update from the terminal after reviewing them")
+	}
+	head := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	head.Dir, head.Env = dir, cleanEnv()
+	current, err := head.Output()
+	if err != nil {
+		return fmt.Errorf("cannot identify the installed sources: %w", err)
+	}
+	if string(bytes.TrimSpace(current)) == commit {
+		return nil
+	}
+	if err := run("fetch", "--no-tags", "https://github.com/RsNest/auditdsec.git", commit); err != nil {
+		return err
+	}
+	if err := run("merge", "--ff-only", "--no-edit", commit); err != nil {
+		return err
+	}
+	head = exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	head.Dir, head.Env = dir, cleanEnv()
+	current, err = head.Output()
+	if err != nil || string(bytes.TrimSpace(current)) != commit {
+		return errors.New("the installation checkout is newer than the selected release; refusing to install a different build")
+	}
+	return nil
 }
 
 // logf writes one record to the service's own log, under the change's trace.
