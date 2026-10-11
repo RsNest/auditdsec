@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	rdebug "runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -145,6 +146,8 @@ func run(args []string) error {
 		return cmdRun(args)
 	case "check-config":
 		return cmdCheckConfig(args)
+	case "logs":
+		return cmdLogs(args)
 	case "update-info":
 		return cmdUpdateInfo(args)
 	case "update-validate":
@@ -496,18 +499,35 @@ func cmdRun(args []string) error {
 		}
 	})
 
-	log, closer, err := logging.Setup(logging.Options{
+	logs, err := logging.Open(logging.Options{
 		File:       cfg.Log.File,
 		Level:      cfg.Log.Level,
 		MaxSizeMB:  cfg.Log.MaxSizeMB,
 		MaxBackups: cfg.Log.MaxBackups,
 		Stdout:     cfg.Log.Stdout,
+		Dir:        cfg.Log.Dir,
+		Version:    version,
+		Commit:     commit,
+		MaxAgeDays: cfg.Log.MaxAgeDays,
+		BudgetMB:   cfg.Log.BudgetMB,
 	})
 	if err != nil {
 		return err
 	}
-	if closer != nil {
-		defer closer.Close()
+	defer logs.Close()
+	log := logs.Main
+	// A start that fails, or a panic, is written down before the process ends:
+	// the record that explains a crash must not be the one that was lost.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("the agent crashed", "event", "panic", "panic", fmt.Sprint(r), "stack", truncate(string(rdebug.Stack()), 4000))
+			panic(r)
+		}
+	}()
+	unclean, markStopped := logs.MarkRunning()
+	defer markStopped()
+	if unclean {
+		log.Warn("the previous run did not shut down cleanly (killed, out of memory or power loss)", "event", "unclean_shutdown")
 	}
 
 	host := resolveHost(cfg.Host, hostnameFile)
@@ -642,6 +662,7 @@ func cmdRun(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	logs.StartJanitor(ctx, time.Hour)
 
 	log.Info("auditdsec starting",
 		"version", version, "host", host, "profile", cfg.Profile, "lang", string(cfg.Language()),
@@ -697,6 +718,7 @@ func cmdRun(args []string) error {
 		panel, err = api.New(api.Options{
 			Config: cfg, Store: st, Enforcer: enforcer, Decisions: dec, Runtime: pl, Telegram: bot, Control: control, Update: updateSource(updater),
 			Host: host, Version: version, Started: started, Logger: log,
+			APILog: logs.Stream("api"), FrontendLog: logs.Stream("frontend"),
 		})
 		if err != nil {
 			return err
@@ -791,4 +813,11 @@ func updateSource(u *update.Checker) api.UpdateSource {
 		return nil
 	}
 	return u
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "...[truncated]"
 }

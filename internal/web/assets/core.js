@@ -241,7 +241,10 @@
         return data;
       });
     }
+    var rep = window.AUDITDSEC_REPORT;
+    var rid = rep ? rep.requestId() : "";
     var headers = { Accept: "application/json" };
+    if (rid) { headers["X-Request-ID"] = rid; }
     if (state.token) { headers.Authorization = "Bearer " + state.token; }
     if (method !== "GET") {
       headers["X-Requested-With"] = "auditdsec";
@@ -252,6 +255,8 @@
       body: body ? JSON.stringify(body) : undefined
     }).then(function (res) {
       setOffline(false);
+      /* A server error is reported with the ID the server logged it under. */
+      if (rep && res.status >= 500) { rep.report("api", method + " " + path.split("?")[0] + " failed: " + res.status, { requestId: rid, status: res.status }); }
       if (res.status === 401 || res.status === 403) {
         if (path === "/login") { throw fail("bad_credentials", t("login.error")); }
         state.token = null;
@@ -274,6 +279,7 @@
       });
     }, function () {
       setOffline(true);
+      if (rep) { rep.report("api", method + " " + path.split("?")[0] + " got no answer", { requestId: rid }); }
       throw fail("offline", t("err.offline"));
     });
   }
@@ -397,6 +403,10 @@
     var first = state.announced === null;
     state.announced = top.id;
     if (!first) { $("#live").textContent = t("ev.announce", { summary: top.summary || t("kind." + top.kind) }); }
+  }
+
+  if (window.AUDITDSEC_REPORT) {
+    window.AUDITDSEC_REPORT.provide({ token: function () { return state.token; }, build: function () { return state.version || ""; } });
   }
 
   window.ADS = {

@@ -37,6 +37,13 @@ type LogConfig struct {
 	MaxSizeMB  int
 	MaxBackups int
 	Stdout     bool
+	// Dir is the central log directory shared by the installer, the agent, the
+	// panel API, the browser error reports, the control service and the proxy.
+	// When set, the agent writes Dir/agent.jsonl, api.jsonl and frontend.jsonl
+	// instead of File.
+	Dir        string
+	MaxAgeDays int // archives older than this are removed
+	BudgetMB   int // the directory is kept under this size
 }
 
 // TelegramConfig controls the bot.
@@ -238,8 +245,10 @@ func Defaults(profile string) *Config {
 			File:       "/var/log/auditdsec/auditdsec.log",
 			Level:      "info",
 			MaxSizeMB:  10,
-			MaxBackups: 3,
+			MaxBackups: 5,
 			Stdout:     true,
+			MaxAgeDays: 14,
+			BudgetMB:   512,
 		},
 		Telegram: TelegramConfig{
 			APIBase:       "https://api.telegram.org",
@@ -337,12 +346,15 @@ func (c *Config) decode(root *node) error {
 	d.boolean(root, "debug", &c.Debug)
 
 	if n := d.section(root, "log"); n != nil {
-		d.strict(n, "log", "file", "level", "max_size_mb", "max_backups", "stdout")
+		d.strict(n, "log", "file", "level", "max_size_mb", "max_backups", "stdout", "dir", "max_age_days", "budget_mb")
 		d.str(n, "file", &c.Log.File)
 		d.str(n, "level", &c.Log.Level)
 		d.integer(n, "max_size_mb", &c.Log.MaxSizeMB)
 		d.integer(n, "max_backups", &c.Log.MaxBackups)
 		d.boolean(n, "stdout", &c.Log.Stdout)
+		d.str(n, "dir", &c.Log.Dir)
+		d.integer(n, "max_age_days", &c.Log.MaxAgeDays)
+		d.integer(n, "budget_mb", &c.Log.BudgetMB)
 	}
 
 	if n := d.section(root, "telegram"); n != nil {
@@ -440,6 +452,7 @@ func (c *Config) applyEnv() {
 	envStr("AUDITDSEC_STATE_DIR", &c.StateDir)
 	envStr("AUDITDSEC_LOG_FILE", &c.Log.File)
 	envStr("AUDITDSEC_LOG_LEVEL", &c.Log.Level)
+	envStr("AUDITDSEC_LOG_DIR", &c.Log.Dir)
 	envStr("AUDITDSEC_TG_TOKEN", &c.Telegram.Token)
 	envStr("AUDITDSEC_TG_API_BASE", &c.Telegram.APIBase)
 	envStr("AUDITDSEC_MIN_SEVERITY", &c.Telegram.MinSeverity)
@@ -632,6 +645,9 @@ func (c *Config) validate() error {
 	}
 	if c.Log.MaxBackups < 0 {
 		add("log.max_backups: must not be negative")
+	}
+	if c.Log.MaxAgeDays < 0 || c.Log.BudgetMB < 0 {
+		add("log.max_age_days and log.budget_mb: must not be negative")
 	}
 	switch strings.ToLower(c.Log.Level) {
 	case "debug", "info", "warn", "error":

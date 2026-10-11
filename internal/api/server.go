@@ -65,7 +65,11 @@ type Options struct {
 	Version       string
 	Started       time.Time
 	Logger        *slog.Logger
-	Now           func() time.Time
+	// APILog receives the request records (api.jsonl) and FrontendLog the
+	// browser's error reports (frontend.jsonl). Both default to Logger.
+	APILog      *slog.Logger
+	FrontendLog *slog.Logger
+	Now         func() time.Time
 }
 
 // Server is the panel's HTTP server.
@@ -82,6 +86,10 @@ type Server struct {
 	hashing    chan struct{} // bounds concurrent password hashing
 	static     http.Handler
 	mux        *http.ServeMux
+	handler    http.Handler
+	apiLog     *slog.Logger
+	frontLog   *slog.Logger
+	clientLog  clientLogState
 
 	statMu  sync.Mutex
 	statAt  time.Time
@@ -100,6 +108,12 @@ func New(o Options) (*Server, error) {
 	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
+	}
+	if o.APILog == nil {
+		o.APILog = o.Logger
+	}
+	if o.FrontendLog == nil {
+		o.FrontendLog = o.Logger
 	}
 	if o.Decisions == nil {
 		var banner action.Banner
@@ -122,11 +136,14 @@ func New(o Options) (*Server, error) {
 		hashing:  make(chan struct{}, 2),
 		static:   web.Handler(),
 		mux:      http.NewServeMux(),
+		apiLog:   o.APILog,
+		frontLog: o.FrontendLog,
 	}
 	if err := s.loadCreds(); err != nil {
 		return nil, err
 	}
 	s.routes()
+	s.handler = s.withRequestLog(s.mux)
 	return s, nil
 }
 
@@ -149,13 +166,13 @@ func decoyHash(real parsedHash) (parsedHash, error) {
 }
 
 // Handler is the whole site: the API under /api/ and the panel everywhere else.
-func (s *Server) Handler() http.Handler { return s.mux }
+func (s *Server) Handler() http.Handler { return s.handler }
 
 // ListenAndServe serves until the context is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	srv := &http.Server{
 		Addr:              s.opt.Config.Web.Listen,
-		Handler:           s.mux,
+		Handler:           s.handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -223,6 +240,7 @@ func (s *Server) routes() {
 	api("PUT /api/v1/settings/telegram", true, s.handleTelegram)
 	api("POST /api/v1/settings/telegram/verify", true, s.handleTelegram)
 	api("POST /api/v1/settings/telegram/test", true, s.handleTelegram)
+	s.mux.Handle("POST /api/v1/client-log", s.guardN(true, clientLogBody, s.handleClientLog))
 	api("GET /api/v1/diagnostics", true, s.handleDiagnostics)
 	api("GET /api/v1/deliveries", true, s.handleDeliveries)
 	s.mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
@@ -234,6 +252,11 @@ func (s *Server) routes() {
 // guard applies the rules every API call shares: no caching, same-origin only,
 // a marker header on anything that changes state, and a valid session.
 func (s *Server) guard(auth bool, next http.HandlerFunc) http.Handler {
+	return s.guardN(auth, 4<<10, next)
+}
+
+// guardN is guard with its own limit on the size of the request body.
+func (s *Server) guardN(auth bool, maxBody int64, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Cache-Control", "no-store")
@@ -254,7 +277,7 @@ func (s *Server) guard(auth bool, next http.HandlerFunc) http.Handler {
 			fail(w, http.StatusUnauthorized, "unauthorized", "sign in first")
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		next(w, r)
 	})
 }

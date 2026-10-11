@@ -67,3 +67,63 @@ console.log("Panel review policy checks passed.");
   assert.equal(U.pending(), true, "the indicator stays while the source is down, the state says it is stale");
   console.log("Update indicator checks passed.");
 }
+
+// The browser error reporter: only while signed in, text only, no query
+// strings, identical errors counted once, a bounded queue and bounded retries,
+// and it never reports its own failures.
+{
+  const listeners = {};
+  const sent = [];
+  let answer = { ok: true, status: 204 };
+  global.window = { addEventListener: (n, f) => { listeners[n] = f; } };
+  Object.defineProperty(global, "navigator", { value: { userAgent: "UA/1" }, configurable: true });
+  global.location = { hash: "#/events?ip=203.0.113.9&session=SECRET", pathname: "/" };
+  Object.defineProperty(global, "crypto", { value: require("node:crypto").webcrypto, configurable: true });
+  global.fetch = (url, o) => { sent.push({ url, body: JSON.parse(o.body), headers: o.headers }); return Promise.resolve(answer); };
+  const timers = [];
+  global.setTimeout = (f, ms) => { timers.push({ f, ms }); return timers.length; };
+  delete require.cache[require.resolve("../internal/web/assets/report.js")];
+  require("../internal/web/assets/report.js");
+  const R = window.AUDITDSEC_REPORT;
+  let token = null;
+  R.provide({ token: () => token, build: () => "v9" });
+  assert.match(R.requestId(), /^[0-9a-f]{32}$/, "request IDs have the shape the server accepts");
+
+  R.report("error", "before sign-in", { source: "https://x/app.js?token=SECRET", line: 3 });
+  assert.equal(sent.length, 0, "nothing is sent without a session");
+  token = "tok";
+  R.flush();
+  const drain = async () => { for (let i = 0; i < 20; i++) { await Promise.resolve(); while (timers.length) { timers.shift().f(); } } };
+  (async () => {
+    await drain();
+    assert.equal(sent.length, 1);
+    const b = sent[0].body;
+    assert.equal(sent[0].url, "/api/v1/client-log");
+    assert.equal(sent[0].headers["X-Requested-With"], "auditdsec");
+    assert.equal(sent[0].headers.Authorization, "Bearer tok");
+    assert.ok(!JSON.stringify(b).includes("SECRET") && !JSON.stringify(b).includes("203.0.113.9"), "query strings never leave the page");
+    assert.equal(b.route, "#/events");
+    assert.equal(b.build, "v9");
+
+    // The same error, many times: one report with a count.
+    sent.length = 0;
+    answer = { ok: false, status: 503 };
+    for (let i = 0; i < 5; i++) { R.report("error", "same", { line: 1 }); }
+    for (let i = 0; i < 100; i++) { R.report("error", "distinct " + i, {}); }
+    await drain();
+    const same = sent.filter((s) => s.body.message === "same");
+    assert.ok(same.length >= 1 && same.every((s) => s.body.count === 1 || s.body.count === 5), "identical errors are merged, not queued five times");
+    const distinct = new Set(sent.map((s) => s.body.message));
+    assert.ok(distinct.size <= 21, "the queue is bounded, got " + distinct.size);
+    // A failing server is tried a limited number of times, then dropped.
+    const per = sent.filter((s) => s.body.message === "same").length;
+    assert.ok(per <= 4, "at most one try and three retries, got " + per);
+    // 401 is not retried.
+    sent.length = 0;
+    answer = { ok: false, status: 401 };
+    R.report("error", "after logout", {});
+    await drain();
+    assert.equal(sent.filter((s) => s.body.message === "after logout").length, 1, "an expired session is not retried");
+    console.log("Browser error reporter checks passed.");
+  })().catch((e) => { console.error(e); process.exit(1); });
+}

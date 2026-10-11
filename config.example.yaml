@@ -39,9 +39,16 @@ debug: false
 log:
   file: /var/log/auditdsec/auditdsec.log
   level: info          # debug, info, warn, error
-  max_size_mb: 10
-  max_backups: 3
+  max_size_mb: 10      # per file, before it is rotated
+  max_backups: 5       # archives kept per file; older ones are gzipped
   stdout: true
+  # The central log directory. The Docker installation mounts the host's
+  # /var/log/auditseclogs here and the agent writes agent.jsonl, api.jsonl and
+  # frontend.jsonl in it (JSON lines with a trace_id; see docs/LOGS.md). When
+  # it is empty, "file" above is used. AUDITDSEC_LOG_DIR sets it too.
+  dir: ""
+  max_age_days: 14     # archives older than this are removed
+  budget_mb: 512       # the directory is kept under this size by removing the oldest archives
 
 telegram:
   # Optional. Configure in the panel under Alerts, or seed via env.

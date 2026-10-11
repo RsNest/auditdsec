@@ -160,7 +160,7 @@ func TestAssetBudget(t *testing.T) {
 
 func TestEverySourceFileIsEmbedded(t *testing.T) {
 	want := []string{"access.js", "app.css", "core.js", "feed.js", "fonts/manrope-cyrillic.woff2", "fonts/sora-latin.woff2",
-		"fonts/syne-latin.woff2", "fonts/unbounded-cyrillic.woff2", "i18n.js", "index.html", "telegram.js", "updates.js", "views.js"}
+		"fonts/syne-latin.woff2", "fonts/unbounded-cyrillic.woff2", "i18n.js", "index.html", "report.js", "telegram.js", "updates.js", "views.js"}
 	var got []string
 	for name := range assets {
 		got = append(got, name)
@@ -233,7 +233,7 @@ func TestUsedKeysExist(t *testing.T) {
 		t.Fatal(err)
 	}
 	use := regexp.MustCompile(`\bt\("([\w.]+)"\s*[,)]`)
-	for _, f := range []string{"core.js", "feed.js", "views.js", "telegram.js", "access.js", "updates.js"} {
+	for _, f := range []string{"core.js", "feed.js", "views.js", "telegram.js", "access.js", "updates.js", "report.js"} {
 		body, err := fs.ReadFile(FS(), f)
 		if err != nil {
 			t.Fatal(err)

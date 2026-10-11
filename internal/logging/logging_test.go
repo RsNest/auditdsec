@@ -114,7 +114,7 @@ func TestSetupWritesJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `"msg":"hello"`) || !strings.Contains(string(b), `"answer":42`) {
+	if !strings.Contains(string(b), `"message":"hello"`) || !strings.Contains(string(b), `"answer":42`) {
 		t.Errorf("log line = %q", b)
 	}
 }

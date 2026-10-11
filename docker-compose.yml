@@ -56,6 +56,9 @@ services:
     volumes:
       - /var/log/audit:/var/log/audit:ro
       - auditdsec-state:/var/lib/auditdsec
+      # The central log directory of the whole installation (see docs/LOGS.md).
+      # root:root 0750 on the host; the installer creates it. Nothing serves it.
+      - ${AUDITSEC_LOG_DIR:-/var/log/auditseclogs}:/var/log/auditseclogs
       # Inside a container the host name is the container id, which would label
       # every alert with a hex blob. This lets the agent read the real one.
       - /etc/hostname:/etc/host-hostname:ro

@@ -58,7 +58,8 @@ VOLUME ["/var/lib/auditdsec"]
 
 ENV AUDITDSEC_STATE_DIR=/var/lib/auditdsec \
     AUDITDSEC_AUDIT_LOG=/var/log/audit/audit.log \
-    AUDITDSEC_LOG_FILE=/var/lib/auditdsec/auditdsec.log
+    AUDITDSEC_LOG_FILE=/var/lib/auditdsec/auditdsec.log \
+    AUDITDSEC_LOG_DIR=/var/log/auditseclogs
 
 ENTRYPOINT ["/usr/local/bin/auditdsec"]
 CMD ["run"]
@@ -111,7 +112,8 @@ VOLUME ["/var/lib/auditdsec"]
 
 ENV AUDITDSEC_STATE_DIR=/var/lib/auditdsec \
     AUDITDSEC_AUDIT_LOG=/var/log/audit/audit.log \
-    AUDITDSEC_LOG_FILE=/var/lib/auditdsec/auditdsec.log
+    AUDITDSEC_LOG_FILE=/var/lib/auditdsec/auditdsec.log \
+    AUDITDSEC_LOG_DIR=/var/log/auditseclogs
 
 ENTRYPOINT ["/usr/local/bin/auditdsec"]
 CMD ["run"]
