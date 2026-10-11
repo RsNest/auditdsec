@@ -44,7 +44,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 256m
     environment:
-      PANEL_SITE: ${PANEL_SITE:-${PANEL_DOMAIN:?set PANEL_SITE in .env, or run ./install.sh}}
+      PANEL_SITE: ${PANEL_SITE:-${PANEL_DOMAIN:-}}
       PANEL_ACME: ${PANEL_ACME:-production}
       PANEL_ACME_URL: ${PANEL_ACME_URL:-https://acme-v02.api.letsencrypt.org/directory}
       # Only for a private ACME server; empty means the normal trust store.

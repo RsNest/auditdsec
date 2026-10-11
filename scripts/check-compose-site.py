@@ -30,7 +30,7 @@ def main():
             fixture_values = {"AUDITDSEC_TG_TOKEN": "123:compose-test", "AUDITDSEC_TG_CHAT_ID": "42", **values}
             env_file.write_text("".join(f"{k}='{v}'\n" for k, v in fixture_values.items()), encoding="utf-8")
             result = subprocess.run(
-                ["docker", "compose", "--env-file", str(env_file), "-f", "docker-compose.yml", "-f", "deploy/compose.proxy.yml", "config", "--format", "json"],
+                ["docker", "compose", "--env-file", str(env_file), "-f", "docker-compose.yml", "-f", "deploy/compose.proxy.yml", *(["-f", "deploy/compose.acme-ip.yml"] if name == "IP" else []), "config", "--format", "json"],
                 cwd=ROOT, env=clean_env, capture_output=True, text=True,
             )
             if result.returncode:
@@ -38,6 +38,8 @@ def main():
             services = json.loads(result.stdout)["services"]
             assert services["caddy"]["environment"]["PANEL_SITE"] == site, name
             assert services["auditdsec"]["environment"]["AUDITDSEC_WEB_PUBLIC_URL"] == url, name
+            if name == "IP":
+                assert services["certbot"]["environment"]["PANEL_SITE"] == site, "certbot must accept PANEL_SITE alone"
             print(f"ok: Compose address interpolation ({name})")
 
 
