@@ -1,0 +1,2 @@
+# Public key (base64, 32 bytes) of the update metadata signing key. Empty: the metadata is trusted
+# by HTTPS alone. See scripts/update-keygen.cjs and docs/UPDATES.md.

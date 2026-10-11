@@ -45,3 +45,25 @@ console.log("Panel review policy checks passed.");
   assert.deepEqual(ctxFeed.contextRows({}), [], "old events without context show nothing");
   console.log("Session context checks passed.");
 }
+
+// Version and updates: a failed check is never shown as "up to date", and the
+// indicator follows what is known.
+{
+  require("../internal/web/assets/updates.js");
+  const U = window.ADS.Updates;
+  assert.equal(U.stateText(null), "upd.state.checking");
+  assert.equal(U.stateText({ state: "up_to_date" }), "upd.state.current");
+  assert.equal(U.stateText({ state: "available" }), "upd.state.available");
+  assert.equal(U.stateText({ state: "unavailable" }), "upd.state.unavailable");
+  assert.notEqual(U.stateText({ state: "unavailable", pending: false }), "upd.state.current", "a failed check must not read as current");
+  assert.notEqual(U.stateText({ state: "unknown_installed" }), "upd.state.current", "an unplaceable build must not read as current");
+  assert.equal(U.stateText({ state: "never" }), "upd.state.never");
+  assert.equal(U.stateText({ state: "disabled" }), "upd.state.disabled");
+  U.set({ state: "up_to_date", pending: false });
+  assert.equal(U.pending(), false);
+  U.set({ state: "available", pending: true });
+  assert.equal(U.pending(), true, "an available update shows the indicator");
+  U.set({ state: "unavailable", pending: true });
+  assert.equal(U.pending(), true, "the indicator stays while the source is down, the state says it is stale");
+  console.log("Update indicator checks passed.");
+}

@@ -163,3 +163,13 @@ crowdsec:
 # "correlated", not "observed". Without journalctl or permission it is skipped.
 session:
   journald: true
+
+# Notice of newer versions. The agent reads one small public document over HTTPS
+# at start and every few hours (with a random offset), sends nothing about this
+# server and never updates itself: the panel shows "A new version is available"
+# and ./install.sh applies it.
+#   channel: auto (a tagged release follows stable, anything else follows main),
+#            stable (tagged releases only) or main (every build that passed CI).
+update:
+  enabled: true
+  channel: auto

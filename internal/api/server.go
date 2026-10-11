@@ -57,6 +57,8 @@ type Options struct {
 	// Control reaches the local control service that applies access changes; nil
 	// when it is not set up, and then the panel only shows the installer command.
 	Control AccessControl
+	// Update reports newer published versions; nil when the check is off.
+	Update UpdateSource
 	// PreflightDeps replaces the real DNS and address lookups (tests).
 	PreflightDeps *access.Deps
 	Host          string
@@ -198,6 +200,8 @@ func (s *Server) routes() {
 	api("POST /api/v1/incidents/{id}", true, s.handleIncidentAction)
 	api("GET /api/v1/export/events", true, s.handleExportEvents)
 	api("GET /api/v1/export/incidents", true, s.handleExportIncidents)
+	api("GET /api/v1/update", true, s.handleUpdate)
+	api("POST /api/v1/update/check", true, s.handleUpdateCheck)
 	api("GET /api/v1/access", true, s.handleAccess)
 	api("PUT /api/v1/access/draft", true, s.handleAccessDraft)
 	api("DELETE /api/v1/access/draft", true, s.handleAccessDraft)

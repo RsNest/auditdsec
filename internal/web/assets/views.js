@@ -286,6 +286,7 @@
       el("div", { class: "bar-right" }, [
         el("button", { class: "lnk hide-s", type: "button", "aria-label": t("nav.lang"), title: t("nav.lang"), text: S.lang === "ru" ? "EN" : "RU", onclick: setLang }),
         el("button", { class: "lnk hide-s", type: "button", text: S.theme === "dark" ? t("nav.theme.light") : t("nav.theme.dark"), onclick: setTheme }),
+        A.Updates.button("lnk hide-s"),
         menu,
         el("button", { class: "pill pill-sm", type: "button", text: t("nav.signout"), onclick: signOut })
       ])
@@ -299,6 +300,7 @@
     var items = SECTIONS.map(function (s) {
       return el("a", { class: "lnk", href: "#" + s[0], text: t(s[1]), onclick: close });
     });
+    items.push(el("button", { class: "lnk", type: "button", text: t("upd.title") + (A.Updates.pending() ? " • " + t("upd.new") : ""), onclick: function () { close(); A.Updates.open(); } }));
     items.push(el("button", { class: "lnk", type: "button", text: S.lang === "ru" ? "English" : "Русский", onclick: function () { close(); setLang(); } }));
     items.push(el("button", { class: "lnk", type: "button", text: S.theme === "dark" ? t("nav.theme.light") : t("nav.theme.dark"), onclick: function () { close(); setTheme(); } }));
     $("#shell").appendChild(el("div", { class: "sheet", id: "sheet" }, items));
@@ -988,6 +990,7 @@
         A.api.events("limit=200&since=" + encodeURIComponent(since)).then(function (p) { model.events = (p && p.items) || []; A.announceCritical(model.events); }, function () { }),
         A.api.bans().then(function (v) { if (current()) { model.bans = v || []; } }, function () { }),
         A.api.incidents().then(function (v) { if (current()) { model.incidents = (v && v.items) || []; } }, function () { }),
+        A.api.update().then(function (v) { if (current()) { A.Updates.set(v); } }, function () { }),
         A.api.access().then(function (v) { if (current()) { A.Access.update(v); } }, function () { }),
         A.api.exceptions().then(function (v) { if (current()) { model.exceptions = (v && v.items) || []; } }, function () { }),
         A.api.allowlist().then(function (v) { if (current()) { model.allow = v || []; } }, function () { }),

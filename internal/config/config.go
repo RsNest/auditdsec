@@ -67,6 +67,19 @@ type HeartbeatConfig struct {
 	CheckEvery time.Duration
 }
 
+// UpdateConfig controls the check for newer published versions. The check only
+// reads a small public document over HTTPS and sends nothing about the server;
+// applying an update is always done by ./install.sh.
+type UpdateConfig struct {
+	Enabled bool
+	// Channel: "stable" (tagged releases), "main" (every build of the main
+	// branch that passed CI) or "auto" (stable for a tagged release, main
+	// otherwise).
+	Channel string
+	// URL replaces the place the metadata is published (a mirror). https only.
+	URL string
+}
+
 // SessionConfig controls the attribution of audited actions to SSH sessions.
 // The audit-based attribution is always on; this only switches the optional,
 // read-only enrichment from the systemd journal.
@@ -192,6 +205,7 @@ type Config struct {
 	Store     StoreConfig
 	Heartbeat HeartbeatConfig
 	Session   SessionConfig
+	Update    UpdateConfig
 	Detect    DetectConfig
 	Ban       BanConfig
 	CrowdSec  CrowdSecConfig
@@ -237,6 +251,7 @@ func Defaults(profile string) *Config {
 		Store:     StoreConfig{RetentionDays: 14, MaxRecent: 200},
 		Heartbeat: HeartbeatConfig{Enabled: true, StaleAfter: 6 * time.Hour, CheckEvery: time.Minute},
 		Session:   SessionConfig{Journald: true},
+		Update:    UpdateConfig{Enabled: true, Channel: "auto"},
 		Detect: DetectConfig{
 			Enabled: true, Window: 10 * time.Minute, FailThreshold: 6,
 			SuccessAfterFailures: 6, MaxTracked: 10000,
@@ -311,7 +326,7 @@ func (c *Config) decode(root *node) error {
 	d := &dec{}
 	d.strict(root, "", "schema_version", "profile", "lang", "host", "audit_log", "state_dir",
 		"read_from_start", "debug", "log", "telegram", "store", "heartbeat",
-		"detect", "ban", "crowdsec", "web", "session")
+		"detect", "ban", "crowdsec", "web", "session", "update")
 
 	d.str(root, "lang", &c.Lang)
 	d.str(root, "host", &c.Host)
@@ -355,6 +370,13 @@ func (c *Config) decode(root *node) error {
 		d.boolean(n, "enabled", &c.Heartbeat.Enabled)
 		d.duration(n, "stale_after", &c.Heartbeat.StaleAfter)
 		d.duration(n, "check_every", &c.Heartbeat.CheckEvery)
+	}
+
+	if n := d.section(root, "update"); n != nil {
+		d.strict(n, "update", "enabled", "channel", "url")
+		d.boolean(n, "enabled", &c.Update.Enabled)
+		d.str(n, "channel", &c.Update.Channel)
+		d.str(n, "url", &c.Update.URL)
 	}
 
 	if n := d.section(root, "session"); n != nil {
@@ -422,6 +444,14 @@ func (c *Config) applyEnv() {
 	envStr("AUDITDSEC_TG_API_BASE", &c.Telegram.APIBase)
 	envStr("AUDITDSEC_MIN_SEVERITY", &c.Telegram.MinSeverity)
 	envStr("AUDITDSEC_BAN_BACKEND", &c.Ban.Backend)
+	envStr("AUDITDSEC_UPDATE_CHANNEL", &c.Update.Channel)
+	envStr("AUDITDSEC_UPDATE_URL", &c.Update.URL)
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AUDITDSEC_UPDATE_CHECK"))) {
+	case "0", "false", "no", "off":
+		c.Update.Enabled = false
+	case "1", "true", "yes", "on":
+		c.Update.Enabled = true
+	}
 	if os.Getenv("AUDITDSEC_AUTO_ALLOWLIST") != "" {
 		c.Ban.AutoAllowlistExplicit = true
 	}
@@ -625,6 +655,17 @@ func (c *Config) validate() error {
 		add("ban.backend: unknown backend %q (want %s or %s)",
 			c.Ban.Backend, BanBackendNone, BanBackendNftables)
 	}
+	switch c.Update.Channel {
+	case "auto", "stable", "main", "":
+	default:
+		add("update.channel: unknown channel %q (want auto, stable or main)", c.Update.Channel)
+	}
+	if c.Update.URL != "" {
+		u, err := url.Parse(c.Update.URL)
+		if err != nil || u.Host == "" || (u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost"))) {
+			add("update.url: must be an https address")
+		}
+	}
 	switch c.Ban.AutoAllowlist {
 	case AutoAllowFirstLogin, AutoAllowOff, "":
 	default:
@@ -811,6 +852,7 @@ func (c *Config) Redacted() string {
 	fmt.Fprintf(&b, "store:            %d days, %d recent\n", c.Store.RetentionDays, c.Store.MaxRecent)
 	fmt.Fprintf(&b, "heartbeat:        enabled=%t stale_after=%s every=%s\n", c.Heartbeat.Enabled, shortDur(c.Heartbeat.StaleAfter), shortDur(c.Heartbeat.CheckEvery))
 	fmt.Fprintf(&b, "session:          journald=%t\n", c.Session.Journald)
+	fmt.Fprintf(&b, "update:           enabled=%t channel=%s\n", c.Update.Enabled, c.Update.Channel)
 	fmt.Fprintf(&b, "detect:           enabled=%t window=%s threshold=%d success_after=%d\n",
 		c.Detect.Enabled, shortDur(c.Detect.Window), c.Detect.FailThreshold, c.Detect.SuccessAfterFailures)
 	fmt.Fprintf(&b, "ban:              backend=%s dry_run=%t auto_allowlist=%s\n",

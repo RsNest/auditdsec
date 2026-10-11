@@ -47,6 +47,7 @@ import (
 	"github.com/RsNest/auditdsec/internal/semantic"
 	"github.com/RsNest/auditdsec/internal/session"
 	"github.com/RsNest/auditdsec/internal/store"
+	"github.com/RsNest/auditdsec/internal/update"
 )
 
 // Set with -ldflags at build time; see the Makefile.
@@ -144,6 +145,10 @@ func run(args []string) error {
 		return cmdRun(args)
 	case "check-config":
 		return cmdCheckConfig(args)
+	case "update-info":
+		return cmdUpdateInfo(args)
+	case "update-validate":
+		return cmdUpdateValidate(args)
 	case "check-rules":
 		return cmdCheckRules(args)
 	case "doctor":
@@ -664,6 +669,25 @@ func cmdRun(args []string) error {
 	// The local control service, when the installer set it up: its socket and
 	// token are mounted into the container read-only. Without it the panel only
 	// shows the installer command for access changes.
+	// Notice of newer versions: reads one small public document over HTTPS in the
+	// background; a source that is down never affects anything else.
+	var updater *update.Checker
+	if cfg.Update.Enabled {
+		key, kerr := update.EmbeddedKey()
+		if kerr != nil {
+			log.Warn("the built-in update signing key is unusable; update checks are off", "error", kerr)
+		} else {
+			updater, err = update.New(update.Options{
+				Installed: update.Installed{Version: version, Commit: commit, Date: date},
+				Channel:   autoChannel(cfg.Update.Channel), Arch: runtime.GOARCH, Base: cfg.Update.URL,
+				PublicKey: key, Store: st, Log: log,
+			})
+			if err != nil {
+				log.Warn("update checks are off", "error", err)
+				updater = nil
+			}
+		}
+	}
 	var control api.AccessControl
 	if sock := os.Getenv("AUDITDSEC_CTL_SOCKET"); sock != "" {
 		control = &access.Client{Socket: sock, TokenFile: os.Getenv("AUDITDSEC_CTL_TOKEN_FILE")}
@@ -671,7 +695,7 @@ func cmdRun(args []string) error {
 	var panel *api.Server
 	if cfg.Web.Enabled {
 		panel, err = api.New(api.Options{
-			Config: cfg, Store: st, Enforcer: enforcer, Decisions: dec, Runtime: pl, Telegram: bot, Control: control,
+			Config: cfg, Store: st, Enforcer: enforcer, Decisions: dec, Runtime: pl, Telegram: bot, Control: control, Update: updateSource(updater),
 			Host: host, Version: version, Started: started, Logger: log,
 		})
 		if err != nil {
@@ -684,6 +708,10 @@ func cmdRun(args []string) error {
 		// installing, and hunting for it in a log line of key=value pairs is
 		// a poor way to find it.
 		printPanelBanner(os.Stdout, cfg, panel.SetupState())
+	}
+
+	if updater != nil {
+		go updater.Run(ctx)
 	}
 
 	var wg sync.WaitGroup
@@ -746,4 +774,21 @@ func panelCertURL(cfg *config.Config) string {
 		return u
 	}
 	return ""
+}
+
+// autoChannel turns "auto" into the default for this build, and leaves an
+// explicit channel alone.
+func autoChannel(c string) string {
+	if c == "" || c == "auto" {
+		return ""
+	}
+	return c
+}
+
+// updateSource avoids a typed nil in the interface when the check is off.
+func updateSource(u *update.Checker) api.UpdateSource {
+	if u == nil {
+		return nil
+	}
+	return u
 }

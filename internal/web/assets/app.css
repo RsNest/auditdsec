@@ -500,3 +500,10 @@ dialog::backdrop { background: rgba(5, 6, 8, .72); }
 .tick { display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--ink2); }
 .rules { list-style: none; padding: 0; margin: 0; font-size: 12px; display: grid; gap: 2px; color: var(--muted); }
 .rules .yes { color: var(--green, #5fb878); }
+
+/* Version and updates: a quiet indicator, not an alert. */
+.upd-dot { display: inline-block; width: 7px; height: 7px; margin-left: 6px; border-radius: 50%; background: var(--amber); vertical-align: middle; }
+.upd-tag { margin-left: 6px; font-size: .72rem; color: var(--amber); }
+.upd-change { margin: .7em 0; padding-left: .8em; border-left: 2px solid var(--line); }
+.upd-cond, .upd-how { margin-top: .8em; }
+@media (max-width: 760px) { .upd-tag { display: none; } }

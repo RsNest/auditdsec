@@ -287,6 +287,8 @@
     bans: function () { return request("GET", "/bans"); },
     suspects: function () { return request("GET", "/suspects"); },
     incidents: function () { return request("GET", "/incidents"); },
+    update: function () { return request("GET", "/update?lang=" + state.lang); },
+    updateCheck: function () { return request("POST", "/update/check"); },
     access: function () { return request("GET", "/access"); },
     accessCheck: function (p) { return request("POST", "/access/check", p); },
     accessApply: function (p) { return request("POST", "/access/apply", p); },
