@@ -33,6 +33,8 @@ COMMIT="$(printf compose-consistency-lab | sha1sum | cut -c1-40)"
 UP=19477          # a non-default upstream port, on purpose
 HP=18443          # a non-default public port
 PASS=0; FAIL=0
+FAILED_LIST=""
+note_fail() { FAILED_LIST="$FAILED_LIST|$1"; }
 
 [ "$(id -u)" = 0 ] || { echo "run as root (this is a lab: see the header)" >&2; exit 2; }
 export COMPOSE_PROJECT_NAME=adslab NO_COLOR=1 PANEL_NO_EGRESS=1 NO_BANNER=1
@@ -43,10 +45,10 @@ check() { # DESCRIPTION COMMAND...
     if "$@" >/dev/null 2>&1; then PASS=$((PASS + 1)); printf '  ok    %s\n' "$d"; else FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$d"; fi
 }
 equal() { # DESCRIPTION GOT EXPECTED
-    if [ "$2" = "$3" ]; then PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; else FAIL=$((FAIL + 1)); printf '  FAIL  %s (got <%s>, expected <%s>)\n' "$1" "$2" "$3"; fi
+    if [ "$2" = "$3" ]; then PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; else FAIL=$((FAIL + 1)); note_fail "$1 (got <$2>, expected <$3>)"; printf '  FAIL  %s (got <%s>, expected <%s>)\n' "$1" "$2" "$3"; fi
 }
 contains() { # DESCRIPTION TEXT NEEDLE
-    case "$2" in *"$3"*) PASS=$((PASS + 1)); printf '  ok    %s\n' "$1" ;; *) FAIL=$((FAIL + 1)); printf '  FAIL  %s (no <%s> in <%s>)\n' "$1" "$3" "$(printf '%s' "$2" | tail -c 400)" ;; esac
+    case "$2" in *"$3"*) PASS=$((PASS + 1)); printf '  ok    %s\n' "$1" ;; *) FAIL=$((FAIL + 1)); note_fail "$1"; printf '  FAIL  %s (no <%s> in <%s>)\n' "$1" "$3" "$(printf '%s' "$2" | tail -c 400)" ;; esac
 }
 
 netmode() { docker inspect -f '{{.HostConfig.NetworkMode}}' "$1" 2>/dev/null; }
@@ -70,7 +72,7 @@ cleanup() {
     docker rm -f auditdsec auditdsec-caddy >/dev/null 2>&1 || true
     docker volume rm adslab_auditdsec-state adslab_caddy-data adslab_caddy-config adslab_panel-certs >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
+trap 'rc=$?; [ -z "${GITHUB_ACTIONS:-}" ] || [ "$rc" = 0 ] || echo "::error title=compose-consistency::exited with $rc at line $LINENO (failed so far: $FAILED_LIST)"; cleanup' EXIT
 
 # ---------------------------------------------------------------- set up ---
 say "Preparing a copy of the installation in $WORK"
@@ -89,6 +91,12 @@ say "A. First install: selfsigned, upstream $UP, public port $HP, with proxy var
 out="$(cd "$WORK" && HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 http_proxy=http://127.0.0.1:9 \
     ./install.sh --lang en --yes --no-build --no-external-check --mode selfsigned --site 127.0.0.1 --https-port "$HP" --upstream-port "$UP" 2>&1)"; rc=$?
 equal "install exits 0" "$rc" 0
+if [ "$rc" != 0 ]; then
+    printf '%s
+' "$out" | sed 's/^/      | /' | head -80
+    docker ps -a --format '      | container {{.Names}} {{.Status}}' ; docker logs --tail 30 auditdsec 2>&1 | sed 's/^/      | agent: /'
+    docker logs --tail 30 auditdsec-caddy 2>&1 | sed 's/^/      | caddy: /'
+fi
 contains "the result says the panel runs" "$out" "auditdsec is running"
 equal "agent network mode" "$(netmode auditdsec)" host
 equal "proxy network mode" "$(netmode auditdsec-caddy)" host

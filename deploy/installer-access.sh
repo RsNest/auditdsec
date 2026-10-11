@@ -80,8 +80,10 @@ backup_current() {
 
 # rollback_source prints the file a failed change goes back to.
 rollback_source() {
-    if [ -s "$LAST_GOOD" ]; then printf '%s' "$LAST_GOOD"
-    elif [ -s "$PRE_CHANGE" ]; then printf '%s' "$PRE_CHANGE"
+    # Only a file that describes an installation counts: a .env that holds
+    # nothing but the Telegram settings is not something to go back to.
+    if [ -s "$LAST_GOOD" ] && grep -q '^PANEL_MODE=' "$LAST_GOOD"; then printf '%s' "$LAST_GOOD"
+    elif [ -s "$PRE_CHANGE" ] && grep -q '^PANEL_MODE=' "$PRE_CHANGE"; then printf '%s' "$PRE_CHANGE"
     fi
 }
 
