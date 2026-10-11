@@ -624,3 +624,42 @@ the checking service was unavailable: %s	сервис проверки был н
 port 80 is free here; reachability from the internet was not checked	порт 80 свободен здесь; доступность из интернета не проверялась
 port 80 is held by this installation's proxy; reachability from the internet was not re-checked	порт 80 держит прокси этой установки; доступность из интернета заново не проверялась
 Link (NOT published):	Ссылка (не опубликована):
+
+# Deployment consistency.
+                                       443; when it is taken you are asked for another	                                       443; если он занят, спросит другой
+                                       one. A port you give is never replaced: if it does	                                       порт. Заданный вами порт не заменяется: если он не
+                                       not work, the run stops. auto (only when you ask	                                       подходит, запуск останавливается. auto (только по
+                                       for it) tries 443, then up to 16 random high ports.	                                       вашему запросу) пробует 443, затем до 16 случайных портов.
+                                       (exit 0 reached, 11 not reached, 16 certificate not	                                       (код 0 — достигнута, 11 — не достигнута, 16 — сертификат
+                                       verified, 12 no provider or no answer)	                                       не подтверждён, 12 — нет провайдера или он не ответил)
+                                       nothing, needs no root. --json prints only JSON.	                                       меняет, root не нужен. --json печатает только JSON.
+                                       line of that operation from all components	                                       операции из всех компонентов
+                                       domain, ip, tunnel, credentials or logs. Saved settings	                                       domain, ip, tunnel, credentials, repair или logs. Сохранённые настройки
+                                       (Telegram, credentials, e-mail, enforcement) are reused.	                                       (Telegram, логин, e-mail, блокировка) используются повторно.
+unknown action '%s': use check, update, domain, ip, tunnel, credentials, repair or logs	неизвестное действие «%s»: допустимы check, update, domain, ip, tunnel, credentials, repair или logs
+Starting the saved configuration	Запуск сохранённой конфигурации
+docker compose cannot resolve the configuration	docker compose не может собрать конфигурацию
+The Compose configuration matches the chosen mode (%s, upstream 127.0.0.1:%s)	Конфигурация Compose соответствует выбранному режиму (%s, upstream 127.0.0.1:%s)
+This image cannot check the Compose configuration (an older version): skipped	Этот образ не умеет проверять конфигурацию Compose (старая версия): пропущено
+A plain 'docker compose up -d' here would start the same setup (COMPOSE_FILE is saved in %s)	Обычный 'docker compose up -d' здесь запустит ту же конфигурацию (COMPOSE_FILE сохранён в %s)
+Containers: the agent is in the %s network%s	Контейнеры: агент в сети %s%s
+checking the Compose configuration against the chosen mode (%s)	сверка конфигурации Compose с выбранным режимом (%s)
+it would not work: %s	так работать не будет: %s
+this is a fault in the installation's files, not in your input: do not start it. Report it with the trace ID below; ./install.sh --restore returns to the last working configuration	это неисправность файлов установки, а не ваш ввод: запускать нельзя. Сообщите её с trace ID ниже; ./install.sh --restore вернёт последнюю рабочую конфигурацию
+reading the configuration the way a plain 'docker compose up -d' would	чтение конфигурации так, как её прочтёт обычный 'docker compose up -d'
+COMPOSE_FILE in %s does not give the chosen setup: %s	COMPOSE_FILE в %s не даёт выбранную конфигурацию: %s
+run ./install.sh again; it rewrites COMPOSE_FILE. Until then do not run docker compose by hand in this directory	запустите ./install.sh ещё раз: он перепишет COMPOSE_FILE. До этого не запускайте docker compose вручную в этом каталоге
+reading the network settings of the containers that were created	чтение сетевых настроек созданных контейнеров
+the containers were created with another set of Compose files than the installer chose. Run ./install.sh --action repair; do not start this directory with docker compose -f of your own	контейнеры созданы с другим набором файлов Compose, чем выбрал установщик. Выполните ./install.sh --action repair; не запускайте этот каталог своим docker compose -f
+The agent is running, but the panel is not reachable. Caddy expects the upstream 127.0.0.1:%s in the %s network; the agent runs in the %s network.	Агент работает, но панель недоступна. Caddy ожидает upstream 127.0.0.1:%s в сети %s, агент запущен в сети %s.
+The agent is running, but the panel is not reachable. The agent runs in network %s; with an SSH tunnel it must be in the host network to listen on 127.0.0.1:%s.	Агент работает, но панель недоступна. Агент запущен в сети %s; при SSH-туннеле он должен быть в сети хоста, чтобы слушать 127.0.0.1:%s.
+Caddy expects the upstream 127.0.0.1:%s in the %s network; the agent runs in the %s network.	Caddy ожидает upstream 127.0.0.1:%s в сети %s, агент запущен в сети %s.
+The agent runs in network %s; with an SSH tunnel it must be in the host network to listen on 127.0.0.1:%s.	Агент запущен в сети %s; при SSH-туннеле он должен быть в сети хоста, чтобы слушать 127.0.0.1:%s.
+The agent does not answer on 127.0.0.1:%s (HTTP %s); the proxy answers %s.	Агент не отвечает на 127.0.0.1:%s (HTTP %s); прокси отвечает %s.
+The agent answers on 127.0.0.1:%s, but the proxy answers 502: it is not sending requests to that address.	Агент отвечает на 127.0.0.1:%s, но прокси отвечает 502: он не передаёт запросы на этот адрес.
+The agent answers on 127.0.0.1:%s (HTTP %s); the proxy answers %s.	Агент отвечает на 127.0.0.1:%s (HTTP %s); прокси отвечает %s.
+run: sudo ./install.sh --action repair (it starts the saved configuration with all its Compose files; data and certificates are kept)	выполните: sudo ./install.sh --action repair (он запустит сохранённую конфигурацию со всеми файлами Compose; данные и сертификаты сохраняются)
+The new settings did not work, and the previous ones could not be confirmed working either.	Новые настройки не сработали, а прежние тоже не удалось подтвердить как рабочие.
+%s; and the previous configuration did not come back either (%s)	%s; и прежняя конфигурация тоже не вернулась (%s)
+Agent:	Агент:
+still running and processing audit events; only the panel is affected	работает и обрабатывает события аудита; затронута только панель

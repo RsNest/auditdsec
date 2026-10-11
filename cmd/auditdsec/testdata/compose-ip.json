@@ -1,0 +1,307 @@
+{
+  "name": "w",
+  "services": {
+    "auditdsec": {
+      "restart": "unless-stopped",
+      "container_name": "auditdsec",
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "AUDITDSEC_HOST": "",
+        "AUDITDSEC_LANG": "ru",
+        "AUDITDSEC_LOG_LEVEL": "info",
+        "AUDITDSEC_PROFILE": "simple",
+        "AUDITDSEC_TG_CHAT_ID": "42",
+        "AUDITDSEC_TG_TOKEN": "123:test",
+        "AUDITDSEC_WEB": "1",
+        "AUDITDSEC_WEB_CERT_CHECK": "verify",
+        "AUDITDSEC_WEB_LISTEN": "127.0.0.1:19477",
+        "AUDITDSEC_WEB_LOGIN": "",
+        "AUDITDSEC_WEB_PASSWORD_HASH": "",
+        "AUDITDSEC_WEB_PUBLIC_HTTPS_PORT": "8443",
+        "AUDITDSEC_WEB_PUBLIC_URL": "https://panel.example.com:8443",
+        "AUDITDSEC_WEB_TRUSTED_PROXIES": "127.0.0.1,::1",
+        "TZ": "UTC"
+      },
+      "image": "ghcr.io/rsnest/auditdsec:sha-0000000000000000000000000000000000000001",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "10m"
+        }
+      },
+      "mem_limit": "67108864",
+      "network_mode": "host",
+      "pids_limit": 64,
+      "pull_policy": "missing",
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/var/log/audit",
+          "target": "/var/log/audit",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "volume",
+          "source": "auditdsec-state",
+          "target": "/var/lib/auditdsec",
+          "volume": {}
+        },
+        {
+          "type": "bind",
+          "source": "/var/log/auditseclogs",
+          "target": "/var/log/auditseclogs",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/etc/hostname",
+          "target": "/etc/host-hostname",
+          "read_only": true,
+          "bind": {}
+        }
+      ],
+      "build": {
+        "context": "/w",
+        "dockerfile": "deploy/Dockerfile",
+        "args": {
+          "COMMIT": "none",
+          "VERSION": "dev"
+        },
+        "target": "minimal"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/usr/local/bin/auditdsec",
+          "healthcheck"
+        ],
+        "timeout": "6s",
+        "interval": "30s",
+        "retries": 3,
+        "start_period": "30s"
+      }
+    },
+    "caddy": {
+      "restart": "unless-stopped",
+      "container_name": "auditdsec-caddy",
+      "cap_add": [
+        "NET_BIND_SERVICE"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "PANEL_ACME_URL": "https://acme-v02.api.letsencrypt.org/directory",
+        "PANEL_EMAIL": "me@example.com",
+        "PANEL_HSTS": "max-age=31536000",
+        "PANEL_HTTPS_PORT": "8443",
+        "PANEL_SITE": "panel.example.com",
+        "PANEL_SITE_ADDR": "panel.example.com",
+        "PANEL_UPSTREAM": "127.0.0.1:19477",
+        "SSL_CERT_FILE": ""
+      },
+      "image": "caddy:2.10-alpine",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "10m"
+        }
+      },
+      "mem_limit": "134217728",
+      "network_mode": "host",
+      "pids_limit": 128,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/w/deploy/Caddyfile",
+          "target": "/etc/caddy/Caddyfile",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "volume",
+          "source": "panel-certs",
+          "target": "/certs",
+          "read_only": true,
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "caddy-data",
+          "target": "/data",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "caddy-config",
+          "target": "/config",
+          "volume": {}
+        },
+        {
+          "type": "bind",
+          "source": "/var/log/auditseclogs",
+          "target": "/var/log/auditseclogs",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/dev/null",
+          "target": "/acme-ca.pem",
+          "read_only": true,
+          "bind": {}
+        }
+      ],
+      "depends_on": {
+        "auditdsec": {
+          "condition": "service_started",
+          "required": true
+        }
+      }
+    },
+    "certbot": {
+      "restart": "unless-stopped",
+      "container_name": "auditdsec-certbot",
+      "cap_add": [
+        "NET_BIND_SERVICE"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": null,
+      "entrypoint": [
+        "/bin/sh",
+        "/hooks/loop.sh"
+      ],
+      "environment": {
+        "PANEL_ACME": "production",
+        "PANEL_ACME_URL": "https://acme-v02.api.letsencrypt.org/directory",
+        "PANEL_SITE": "panel.example.com",
+        "REQUESTS_CA_BUNDLE": "",
+        "TICK": "60",
+        "TLS_PORT": "8443"
+      },
+      "image": "certbot/certbot:v5.8.0",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "10m"
+        }
+      },
+      "mem_limit": "268435456",
+      "network_mode": "host",
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "letsencrypt",
+          "target": "/etc/letsencrypt",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "letsencrypt-lib",
+          "target": "/var/lib/letsencrypt",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "panel-certs",
+          "target": "/certs",
+          "volume": {}
+        },
+        {
+          "type": "bind",
+          "source": "/w/deploy/certbot-deploy-hook.sh",
+          "target": "/hooks/deploy.sh",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/w/deploy/certtool.py",
+          "target": "/hooks/certtool.py",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/w/deploy/certbot-loop.sh",
+          "target": "/hooks/loop.sh",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/var/log/auditseclogs",
+          "target": "/var/log/auditseclogs",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/w/deploy/Caddyfile",
+          "target": "/etc/caddy/Caddyfile",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/dev/null",
+          "target": "/acme-ca.pem",
+          "read_only": true,
+          "bind": {}
+        }
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "python3",
+          "/hooks/certtool.py",
+          "status"
+        ],
+        "timeout": "20s",
+        "interval": "1m0s",
+        "retries": 3,
+        "start_period": "2m0s"
+      }
+    }
+  },
+  "volumes": {
+    "auditdsec-state": {
+      "name": "w_auditdsec-state"
+    },
+    "caddy-config": {
+      "name": "w_caddy-config"
+    },
+    "caddy-data": {
+      "name": "w_caddy-data"
+    },
+    "letsencrypt": {
+      "name": "w_letsencrypt"
+    },
+    "letsencrypt-lib": {
+      "name": "w_letsencrypt-lib"
+    },
+    "panel-certs": {
+      "name": "w_panel-certs"
+    }
+  }
+}

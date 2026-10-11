@@ -103,6 +103,8 @@ source deploy/installer-access.sh
 source deploy/installer-flow.sh
 # shellcheck source=deploy/installer-state.sh
 source deploy/installer-state.sh
+# shellcheck source=deploy/installer-deploy.sh
+source deploy/installer-deploy.sh
 
 # Output helpers. Every result carries a word as well as a colour, so the text
 # alone is complete: [ OK ], [WARN], [FAIL]. Each also goes to the diagnostic log.
@@ -352,6 +354,8 @@ report() {
         if [ "$CHANGED" = no ]; then
             installer_printf '  %-13s %s\n' "$(installer_text 'Still works:')" "$(installer_text 'nothing on this server was changed by this run')"
         fi
+        local an; an="$(agent_note 2>/dev/null || true)"
+        [ -z "$an" ] || installer_printf '  %-13s %s\n' "$(installer_text 'Agent:')" "$(installer_text "$an")"
         [ -z "$TRACE_ID" ] || installer_printf '  %-13s %s  (%s)\n' "$(installer_text 'Trace:')" "$TRACE_ID" "./install.sh --logs $TRACE_ID"
         [ -z "$LOG_FILE" ] || [ -n "$LOG_DEGRADED" ] || installer_printf '  %-13s %s\n' "$(installer_text 'Log:')" "$LOG_FILE"
     } >&2
@@ -436,10 +440,11 @@ build_compose_files() {
     if [ "$MODE" = ip ]; then COMPOSE_FILES+=(-f deploy/compose.acme-ip.yml); fi
     # The panel's link to the local control service, when it was enabled.
     if [ "$(env_get PANEL_CONTROL)" = 1 ]; then COMPOSE_FILES+=(-f deploy/compose.control.yml); fi
-    # Extra overlays, for a test harness or a site-specific tweak. Last, so
-    # they can override anything above.
+    # Extra overlays of the site (a tweak of your own). Last, so they can
+    # override anything above. They are remembered in .env (PANEL_COMPOSE_EXTRA),
+    # so a later run and a plain docker compose keep them like the rest.
     local extra
-    for extra in ${PANEL_COMPOSE_EXTRA:-}; do COMPOSE_FILES+=(-f "$extra"); done
+    for extra in $(cfg PANEL_COMPOSE_EXTRA); do COMPOSE_FILES+=(-f "$extra"); done
     return 0
 }
 
@@ -1068,6 +1073,7 @@ write_config() {
     [ "$PORT_DEPRECATED" = no ] || warn "--port is the old name of --upstream-port: the agent's loopback port, not the public one."
 
     env_set PANEL_MODE "$MODE"
+    [ -z "${PANEL_COMPOSE_EXTRA:-}" ] || env_set PANEL_COMPOSE_EXTRA "$PANEL_COMPOSE_EXTRA"
     env_set PANEL_INSTALLER_LANG "$INSTALLER_LANG"
     env_set PANEL_ENFORCE "$ENFORCE"
     env_set PANEL_UPSTREAM_PORT "$PORT"
@@ -1280,6 +1286,7 @@ start_stack() {
 
 LAST_GOOD="${ENV_FILE}.last-good"
 RESTORED=no
+RESTORE_OK=yes   # the restored configuration passed the required checks
 
 # save_last_good keeps the configuration that has just been shown to work, so
 # that a later attempt which fails can put it back. It holds the same secrets
@@ -1335,7 +1342,11 @@ restore_last_good() {
     if [ -z "$(env_get AUDITDSEC_IMAGE)" ] && [ -n "$(legacy_image)" ]; then
         env_set AUDITDSEC_IMAGE "$(legacy_image)"
     fi
+    # What was saved decides, not what this run was given: a restore returns to
+    # the saved set of Compose files, extra overlays included.
+    unset PANEL_COMPOSE_EXTRA
     load_state_from_env
+    persist_compose_files   # a configuration saved before COMPOSE_FILE existed gets it now
     local up=(up -d --remove-orphans)
     up+=(--no-build)   # images are downloaded (or built) before, never here
     compose "${up[@]}" || { warn "could not start the previous configuration either"; return 1; }
@@ -1477,9 +1488,10 @@ verify_stack() {
     fi
     if [ "$reached" = no ]; then
         PAGE_STATE="NOT ANSWERING"
-        report service_start_failed "$url" "GET $url/ from this server for 90 seconds" \
-            "the sign-in page did not answer" \
-            "look at: $(compose_prefix) logs --tail 80 auditdsec$([ "$MODE" = tunnel ] || printf ' ; %s logs --tail 40 caddy' "$(compose_prefix)")"
+        diagnose_unreachable
+        local unreachable_fix; unreachable_fix="look at: $(compose_prefix) logs --tail 80 auditdsec$([ "$MODE" = tunnel ] || printf ' ; %s logs --tail 40 caddy' "$(compose_prefix)")"
+        [ -z "$(deployment_problem)" ] || unreachable_fix="run: sudo ./install.sh --action repair (it starts the saved configuration with all its Compose files; data and certificates are kept)"
+        report service_start_failed "$url" "GET $url/ from this server for 90 seconds" "$DIAG_TEXT" "$unreachable_fix"
         return 1
     fi
     PAGE_STATE="answers"
@@ -1672,6 +1684,7 @@ main() {
         [ -s "$LAST_GOOD" ] || die "there is no verified configuration to go back to ($LAST_GOOD)"
         restore_last_good || die "the previous configuration would not start"
         step "Checking the panel"
+        check_created_containers || true
         local rrc=0
         verify_stack || rrc=$?
         summary
@@ -1684,7 +1697,7 @@ main() {
             if [ -z "$ACTION" ]; then say "Nothing was changed."; return 0; fi
         fi
         if [ -n "$ACTION" ]; then
-            valid_action "$ACTION" || die "unknown action '$ACTION': use check, update, domain, ip, tunnel, credentials or logs"
+            valid_action "$ACTION" || die "unknown action '$ACTION': use check, update, domain, ip, tunnel, credentials, repair or logs"
             local arc=0
             run_action || arc=$?
             [ "$arc" != 99 ] || arc=0   # 99: the action continues as an ordinary change
@@ -1726,15 +1739,16 @@ main() {
     step "Starting"
     write_config
     build_compose_files
+    persist_compose_files             # COMPOSE_FILE in .env: a plain docker compose up -d keeps the setup
 
     local vrc=0 started=yes
-    if ! start_stack; then
+    if ! check_compose_consistency || ! start_stack; then
         started=no
         [ -n "$FAIL_CODE" ] || report service_start_failed "$(compose_prefix)" "starting the stack" "it did not start" "see the messages above"
     else
         stage verify "checking the new address"
         step "Checking the panel"
-        verify_stack || vrc=$?
+        if [ "$DO_START" = yes ] && ! check_created_containers; then vrc=1; else verify_stack || vrc=$?; fi
     fi
 
     # The new settings do not work. When there is a configuration that did,
@@ -1749,7 +1763,14 @@ main() {
                 TLS_UNTRUSTED=no; LOGIN_STATE=""; LOGIN_ROUTE=""; TLS_STATE=""; RENEW_STATE=""; RELOAD_PROBLEM=no
                 PAGE_STATE=""; PASSWORD=""; EXT_TLS_STATE=""; EXT_STATE=""; EXT_CONFIGURED=no
                 step "Checking the restored panel"
-                verify_stack || true
+                local brc=0
+                verify_stack || brc=$?
+                # The previous settings count as back only when they pass the same
+                # required checks; otherwise this says so instead of claiming it.
+                if [ "$brc" != 0 ] && [ "$brc" != 2 ]; then
+                    RESTORE_OK=no
+                    reason="$reason; and the previous configuration did not come back either ($PAGE_STATE)"
+                fi
                 FAIL_CODE="$code"; FAIL_REASON="$reason"
             fi
         else
@@ -1792,7 +1813,9 @@ run_action() {
             load_state_from_env
             step "Checking the panel"
             local crc=0
-            verify_stack || crc=$?
+            check_compose_consistency || crc=1
+            if [ "$crc" = 0 ]; then check_created_containers || crc=1; fi
+            if [ "$crc" = 0 ]; then verify_stack || crc=$?; fi
             summary
             emit_event result "$([ "$crc" = 0 ] && echo ok || echo failed)" "$FAIL_CODE" "$FAIL_REASON"
             return "$(exit_status "$crc")" ;;
@@ -1828,6 +1851,22 @@ EOF
             ACTION_DONE=yes
             logs_menu
             return 0 ;;
+        repair)
+            ACTION_DONE=yes
+            steps_begin 2
+            preflight_light
+            load_state_from_env
+            step "Starting the saved configuration"
+            local prc=0
+            repair_deployment || prc=1
+            if [ "$prc" = 0 ]; then
+                step "Checking the panel"
+                check_created_containers || prc=1
+                [ "$prc" != 0 ] || verify_stack || prc=$?
+            fi
+            summary
+            emit_event result "$([ "$prc" = 0 ] && echo ok || echo failed)" "$FAIL_CODE" "$FAIL_REASON"
+            return "$(exit_status "$prc")" ;;
         enable-control|disable-control)
             ACTION_DONE=yes
             preflight_light

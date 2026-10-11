@@ -1,0 +1,106 @@
+{
+  "name": "w",
+  "networks": {
+    "default": {
+      "name": "w_default",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "auditdsec": {
+      "restart": "unless-stopped",
+      "container_name": "auditdsec",
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "AUDITDSEC_HOST": "",
+        "AUDITDSEC_LANG": "ru",
+        "AUDITDSEC_LOG_LEVEL": "info",
+        "AUDITDSEC_PROFILE": "simple",
+        "AUDITDSEC_TG_CHAT_ID": "42",
+        "AUDITDSEC_TG_TOKEN": "123:test",
+        "AUDITDSEC_WEB": "1",
+        "AUDITDSEC_WEB_LISTEN": "",
+        "AUDITDSEC_WEB_LOGIN": "",
+        "AUDITDSEC_WEB_PASSWORD_HASH": "",
+        "AUDITDSEC_WEB_PUBLIC_URL": "",
+        "AUDITDSEC_WEB_TRUSTED_PROXIES": "",
+        "TZ": "UTC"
+      },
+      "image": "ghcr.io/rsnest/auditdsec:sha-0000000000000000000000000000000000000001",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "10m"
+        }
+      },
+      "mem_limit": "67108864",
+      "networks": {
+        "default": null
+      },
+      "pids_limit": 64,
+      "pull_policy": "missing",
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/var/log/audit",
+          "target": "/var/log/audit",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "volume",
+          "source": "auditdsec-state",
+          "target": "/var/lib/auditdsec",
+          "volume": {}
+        },
+        {
+          "type": "bind",
+          "source": "/var/log/auditseclogs",
+          "target": "/var/log/auditseclogs",
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/etc/hostname",
+          "target": "/etc/host-hostname",
+          "read_only": true,
+          "bind": {}
+        }
+      ],
+      "build": {
+        "context": "/w",
+        "dockerfile": "deploy/Dockerfile",
+        "args": {
+          "COMMIT": "none",
+          "VERSION": "dev"
+        },
+        "target": "minimal"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/usr/local/bin/auditdsec",
+          "healthcheck"
+        ],
+        "timeout": "6s",
+        "interval": "30s",
+        "retries": 3,
+        "start_period": "30s"
+      }
+    }
+  },
+  "volumes": {
+    "auditdsec-state": {
+      "name": "w_auditdsec-state"
+    }
+  }
+}

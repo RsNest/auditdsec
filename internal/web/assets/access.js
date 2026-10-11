@@ -127,6 +127,7 @@
       if (task.cause) { kids.push(el("p", { text: task.cause })); }
       if (task.fix) { kids.push(el("p", { class: "callout", text: t("acc.fix") + ": " + task.fix })); }
       if (task.code) { kids.push(el("p", { class: "mono", text: task.code })); }
+      if (task.trace_id) { kids.push(el("p", { class: "mono", text: t("acc.trace") + ": " + task.trace_id })); }
     } else {
       kids.push(el("p", { class: "callout", text: t("acc.wait") }));
     }

@@ -146,6 +146,10 @@ func run(args []string) error {
 		return cmdRun(args)
 	case "check-config":
 		return cmdCheckConfig(args)
+	case "healthcheck":
+		return cmdHealthcheck(args)
+	case "deploy-check":
+		return cmdDeployCheck(args)
 	case "logs":
 		return cmdLogs(args)
 	case "update-info":

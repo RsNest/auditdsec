@@ -179,6 +179,9 @@ summary() {
     installer_printf '\n%s\n' "$line"
     if [ "$RESTORED" = yes ] && [ "$RESTORE" = yes ]; then
         installer_printf '%s%s%s\n' "$B" "$(installer_text 'The last verified configuration is running again.')" "$N"
+    elif [ "$RESTORED" = yes ] && [ "$RESTORE_OK" = no ]; then
+        installer_printf '%s[FAIL]%s %s%s%s
+' "$R$B" "$N" "$R$B" "$(installer_text 'The new settings did not work, and the previous ones could not be confirmed working either.')" "$N"
     elif [ "$RESTORED" = yes ]; then
         installer_printf '%s[FAIL]%s %s%s%s\n' "$R$B" "$N" "$R$B" "$(installer_text 'The new settings did not work; the previous ones are running again.')" "$N"
     elif [ -n "$FAIL_CODE" ]; then

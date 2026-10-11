@@ -1,0 +1,34 @@
+{
+  "id": "2026-10-11-compose-consistency",
+  "date": "2026-10-11",
+  "title": { "en": "The panel no longer breaks when Compose is run by hand", "ru": "Панель больше не ломается от ручного запуска Compose" },
+  "fixed": {
+    "en": [
+      "A plain docker compose up -d in the installation directory could recreate the agent without the proxy settings, so the proxy answered 502 while the agent kept running.",
+      "The set of Compose files is saved in .env (COMPOSE_FILE); changing the mode rewrites it, and an older saved configuration gets it on restore."
+    ],
+    "ru": [
+      "Обычный docker compose up -d в каталоге установки мог пересоздать агента без настроек прокси: прокси отвечал 502, а агент продолжал работать.",
+      "Набор файлов Compose сохраняется в .env (COMPOSE_FILE); смена режима переписывает его, а старая сохранённая конфигурация получает его при восстановлении."
+    ]
+  },
+  "added": {
+    "en": [
+      "The installer checks the final Compose configuration before applying it and the real network of each container after, and says which network the proxy and the agent are in.",
+      "./install.sh --action repair starts the saved configuration with all its files; data and certificates are not touched.",
+      "The agent's health check asks its own web server."
+    ],
+    "ru": [
+      "Установщик проверяет итоговую конфигурацию Compose до применения и реальную сеть каждого контейнера после и называет сети прокси и агента.",
+      "./install.sh --action repair запускает сохранённую конфигурацию со всеми файлами; данные и сертификаты не затрагиваются.",
+      "Проверка работоспособности агента обращается к его собственному веб-серверу."
+    ]
+  },
+  "actions": {
+    "en": ["Run sudo ./install.sh --action check once: it shows whether this installation is affected."],
+    "ru": ["Один раз выполните sudo ./install.sh --action check: он покажет, затронута ли эта установка."]
+  },
+  "breaking": [],
+  "requires": { "installer_update": true, "migration": "none" },
+  "evidence": ["deploy/installer-deploy.sh", "cmd/auditdsec/deploycmd.go", "scripts/e2e/compose-consistency/run.sh", "docker-compose.yml"]
+}

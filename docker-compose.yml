@@ -5,6 +5,12 @@
 #   docker compose up -d
 #
 # The container needs no privileges: it only reads /var/log/audit.
+#
+# With the web panel, ./install.sh chooses extra files (the proxy, the host
+# network, certbot, blocking, the control link) and saves the whole list as
+# COMPOSE_FILE in .env, so `docker compose up -d` in this directory keeps that
+# setup. Do not start such an installation with this file alone: the agent
+# would come up in a bridge network and the proxy would answer 502.
 services:
   auditdsec:
     build:
@@ -64,6 +70,17 @@ services:
       - /etc/hostname:/etc/host-hostname:ro
       # Uncomment to use a configuration file instead of variables:
       # - ./auditdsec.yaml:/etc/auditdsec/auditdsec.yaml:ro
+
+    # "Running" does not mean the panel works. This asks the agent's own web
+    # server (the binary does it: the minimal image has no curl or shell). It
+    # cannot see a proxy that waits for an address this container is not on;
+    # the installer checks that from outside, see docs/ARCHITECTURE.md.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/auditdsec", "healthcheck"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 30s
 
     # The agent rotates its own log file; this caps Docker's copy of stdout.
     logging:

@@ -335,3 +335,41 @@ covered by logic checks); no real auditd, sshd, journald or nftables; no load te
 Known limits: the five failures before a ban are not back-filled into the incident; hit
 counts reset on restart; an exception is chosen at ingestion and not re-evaluated; incidents
 produce no notifications of their own.
+
+## Согласованность Compose и доступность панели (scripts/e2e/compose-consistency)
+
+**Что было:** набор Compose-файлов жил только в памяти `install.sh`. Любой запуск
+`docker compose` из каталога без `-f` (обычный `up -d`, `pull`, `--force-recreate`)
+брал только `docker-compose.yml`: агент пересоздавался в bridge-сети с веб-сервером
+не на `127.0.0.1:<порт>` хоста, а Caddy в host-сети оставался и отвечал 502.
+
+**Что сделано:** `COMPOSE_FILE` и `COMPOSE_PATH_SEPARATOR` сохраняются в `.env` (только имена
+файлов, без секретов); дополнительные файлы — `PANEL_COMPOSE_EXTRA` в `.env`. Смена
+режима переписывает список. Старые сохранённые конфигурации без этого поля получают его при
+`--restore` и при любом применении. До применения итоговую конфигурацию проверяет
+`auditdsec deploy-check` (режим, upstream `127.0.0.1:<порт>`, host-сеть агента и прокси, отсутствие
+опубликованных портов агента, certbot только для IP, NET_ADMIN только при блокировках,
+связь с control-службой только когда она включена) — и по явному списку файлов, и так, как
+её прочтёт обычный `docker compose` без `-f`. После запуска установщик читает настоящие
+сетевые режимы созданных контейнеров. Healthcheck агента — команда `auditdsec healthcheck`
+(спрашивает собственный веб-сервер, без curl и shell в образе).
+
+**Что проверено на настоящих Docker и Caddy** (`launch.sh` запускает `run.sh` в одноразовом
+privileged `docker:dind`; в CI — на runner, после публикации образа): первая установка с
+нестандартными портами и заданными `HTTP(S)_PROXY`; воспроизведение потери (агент в
+`adslab_default`, прокси в host, **Caddy отвечает 502**, upstream молчит) и точная диагностика
+`check` с фактическими сетями и trace ID; `--action repair` (данные и ключ CA прокси на месте);
+обычный `docker compose up -d --force-recreate` и `pull + up` сохраняют настройку; установка без
+`COMPOSE_FILE` (как старая) по-прежнему ломается при обычном `up`, а `--restore` из старой
+сохранённой конфигурации возвращает поле; update; отказ от изменения, которое сломало бы сеть
+(до запуска, прежняя конфигурация продолжает работать, порт агента не публикуется);
+переход на SSH-туннель (прокси удалён, список файлов без него) и обратно; ссылка control-службы
+в списке файлов. Результат последнего прогона: **65 проверок, 0 сбоев**.
+
+**Не проверено на настоящем сервере:** Let's Encrypt (в лаборатории режим `selfsigned`, тот же
+`compose.proxy.yml`, что у домена и IP); образ с блокировками и `NET_ADMIN` (проверена только
+конфигурация Compose, настоящим `docker compose config`); запуск control-службы под systemd;
+host-сеть на сервере с несколькими интерфейсами и файрволом провайдера. Разбор YAML и
+фикстуры `docker compose config` в `cmd/auditdsec/testdata` проверяют правила
+`deploy-check`, но не доказывают, что Docker создаст контейнеры в нужных сетях: это показывает
+только прогон выше.

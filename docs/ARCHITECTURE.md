@@ -812,3 +812,14 @@ Interfaces only where there are already two clients, a retry or two implementati
 - **Stage 3**: CrowdSec adapter, webhook / ntfy, `/metrics`, external heartbeat, CI.
 - **Stage 4**: multi-host, learning mode, hardening report, an indexed store when the load
   calls for it, declarative detection rules.
+
+## Согласованность развёртывания
+
+Панель работает, только когда агент и прокси настроены друг под друга: оба в host-сети, веб-сервер
+агента на `127.0.0.1:<upstream-порт>`, прокси отправляет запросы туда же, порт агента нигде не
+опубликован. Это зависит от набора Compose-файлов, поэтому он хранится в `.env` как
+`COMPOSE_FILE` (имена файлов, не секреты); смена режима переписывает список. Установщик сверяет
+итоговую конфигурацию (`auditdsec deploy-check`) до запуска и сетевые режимы созданных контейнеров
+после; healthcheck агента проверяет его собственный веб-сервер. Агент не получает Docker socket:
+всё, что требует Docker, делает установщик или control-служба. Падение веб-сервера не останавливает
+разбор audit-событий. Подробности и проверка: [VERIFY.md](VERIFY.md).

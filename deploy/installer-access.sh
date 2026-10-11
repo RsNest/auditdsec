@@ -199,7 +199,7 @@ logs_menu() {
     [ -z "$t" ] || logs_command "$t"
 }
 
-valid_action() { case "$1" in check|domain|ip|tunnel|credentials|update|logs|enable-control|disable-control) return 0 ;; *) return 1 ;; esac; }
+valid_action() { case "$1" in check|domain|ip|tunnel|credentials|update|logs|repair|enable-control|disable-control) return 0 ;; *) return 1 ;; esac; }
 
 # apply_action_defaults sets MODE/SITE for the chosen action, from the flags
 # of this run and otherwise from the saved installation, so nothing that is
@@ -296,6 +296,7 @@ enable_control() {
     ok "the control service is in $bin (from $img)"
 
     build_compose_files
+    persist_compose_files
     if confirm "Restart the panel now to link it to the control service? (a short interruption)"; then
         compose up -d --no-build --remove-orphans || die "the panel did not start with the control link; undo with ./install.sh --disable-panel-control"
         ok "the panel is linked to the control service socket"
@@ -323,6 +324,7 @@ disable_control() {
     step "Removing the panel's link to the control service"
     env_unset PANEL_CONTROL; env_unset PANEL_CTL_DIR; env_unset PANEL_CTL_GID
     build_compose_files
+    persist_compose_files
     if confirm "Restart the panel now? (a short interruption)"; then
         compose up -d --no-build --remove-orphans || die "the panel did not start"
     fi
