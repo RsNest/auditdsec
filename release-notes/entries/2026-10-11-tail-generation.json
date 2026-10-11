@@ -1,0 +1,12 @@
+{
+  "id": "2026-10-11-tail-generation",
+  "date": "2026-10-11",
+  "title": { "en": "Reliable reading when the audit log is truncated", "ru": "Надёжное чтение журнала auditd при его обнулении" },
+  "fixed": {
+    "en": ["If the audit log is truncated and rewritten while an event is being delivered, the agent starts a new file generation at byte zero instead of emitting a partial replacement line."],
+    "ru": ["Если журнал обнулён и переписан во время обработки события, агент начинает чтение нового поколения файла с нуля вместо выдачи обрывка новой строки."]
+  },
+  "breaking": [],
+  "requires": { "installer_update": false, "migration": "none" },
+  "evidence": ["internal/source/acknowledged.go", "internal/source/acknowledged_test.go", "internal/source/tail_test.go"]
+}
