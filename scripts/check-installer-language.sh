@@ -25,8 +25,8 @@ done < deploy/installer.messages
 equal "$(installer_text '')" '' 'empty message'
 equal "$(installer_text 'Choose 1 or 2')" 'Выберите 1 или 2' 'Russian prompt'
 equal "$(installer_text 'Keep the panel on port 55443?')" 'Оставить панель на порту 55443?' 'dynamic port'
-equal "$(installer_printf '%sThe panel is published.%s\n' '' '')" 'Панель опубликована.' 'publication summary'
-equal "$(installer_printf '\n%sFAILED: %s%s\n' '' port_in_use '')" $'\nОШИБКА: port_in_use' 'unchanged machine code'
+equal "$(installer_text 'auditdsec is running.')" 'auditdsec работает.' 'result summary'
+equal "$(installer_text 'Do next:')" 'Что делать:' 'failure block label'
 equal "$(installer_text 'https://[2001:db8::1]:55443')" 'https://[2001:db8::1]:55443' 'unchanged URL'
 equal "$(installer_printf '  Link: %s%s%s\n' '' 'https://example.com:55443' '')" '  Link: https://example.com:55443' 'unchanged link'
 # shellcheck disable=SC2016
@@ -34,7 +34,7 @@ literal='image $(exit 99);%s\n'
 equal "$(installer_text "$literal")" 'образ $(exit 99);%s\n' 'captures are data, not code or a format'
 INSTALLER_LANG=en
 equal "$(installer_text 'Choose 1 or 2')" 'Choose 1 or 2' 'English prompt'
-equal "$(installer_printf '%sThe panel is published.%s\n' '' '')" 'The panel is published.' 'English summary'
+equal "$(installer_text 'auditdsec is running.')" 'auditdsec is running.' 'English summary'
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

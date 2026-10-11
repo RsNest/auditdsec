@@ -1,4 +1,4 @@
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2034
 # Changing how the panel is reached after the first installation.
 #
 # This file is sourced by install.sh and is the ONLY implementation of the
@@ -30,14 +30,15 @@ acquire_lock() {
             rm -rf "$lock.d"; mkdir "$lock.d" || lock_busy "$lock"
         fi
         printf '%s\n' "$$" > "$lock.d/pid"
-        trap 'rm -rf "'"$lock"'.d"' EXIT
+        LOCK_DIR="$lock.d"   # removed by install.sh's cleanup on every way out
     fi
     LOCK_HELD=yes
 }
 
 lock_busy() {
     emit_event result failed operation_in_progress "another change is already running"
-    installer_printf '%sFAILED: %s%s\n' "$R$B" operation_in_progress "$N" >&2
+    jlog error lock_busy "another change is already running" operation_in_progress
+    installer_printf '%s[FAIL]%s %soperation_in_progress%s\n' "$E_R$E_B" "$E_N" "$E_R$E_B" "$E_N" >&2
     installer_printf '  Another installer run or a change started from the panel is in progress.\n' >&2
     installer_printf '  Wait for it to finish, then run this again.\n' >&2
     exit 20
@@ -53,8 +54,8 @@ EVENTS_FILE="${INSTALL_EVENTS_FILE:-}"
 emit_event() {
     [ -n "$EVENTS_FILE" ] || return 0
     local kind="$1" state="$2" code="${3:-}" text="${4:-}" fix="${5:-}"
-    printf '{"at":"%s","kind":"%s","state":"%s","code":"%s","text":"%s","fix":"%s"}\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(json_escape "$kind")" "$(json_escape "$state")" \
+    printf '{"at":"%s","trace_id":"%s","kind":"%s","state":"%s","code":"%s","text":"%s","fix":"%s"}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TRACE_ID:-}" "$(json_escape "$kind")" "$(json_escape "$state")" \
         "$(json_escape "$code")" "$(json_escape "$text")" "$(json_escape "$fix")" >> "$EVENTS_FILE" 2>/dev/null || true
 }
 
@@ -169,24 +170,36 @@ choose_action() {
 What do you want to do?
 
   1) Check the current state
-  2) Connect or change the domain
-  3) Switch to access by IP address
-  4) Switch to an SSH tunnel (no public access)
-  5) Change the login and password
-  6) Update the application
+  2) Update auditdsec — agent and web panel
+  3) Connect or change the domain
+  4) Switch to this server's IP address (and choose the port)
+  5) Switch to an SSH tunnel (no public access)
+  6) Change the login and password
+  7) Diagnostics and logs
   0) Leave
 
 EOF
     local reply
-    reply="$(ask "Choose 0-6" "1")"
+    reply="$(ask "Choose 0-7" "1")"
     case "$reply" in
-        1) ACTION=check ;; 2) ACTION=domain ;; 3) ACTION=ip ;; 4) ACTION=tunnel ;;
-        5) ACTION=credentials ;; 6) ACTION=update ;; 0|'') ACTION="" ;;
-        *) die "pick a number from 0 to 6" ;;
+        1) ACTION=check ;; 2) ACTION=update ;; 3) ACTION=domain ;; 4) ACTION=ip ;;
+        5) ACTION=tunnel ;; 6) ACTION=credentials ;; 7) ACTION=logs ;; 0|'') ACTION="" ;;
+        *) die "pick a number from 0 to 7" ;;
     esac
 }
 
-valid_action() { case "$1" in check|domain|ip|tunnel|credentials|update|enable-control|disable-control) return 0 ;; *) return 1 ;; esac; }
+# logs_menu — where the logs are, the latest operations, and one operation by
+# its trace ID. Read-only.
+logs_menu() {
+    installer_printf '\n%s%s%s\n' "$B" "$(installer_text 'Diagnostics and logs')" "$N"
+    installer_printf '  %s %s\n' "$(installer_text 'Log directory:')" "$LOG_DIR"
+    logs_command ""
+    local t
+    t="$(ask "Trace ID to show (Enter to leave)" "")"
+    [ -z "$t" ] || logs_command "$t"
+}
+
+valid_action() { case "$1" in check|domain|ip|tunnel|credentials|update|logs|enable-control|disable-control) return 0 ;; *) return 1 ;; esac; }
 
 # apply_action_defaults sets MODE/SITE for the chosen action, from the flags
 # of this run and otherwise from the saved installation, so nothing that is

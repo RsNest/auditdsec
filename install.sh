@@ -1,26 +1,24 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034
 #
 # auditdsec — set up the agent and the web panel.
 #
 #   ./install.sh
 #
-# The order is fixed:
+# Run it as root (sudo ./install.sh); it never calls sudo for you. The stages:
 #
-#   0. installer language (Russian or English; saved for subsequent runs).
-#   1. preflight: Linux, a supported CPU, Docker with Compose, curl; what an
-#      earlier installation left (it is kept). Download the published image
-#      of this commit; the checks below run inside it.
-#   2. where the panel opens: on a domain or on this server's public IP
-#   3. the domain's public DNS (or the address) is checked against this server
-#   4. the public HTTPS port: picked automatically (443 first, then up to 16
-#      random high ports) or given by you. Each candidate is bound locally and
-#      then reached from OUTSIDE by a RemoteProbe provider you run elsewhere.
-#   5. what the certificate needs: port 80 for HTTP-01 (or 443 for TLS-ALPN
-#      on a domain), the e-mail for Let's Encrypt, the Telegram bot
-#   6. the configuration is written, the stack started, and the panel checked
-#      again from outside, this time over verified TLS
-#   7. only then the summary with the link. Any failure has its own code, a
-#      non-zero exit status, and says what to fix and how to run this again.
+#   1. Checking this server: Linux, a supported CPU, Docker with Compose, curl.
+#   2. How the panel opens: a domain, this server's IP address, or an SSH tunnel.
+#   3. Downloading the application image of this commit (nothing is built here).
+#   4. Checking the address and ports: public DNS, the HTTPS port (443 first; if
+#      it is taken you choose another, nothing is stopped), what the certificate
+#      needs. An outside check by a RemoteProbe is optional extra diagnostics.
+#   5. Starting: the plan is shown and confirmed, then applied.
+#   6. Checking the panel: it answers, its certificate verifies, sign-in works.
+#   Result: what is running, what was and was not checked, and the link.
+#
+# Every operation gets a trace ID and is logged under /var/log/auditseclogs
+# (installer.jsonl, installer-commands.log); ./install.sh --logs TRACE shows it.
 #
 # The first sign-in is admin / admin. That pair opens only the screen where you
 # choose your own login and password; nothing else in the panel works before.
@@ -76,6 +74,9 @@ BUILD_LOCAL=no
 RESTORE=no
 ACTION=""           # check | domain | ip | tunnel | credentials | update (a repeated run)
 STATUS_ONLY=no
+LOGS_MODE=no
+LOGS_TRACE=""
+REMOTE_CHECK=no
 JSON=no
 PORT_DEPRECATED=no
 PORT_RANGE_LO="${PANEL_PORT_RANGE_LO:-}"
@@ -86,52 +87,75 @@ LE_STAGING="https://acme-staging-v02.api.letsencrypt.org/directory"
 
 # --------------------------------------------------------------- utilities --
 
-if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-    B=$'\033[1m'; R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; N=$'\033[0m'
-else
-    B=""; R=""; G=""; Y=""; N=""
-fi
-
 # shellcheck source=deploy/installer-i18n.sh
 source deploy/installer-i18n.sh
+# shellcheck source=deploy/installer-ui.sh
+source deploy/installer-ui.sh
+ui_init yes   # plain until the arguments are known; ui_init is called again below
 INSTALLER_LANG=ru
 installer_choose_language "$@"
 installer_load_messages
+# shellcheck source=deploy/installer-log.sh
+source deploy/installer-log.sh
 # shellcheck source=deploy/installer-access.sh
 source deploy/installer-access.sh
+# shellcheck source=deploy/installer-flow.sh
+source deploy/installer-flow.sh
+# shellcheck source=deploy/installer-state.sh
+source deploy/installer-state.sh
 
+# Output helpers. Every result carries a word as well as a colour, so the text
+# alone is complete: [ OK ], [WARN], [FAIL]. Each also goes to the diagnostic log.
+CURRENT_STAGE=""
+CHANGED=no        # the configuration of this server was written by this run
 say()  { printf '%s\n' "$(installer_text "$*")"; }
-step() { printf '\n%s==>%s %s\n' "$B" "$N" "$(installer_text "$*")"; }
-warn() { printf '%s!%s  %s\n' "$Y" "$N" "$(installer_text "$*")" >&2; }
-die()  { printf '%s%s:%s %s\n' "$R" "$(installer_text 'error')" "$N" "$(installer_text "$*")" >&2; exit 1; }
-ok()   { printf '%s/%s  %s\n' "$G" "$N" "$(installer_text "$*")"; }
+step() {
+    CURRENT_STAGE="$*"
+    STEP_N=$((STEP_N + 1))
+    if [ "$STEP_N" -le "$STEP_TOTAL" ]; then
+        printf '\n%s[%d/%d]%s %s%s%s\n' "$BRAND1$B" "$STEP_N" "$STEP_TOTAL" "$N" "$B" "$(installer_text "$*")" "$N"
+    else
+        printf '\n%s==>%s %s%s%s\n' "$BRAND1$B" "$N" "$B" "$(installer_text "$*")" "$N"
+    fi
+    jlog info stage "$*"
+}
+sub()  { printf '  %s-%s %s\n' "$DIM" "$N" "$(installer_text "$*")"; }
+warn() { printf '%s[WARN]%s %s\n' "$E_Y$E_B" "$E_N" "$(installer_text "$*")" >&2; jlog warn warning "$*"; }
+die()  { printf '%s[FAIL]%s %s\n' "$E_R$E_B" "$E_N" "$(installer_text "$*")" >&2; jlog error fatal "$*" fatal; exit 1; }
+ok()   { printf '%s[ OK ]%s %s\n' "$G$B" "$N" "$(installer_text "$*")"; jlog info ok "$*"; }
 
 usage() {
     installer_lines <<'EOF'
-Usage: ./install.sh [options]
+Usage: sudo ./install.sh [options]
 
-With no options it asks what it needs, in this order: domain or IP, the
-address, the HTTPS port, then what the certificate needs.
+Run as root. With no options it asks what it needs, in this order: how the
+panel opens (domain, IP address or SSH tunnel), the address, the HTTPS port,
+then what the certificate needs. On an existing installation it shows a menu.
 
 Where the panel opens
   --mode domain|ip                     on a domain, or on this server's public IP
   --site NAME|ADDRESS                  the domain, or the public address
   --public-ip ADDRESS[,ADDRESS]        this server's public address(es), when they
                                        cannot be found (NAT, a floating address)
-  --https-port N|auto                  the PUBLIC HTTPS port of the panel. auto (the
-                                       default on a new setup) tries 443, then up to 16
-                                       random high ports. A port you give is never
-                                       replaced: if it does not work, the run stops.
+  --https-port N|auto                  the PUBLIC HTTPS port of the panel. The default is
+                                       443; when it is taken you are asked for another
+                                       one. A port you give is never replaced: if it does
+                                       not work, the run stops. auto (only when you ask
+                                       for it) tries 443, then up to 16 random high ports.
   --email ADDRESS                      where Let's Encrypt sends expiry warnings
 
-The check from outside
+Optional outside check (a RemoteProbe)
   --probe-url URL                      a RemoteProbe provider: cmd/auditdsec-probe running
                                        on ANOTHER machine. It connects to this server's
                                        address and port and reports what it saw.
   --probe-token-file PATH              file with that provider's token
   --probe-cacert FILE                  CA file for the provider's own certificate
-  --no-external-check                  skip it. A technical mode: the panel is then never
-                                       reported as published.
+  --no-external-check                  do not use it even if configured
+  --remote-check                       run only that check against the installed panel
+                                       (exit 0 reached, 11 not reached, 16 certificate not
+                                       verified, 12 no provider or no answer)
+  Without a provider the installer checks everything it can from this server and
+  says what it did not check. The installation does not depend on it.
 
 Other settings
   --lang ru|en                        installer language; saved independently of UI/Telegram
@@ -144,7 +168,7 @@ Other settings
   --enforce / --no-enforce             apply bans with nftables, or only record them
                                        (default: only record)
 
-Technical modes (never reported as "published and ready")
+Technical modes
   --staging                            Let's Encrypt staging CA: its certificates are not
                                        trusted by browsers. --production moves back.
   --production                         the real Let's Encrypt CA
@@ -161,20 +185,26 @@ Technical modes (never reported as "published and ready")
   --enable-panel-control               let the panel apply access changes: runs a small local
                                        service on this server (no root, no Docker socket for the
                                        agent); --disable-panel-control removes the link
-  --status [--json]                    show the current mode, address and certificate; change nothing
-  --action ACTION                      on an existing installation, without the menu: check, domain,
-                                       ip, tunnel, credentials or update. Saved settings (Telegram,
-                                       credentials, e-mail, enforcement) are reused, not asked again.
+  --status [--json]                    show the current mode, address and certificate; change
+                                       nothing, needs no root. --json prints only JSON.
+  --logs [TRACE_ID]                    without an ID: the latest operations; with one: every log
+                                       line of that operation from all components
+  --action ACTION                      on an existing installation, without the menu: check, update,
+                                       domain, ip, tunnel, credentials or logs. Saved settings
+                                       (Telegram, credentials, e-mail, enforcement) are reused.
   --events-file PATH                   append progress events (JSON lines) for the panel
   --yes                                ask nothing that already has an answer
   -h, --help                           this text
 
-Exit status: 0 when every check that ran passed; otherwise the code of the
+Logs: /var/log/auditseclogs (AUDITSEC_LOG_DIR), see docs/LOGS.md. Colours and the
+banner appear only on a terminal; NO_COLOR=1 turns colours off, NO_BANNER=1 the banner.
+
+Exit status: 0 when every required check passed; otherwise the code of the
 first failure:
 
   10 port_in_use                 the port cannot be bound on this server
-  11 external_port_unreachable   bound here, but not reached from outside
-  12 external_check_unavailable  no RemoteProbe provider, or it did not answer
+  11 external_port_unreachable   (--remote-check) the provider could not reach the panel
+  12 external_check_unavailable  (--remote-check) no provider, or it did not answer
   13 dns_mismatch                public DNS does not lead (only) to this server
   14 acme_challenge_unreachable  port 80 (or 443) cannot be used for the challenge
   15 certificate_issuance_failed the CA did not issue the certificate
@@ -213,6 +243,9 @@ while [ $# -gt 0 ]; do
         --disable-panel-control) ACTION=disable-control; shift ;;
         --action) ACTION="${2:-}"; shift 2 ;;
         --status) STATUS_ONLY=yes; shift ;;
+        --logs) LOGS_MODE=yes; LOGS_TRACE=""; shift
+                case "${1:-}" in ''|-*) ;; *) LOGS_TRACE="$1"; shift ;; esac ;;
+        --remote-check) REMOTE_CHECK=yes; shift ;;
         --json) JSON=yes; shift ;;
         --events-file) EVENTS_FILE="${2:-}"; shift 2 ;;
         --no-build) NO_BUILD=yes; shift ;;
@@ -224,6 +257,8 @@ while [ $# -gt 0 ]; do
         *) die "unknown option $1 (try --help)" ;;
     esac
 done
+
+ui_init "$JSON"
 
 interactive() { [ -t 0 ] && [ "$ASSUME_YES" = no ]; }
 
@@ -297,19 +332,28 @@ retry_command() {
 }
 
 # report CODE ENDPOINT CHECK CAUSE FIX — prints one diagnosed failure and
-# remembers it. The first failure is the one the exit status names.
+# remembers it. The first failure is the one the exit status names. It says
+# where it happened, what still works, what to do next, and how to find the
+# technical record (the trace ID).
 report() {
     local code="$1" endpoint="$2" check="$3" cause="$4" fix="$5"
     [ -n "$FAIL_CODE" ] || FAIL_CODE="$code"
     [ -n "$FAIL_REASON" ] || FAIL_REASON="$code: $(installer_text "$cause")"
     emit_event failure failed "$code" "$(installer_text "$cause")" "$(installer_text "$fix")"
+    jlog error failure "$code at $endpoint: $cause (check: $check)" "$code"
     {
-        installer_printf '\n%sFAILED: %s%s\n' "$R$B" "$code" "$N"
-        installer_printf '  endpoint: %s\n' "$endpoint"
-        installer_printf '  check:    %s\n' "$(installer_text "$check")"
-        installer_printf '  result:   %s\n' "$(installer_text "$cause")"
-        installer_printf '  fix:      %s\n' "$(installer_text "$fix")"
-        installer_printf '  retry:    %s\n' "$(retry_command)"
+        installer_printf '\n%s[FAIL]%s %s%s%s\n' "$E_R$E_B" "$E_N" "$E_R$E_B" "$code" "$E_N"
+        installer_printf '  %-13s %s\n' "$(installer_text 'Stage:')" "$(installer_text "${CURRENT_STAGE:-start}")"
+        installer_printf '  %-13s %s\n' "$(installer_text 'Where:')" "$endpoint"
+        installer_printf '  %-13s %s\n' "$(installer_text 'Check:')" "$(installer_text "$check")"
+        installer_printf '  %-13s %s\n' "$(installer_text 'Result:')" "$(installer_text "$cause")"
+        installer_printf '  %-13s %s\n' "$(installer_text 'Do next:')" "$(installer_text "$fix")"
+        installer_printf '  %-13s %s\n' "$(installer_text 'Retry:')" "$(retry_command)"
+        if [ "$CHANGED" = no ]; then
+            installer_printf '  %-13s %s\n' "$(installer_text 'Still works:')" "$(installer_text 'nothing on this server was changed by this run')"
+        fi
+        [ -z "$TRACE_ID" ] || installer_printf '  %-13s %s  (%s)\n' "$(installer_text 'Trace:')" "$TRACE_ID" "./install.sh --logs $TRACE_ID"
+        [ -z "$LOG_FILE" ] || [ -n "$LOG_DEGRADED" ] || installer_printf '  %-13s %s\n' "$(installer_text 'Log:')" "$LOG_FILE"
     } >&2
 }
 
@@ -317,7 +361,7 @@ report() {
 # (the EXIT trap) and stop with the code's status.
 abort() {
     report "$@"
-    installer_printf '\n%sThe panel was NOT published.%s Nothing that was working before was removed.\n' "$R$B" "$N" >&2
+    installer_printf '\n%s[FAIL]%s %s\n' "$E_R$E_B" "$E_N" "$(installer_text 'Stopped before any change. Nothing that was working before was removed.')" >&2
     exit "$(code_status "$1")"
 }
 
@@ -409,8 +453,9 @@ compose_prefix() {
 
 PREVIOUS_INSTALL=no
 
-preflight() {
-    step "Preflight"
+# preflight_env — what this server must have. Nothing is downloaded here; the
+# image is a stage of its own.
+preflight_env() {
     local os arch
     os="$(uname -s)"; arch="$(uname -m)"
     [ "$os" = Linux ] || die "auditdsec runs on Linux; this is $os"
@@ -421,8 +466,8 @@ preflight() {
     command -v curl >/dev/null 2>&1 || die "curl is needed; install it and run ./install.sh again"
     command -v "${DOCKER%% *}" >/dev/null 2>&1 || die "$DOCKER is not installed"
     $DOCKER compose version >/dev/null 2>&1 || die "'$DOCKER compose' does not work; install the Compose plugin"
-    $DOCKER info >/dev/null 2>&1 || die "cannot talk to the Docker daemon; is it running, and are you root (or in the docker group)?"
-    [ -r /var/log/audit/audit.log ] || [ "$(id -u)" != 0 ] \
+    $DOCKER info >/dev/null 2>&1 || die "cannot talk to the Docker daemon; is it running?"
+    [ -r /var/log/audit/audit.log ] \
         || warn "/var/log/audit/audit.log is missing: is auditd installed and running? The panel will show nothing until it is."
     ok "Linux $arch, Docker with Compose, curl"
 
@@ -432,9 +477,56 @@ preflight() {
         pm="$(env_get PANEL_MODE)"; pu="$(env_get PANEL_PUBLIC_URL)"
         ok "an earlier installation is here${pm:+ (mode $pm${pu:+, $pu})}: its data, certificates and credentials are kept"
     fi
-
-    ensure_image
 }
+
+# load_targets — the addresses an outside check should reach, when this run did
+# not look them up itself (a repeated check, --remote-check).
+load_targets() {
+    TARGETS=()
+    local a out
+    if [ "$MODE" = domain ]; then
+        net_check_env
+        out="$(agent net-check domain "$SITE" 2>/dev/null || true)"
+        for a in $(kv A "$out" | tr ',' ' ') $(kv AAAA "$out" | tr ',' ' '); do TARGETS+=("$a $(family_of "$a")"); done
+    fi
+    [ ${#TARGETS[@]} -gt 0 ] || TARGETS=("$SITE $(family_of "$SITE")")
+}
+
+# logs_command [TRACE] — everything the project wrote about one operation, from
+# every component, oldest first; or, without an ID, the latest operations.
+logs_command() {
+    local t="${1:-}" files=() f
+    if [ -z "$t" ]; then
+        say "Latest operations (time, trace ID, kind). Show one with ./install.sh --logs TRACE_ID"
+        last_operations 15
+        return 0
+    fi
+    valid_trace_id "$t" || die "a trace ID is 16 to 32 characters 0-9 a-f"
+    for f in "$LOG_DIR"/*.jsonl "$LOG_DIR"/*.jsonl.[0-9]*; do [ -e "$f" ] && files+=("$f"); done
+    [ ${#files[@]} -gt 0 ] || { say "There are no logs in $LOG_DIR yet."; return 0; }
+    {
+        for f in "${files[@]}"; do
+            case "$f" in
+                *.gz) gzip -dc "$f" 2>/dev/null ;;
+                *) cat "$f" ;;
+            esac
+        done
+    } | grep -F "\"trace_id\":\"$t\"" | sort -s -k1,1 || true
+}
+
+# log_start — names the operation, opens the log, and sets up the exits.
+log_start() {
+    local op=install
+    if [ "$REMOTE_CHECK" = yes ]; then op=remote-check
+    elif [ "$LOGS_MODE" = yes ]; then op=logs
+    elif [ "$RESTORE" = yes ]; then op=restore
+    elif [ -n "$ACTION" ]; then op="$ACTION"
+    elif is_installed; then op=change; fi
+    log_init "$op"
+    install_traps
+    banner
+}
+
 
 # --------------------------------------------------------------- the image --
 #
@@ -629,47 +721,6 @@ kv() { printf '%s\n' "$2" | sed -n "s/^$1=//p" | tail -n 1; }
 
 valid_mode() { case "$1" in domain|ip|selfsigned|tunnel) return 0 ;; *) return 1 ;; esac; }
 
-choose_mode() {
-    if [ -n "$MODE" ]; then
-        valid_mode "$MODE" || die "unknown mode '$MODE': use domain or ip (or, for development, tunnel or selfsigned)"
-        return 0
-    fi
-    local previous
-    previous="$(env_get PANEL_MODE)"
-    if ! interactive; then
-        # A re-run keeps what was chosen before, including a tunnel or a
-        # self-signed setup that someone asked for by name back then.
-        [ -n "$previous" ] || die "say where the panel should open: --mode domain --site NAME, or --mode ip [--site ADDRESS]"
-        MODE="$previous"
-        return 0
-    fi
-    if [ "$previous" = tunnel ] || [ "$previous" = selfsigned ]; then
-        if confirm "This installation uses --mode $previous. Keep it?"; then MODE="$previous"; return 0; fi
-    fi
-    installer_lines <<EOF
-
-Where should the panel open?
-
-  1) On a domain        https://panel.example.com
-     A domain whose A/AAAA records point at this server.
-
-  2) On this server's public IP address
-     Let's Encrypt certifies public addresses too (6-day certificates,
-     renewed automatically).
-
-Both get a certificate every browser trusts, and both are checked from
-outside before the link is shown.
-
-EOF
-    local default=1 reply
-    [ "$previous" = ip ] && default=2
-    reply="$(ask "Choose 1 or 2" "$default")"
-    case "$reply" in
-        1|domain) MODE=domain ;;
-        2|ip) MODE=ip ;;
-        *) die "pick 1 or 2" ;;
-    esac
-}
 
 # ------------------------------------------------------- 3. DNS / address ---
 
@@ -695,41 +746,12 @@ ask_site() {
     esac
 }
 
-check_domain() {
-    local previous out rc=0 name
-    previous="$(env_get PANEL_SITE)"; [ -n "$previous" ] || previous="$(env_get PANEL_DOMAIN)"
-    [ "$(env_get PANEL_MODE)" = domain ] || previous=""
-    SITE="${SITE:-$(ask "Domain name for the panel (e.g. panel.example.com)" "$previous")}"
-    [ -n "$SITE" ] || die "a domain name is required (--site NAME)"
-
-    step "Public DNS for $SITE"
-    local args=(net-check domain "$SITE")
-    [ -z "$PUBLIC_IP" ] || args+=(-public-ip "$PUBLIC_IP")
-    out="$(agent "${args[@]}")" || rc=$?
-    name="$(kv NAME "$out")"
-    if [ "$rc" = 3 ]; then
-        abort dns_mismatch "${name:-$SITE}" \
-            "A and AAAA records from several independent public DNS servers, compared with this server's addresses" \
-            "the name does not lead only to this server (A: $(kv A "$out" | sed 's/^$/-/'), AAAA: $(kv AAAA "$out" | sed 's/^$/-/'); this server: $(kv SERVER "$out" | sed 's/^$/unknown/'))" \
-            "make every A and AAAA record of ${name:-$SITE} point at this server (delete a wrong AAAA rather than leave it), turn off any CDN proxying (DNS only), wait for DNS to spread, and run again. If this server is behind NAT, give its public address with --public-ip."
-    elif [ "$rc" != 0 ]; then
-        die "the DNS check could not run (exit $rc)"
-    fi
-    SITE="$name"
-
-    TARGETS=()
-    local a
-    for a in $(kv A "$out" | tr ',' ' ') $(kv AAAA "$out" | tr ',' ' '); do
-        TARGETS+=("$a $(family_of "$a")")
-    done
-    ok "$SITE -> $(printf '%s ' "${TARGETS[@]%% *}")- every A/AAAA record leads to this server"
-}
 
 choose_address() {
     local out rc=0 cands previous
     previous="$(env_get PANEL_SITE)"
     case "$(env_get PANEL_MODE)" in ip|selfsigned) ;; *) previous="" ;; esac
-    step "This server's public address"
+    sub "This server's public address"
     out="$(agent net-check ip 2>/dev/null)" || rc=$?
     cands="$(kv CANDIDATES "$out")"
     [ "$(kv NAT "$out")" = yes ] && say "The address seen from outside is not on any interface here (NAT or a floating address)."
@@ -769,49 +791,11 @@ choose_address() {
 
 HTTPS_SOURCE=""   # auto | manual
 TRIED=()          # "port: reason" for the summary of a failed auto choice
-EXT_PORT_STATE="" # reachable | skipped
+EXT_PORT_STATE="" # reachable | skipped (read by the summary)
 PROBE_CONTAINER="auditdsec-probe-listen"
 STOPPED_OWN=()    # this installation's containers stopped for the checks
 STACK_STARTED=no
 
-setup_probe() {
-    PROBE_URL="${PROBE_URL:-$(env_get PANEL_PROBE_URL)}"
-    PROBE_TOKEN_FILE="${PROBE_TOKEN_FILE:-$(env_get PANEL_PROBE_TOKEN_FILE)}"
-    PROBE_CACERT="${PROBE_CACERT:-$(cfg PANEL_PROBE_CACERT)}"
-    [ "$MODE" = tunnel ] && return 0
-    if [ "$NO_EXTERNAL" = yes ]; then
-        warn "--no-external-check: whether the internet reaches the panel will NOT be known; it is not reported as published."
-        return 0
-    fi
-    if [ -z "$PROBE_URL" ] && interactive; then
-        installer_lines <<EOF
-
-Check from outside
-A check made from this server proves nothing about the internet: a cloud
-firewall, NAT or the provider's security group are only seen from outside.
-The installer asks a RemoteProbe provider to connect here: cmd/auditdsec-probe,
-running on ANOTHER machine you control (see docs/PANEL.md). No public service
-is assumed and no secret is sent anywhere else.
-
-EOF
-        PROBE_URL="$(ask "RemoteProbe URL (https://..., empty if you have none)" "")"
-        if [ -n "$PROBE_URL" ] && [ -z "$PROBE_TOKEN_FILE" ]; then
-            PROBE_TOKEN_FILE="$(ask "File with its token (kept here, only its path is saved)" "")"
-        fi
-    fi
-    if [ -z "$PROBE_URL" ] || [ -z "$PROBE_TOKEN_FILE" ]; then
-        abort external_check_unavailable "${SITE:-this server}" \
-            "looking for a RemoteProbe provider (--probe-url and --probe-token-file)" \
-            "no provider is configured, so whether the panel can be reached from the internet cannot be checked" \
-            "run cmd/auditdsec-probe on another machine (docs/PANEL.md, 'Проверка снаружи') and pass --probe-url and --probe-token-file. Or pass --no-external-check: the panel is then started but not reported as published."
-    fi
-    [ -r "$PROBE_TOKEN_FILE" ] || die "cannot read the probe token file $PROBE_TOKEN_FILE"
-    PROBE_TOKEN_FILE="$(readlink -f "$PROBE_TOKEN_FILE")"
-    if [ -n "$PROBE_CACERT" ]; then
-        [ -r "$PROBE_CACERT" ] || die "cannot read $PROBE_CACERT"
-        PROBE_CACERT="$(readlink -f "$PROBE_CACERT")"
-    fi
-}
 
 # remote_check KIND ADDRESS PORT FAMILY — asks the provider; sets RC_* below.
 RC_RESULT=""; RC_DETAIL=""; RC_TLS_VERIFIED=""; RC_TLS_ERROR=""; RC_NOT_AFTER=""
@@ -829,7 +813,9 @@ remote_check() {
         args+=(-server-name "$SITE")
         [ "$MODE" != domain ] || args+=(-host "$SITE")
     fi
-    out="$(agent "${args[@]}" 2>/dev/null || true)"
+    local wt=()
+    if command -v timeout >/dev/null 2>&1; then wt=(timeout "${PROBE_TIMEOUT:-60}"); fi
+    out="$("${wt[@]}" $DOCKER run --rm --network host ${AGENT_ENV[@]+"${AGENT_ENV[@]}"} "$IMAGE" "${args[@]}" 2>/dev/null || true)"
     unset AUDITDSEC_PROBE_TOKEN
     AGENT_ENV=()
     RC_RESULT="$(kv RESULT "$out")"; RC_RESULT="${RC_RESULT:-external_check_unavailable}"
@@ -935,109 +921,9 @@ reserved_port() { # PORT -> reason it may not be the panel's port, or nothing
     if [ "$p" = "$up" ]; then echo "$p is the agent's own loopback port (--upstream-port)"; return; fi
 }
 
-# try_port PORT — 0 when the port is free here and reached from outside.
-# 1: this port does not work (TRIED gets the reason). 2: the check itself
-# failed, which another port would not fix.
-try_port() {
-    local p="$1" why
-    why="$(reserved_port "$p")"
-    if [ -n "$why" ]; then TRIED+=("$p: $why"); LAST_PORT_CODE=port_in_use; return 1; fi
-    if ! bind_check "$p"; then
-        TRIED+=("$p: in use on this server ($BIND_REASON)"); LAST_PORT_CODE=port_in_use
-        return 1
-    fi
-    if [ "$NO_EXTERNAL" = yes ] || [ "$MODE" = tunnel ]; then return 0; fi
-    local rc=0
-    reach_from_outside "$p" || rc=$?
-    case "$rc" in
-        0) return 0 ;;
-        1) TRIED+=("$p: $EXT_REASON")
-           case "$EXT_REASON" in port_in_use*) LAST_PORT_CODE=port_in_use ;; *) LAST_PORT_CODE=external_port_unreachable ;; esac
-           return 1 ;;
-        *) return 2 ;;
-    esac
-}
 
 LAST_PORT_CODE=""
 
-select_port() {
-    case "$MODE" in tunnel) return 0 ;; esac
-    local previous
-    previous="$(env_get PANEL_HTTPS_PORT)"
-    if [ -z "$HTTPS_PORT" ]; then
-        if [ -n "$previous" ] && [ "$(env_get PANEL_MODE)" = "$MODE" ]; then
-            HTTPS_PORT="$previous"
-            interactive && ! confirm "Keep the panel on port $previous?" && HTTPS_PORT=""
-        elif [ "$PREVIOUS_INSTALL" = yes ] && [ -z "$previous" ] && [ -n "$(env_get PANEL_MODE)" ] && [ "$(env_get PANEL_MODE)" != tunnel ]; then
-            HTTPS_PORT=443   # set up before the port was a choice: it was 443
-        fi
-    fi
-    if [ -z "$HTTPS_PORT" ]; then
-        if interactive; then
-            installer_lines <<EOF
-
-Panel port
-This is the public HTTPS port in the link. 443 lets the link go without a
-port; another port works just as well, and the certificate is the same.
-
-  1) Pick automatically: 443 if it is free and reachable, else a random high port
-  2) I will give the port
-
-EOF
-            case "$(ask "Port: 1 automatic, 2 given by you" 1)" in
-                1|auto) HTTPS_PORT=auto ;;
-                2) HTTPS_PORT="$(ask "Port (1-65535)" "")" ;;
-                *) die "pick 1 or 2" ;;
-            esac
-        else
-            HTTPS_PORT=auto
-        fi
-    fi
-
-    release_own
-    step "Choosing the panel's public port"
-    if [ "$HTTPS_PORT" != auto ]; then
-        HTTPS_SOURCE=manual
-        case "$HTTPS_PORT" in ''|*[!0-9]*) die "the port must be a number from 1 to 65535" ;; esac
-        [ "$HTTPS_PORT" -ge 1 ] && [ "$HTTPS_PORT" -le 65535 ] || die "the port must be a number from 1 to 65535"
-        local rc=0
-        try_port "$HTTPS_PORT" || rc=$?
-        case "$rc" in
-            0) ;;
-            1) port_failure "$HTTPS_PORT" ;;
-            *) external_unavailable "$(hostport "${TARGETS[0]% *}" "$HTTPS_PORT")" ;;
-        esac
-    else
-        HTTPS_SOURCE=auto
-        local lo hi up cands p rc found=no
-        up="${PORT:-$(env_get PANEL_UPSTREAM_PORT)}"; up="${up:-$(env_get PANEL_PORT)}"; up="${up:-9477}"
-        read -r lo hi < <(port_range)
-        cands="$(agent port-plan -first 443 -n 16 -lo "$lo" -hi "$hi" -exclude "80,2019,$up")"
-        for p in $cands; do
-            rc=0
-            try_port "$p" || rc=$?
-            case "$rc" in
-                0) HTTPS_PORT="$p"; found=yes; break ;;
-                1) say "  $p: ${TRIED[${#TRIED[@]}-1]#*: }" ;;
-                *) external_unavailable "$(hostport "${TARGETS[0]% *}" "$p")" ;;
-            esac
-        done
-        if [ "$found" = no ]; then
-            local list; list="$(printf '%s; ' "${TRIED[@]}")"
-            abort "${LAST_PORT_CODE:-external_port_unreachable}" "${SITE}, ports $(printf '%s' "$cands" | tr '\n' ' ')" \
-                "443 and $(($(printf '%s\n' "$cands" | wc -l) - 1)) random ports from $lo-$hi: bound here, then reached from outside" \
-                "the UI could not be published: none of the checked ports is available (${list%; }). Only these ports were tried, not every port." \
-                "open one port for TCP in this server's firewall AND in the provider's firewall / security group, then run again with --https-port THAT_PORT"
-        fi
-    fi
-    if [ "$NO_EXTERNAL" = yes ]; then
-        EXT_PORT_STATE=skipped
-        ok "port $HTTPS_PORT can be bound here (reachability from outside NOT checked)"
-    else
-        EXT_PORT_STATE=reachable
-        ok "port $HTTPS_PORT: free here and reached from outside on $(printf '%s ' "${TARGETS[@]%% *}")"
-    fi
-}
 
 port_range() {
     local lo="$PORT_RANGE_LO" hi="$PORT_RANGE_HI"
@@ -1046,75 +932,12 @@ port_range() {
     printf '%s %s\n' "$lo" "$hi"
 }
 
-port_failure() {
-    local p="$1" last="${TRIED[${#TRIED[@]}-1]#*: }"
-    case "$LAST_PORT_CODE" in
-        port_in_use)
-            abort port_in_use "$(hostport "${TARGETS[0]% *}" "$p")" \
-                "binding TCP port $p on all IPv4 and IPv6 addresses of this server" \
-                "$last" \
-                "free the port or choose another one with --https-port N (or --https-port auto). Nothing that holds it was stopped." ;;
-        *)
-            abort external_port_unreachable "$(hostport "${TARGETS[0]% *}" "$p")" \
-                "a temporary listener on $p, fetched from outside by the RemoteProbe provider" \
-                "port $p is free here, but the outside check did not reach it: $last" \
-                "allow TCP $p in this server's firewall (e.g. ufw allow $p/tcp) and in the provider's firewall / security group; check NAT port forwarding. A timeout does not say which of them drops it. Then run again." ;;
-    esac
-}
 
-external_unavailable() {
-    abort external_check_unavailable "$1" \
-        "asking the RemoteProbe provider $PROBE_URL to connect" \
-        "the provider could not be used: $EXT_REASON. This says nothing about the port itself." \
-        "make sure the provider runs, its URL and token are right (--probe-url, --probe-token-file, --probe-cacert), then run again"
-}
 
 # ----------------------------------------------- 5. certificate needs ------
 
 ACME_PORT_STATE=""
 
-# check_challenge makes sure the CA can reach this server to validate it.
-# A certificate is bound to the name or address, not to a port, but proving
-# control of it needs port 80 (HTTP-01) or 443 (TLS-ALPN-01), whatever port
-# the panel itself uses.
-check_challenge() {
-    case "$MODE" in domain|ip) ;; *) return 0 ;; esac
-    step "What the certificate needs"
-    local alpn=no
-    # Caddy answers TLS-ALPN-01 only when the panel itself is on 443.
-    [ "$MODE" = domain ] && [ "$HTTPS_PORT" = 443 ] && alpn=yes
-
-    # Port 80 must be free here even with TLS-ALPN: Caddy binds it for the
-    # HTTP-01 challenge and the redirect, and certbot for HTTP-01.
-    if ! bind_check 80; then
-        abort acme_challenge_unreachable "$(hostport "${TARGETS[0]% *}" 80)" \
-            "binding port 80, where Let's Encrypt sends the HTTP-01 challenge" \
-            "port 80 is used by another program ($BIND_REASON)" \
-            "this installer does not stop another web server, and does not route the challenge through one. Free port 80 (or move that site), or put the panel on a domain served by that web server yourself. DNS-01 is not supported by this installer yet."
-    fi
-    if [ "$NO_EXTERNAL" = yes ]; then
-        ACME_PORT_STATE="port 80 free here; reachability from outside NOT checked"
-        say "$ACME_PORT_STATE"
-        return 0
-    fi
-    local rc=0
-    reach_from_outside 80 || rc=$?
-    case "$rc" in
-        0) ACME_PORT_STATE="port 80 reached from outside (HTTP-01)"; ok "$ACME_PORT_STATE"; return 0 ;;
-        2) external_unavailable "$(hostport "${TARGETS[0]% *}" 80)" ;;
-    esac
-    if [ "$alpn" = yes ]; then
-        ACME_PORT_STATE="port 80 NOT reached from outside; Caddy uses TLS-ALPN-01 on 443 instead"
-        warn "$ACME_PORT_STATE ($EXT_REASON). http:// links will not redirect."
-        return 0
-    fi
-    local need="80"
-    [ "$MODE" = ip ] && need="80 (certificates for an IP address are validated over HTTP-01 on port 80 only; DNS-01 cannot apply to an address)"
-    abort acme_challenge_unreachable "$(hostport "${TARGETS[0]% *}" 80)" \
-        "a temporary listener on port 80, fetched from outside by the RemoteProbe provider" \
-        "Let's Encrypt could not validate this ${MODE/ip/address}: port 80 is not reached from outside ($EXT_REASON). The panel port $HTTPS_PORT being open does not help: the CA only connects to 80 or 443." \
-        "allow TCP $need in this server's firewall and in the provider's firewall, or choose port 443 for the panel on a domain (TLS-ALPN-01). Then run again."
-}
 
 ask_email() {
     case "$MODE" in domain|ip) ;; *) return 0 ;; esac
@@ -1232,7 +1055,8 @@ compute_panel_url() {
 }
 
 write_config() {
-    step "Writing $ENV_FILE"
+    sub "Writing $ENV_FILE"
+    CHANGED=yes
     [ -f "$ENV_FILE" ] || { : > "$ENV_FILE"; chmod 0600 "$ENV_FILE"; }
 
     # PANEL_PORT was the agent's loopback port all along; it is now called
@@ -1329,7 +1153,7 @@ write_config() {
 # goes in on stdin and is never an argument, so it is not in a process list.
 hash_password() {
     [ -n "$PASSWORD" ] || return 0
-    step "Hashing the password"
+    sub "Hashing the password"
     local hash errfile
     errfile="$(mktemp)"
     if ! hash="$(printf '%s\n' "$PASSWORD" | $DOCKER run --rm -i "$IMAGE" hash-password -stdin 2>"$errfile")"; then
@@ -1363,7 +1187,7 @@ certtool() {
 # expired one, or one whose key was lost.
 issue_ip_certificate() {
     [ "$MODE" = ip ] || return 0
-    step "Certificate for $SITE (Let's Encrypt $ACME)"
+    sub "Certificate for $SITE (Let's Encrypt $ACME)"
 
     local reasons rc=0
     if reasons="$(certtool check --cert /certs/fullchain.pem --key /certs/privkey.pem \
@@ -1436,7 +1260,7 @@ issue_ip_certificate() {
 # ------------------------------------------------------------------ start ---
 
 start_stack() {
-    step "Starting"
+    sub "Starting the containers"
     hash_password || { report bootstrap_persistence_failed "$ENV_FILE" "hashing the password from --password-file" "the agent refused it" "use a password the panel accepts (8+ characters, a lower-case and an upper-case letter)"; return 1; }
     issue_ip_certificate || return 1
     if [ "$DO_START" != yes ]; then say "(--no-start: not starting)"; return 0; fi
@@ -1483,6 +1307,10 @@ load_state_from_env() {
     PROBE_CACERT="$(env_get PANEL_PROBE_CACERT)"
     PASSWORD=""
     IMAGE="$(env_get AUDITDSEC_IMAGE)"
+    EXT_CONFIGURED=no
+    if [ -n "$PROBE_URL" ] && [ -n "$PROBE_TOKEN_FILE" ] && [ -r "$PROBE_TOKEN_FILE" ] && [ "$NO_EXTERNAL" = no ] && [ "$MODE" != tunnel ]; then
+        EXT_CONFIGURED=yes
+    fi
     TARGETS=()
     [ -z "$SITE" ] || [ "$MODE" = domain ] || TARGETS=("$SITE $(family_of "$SITE")")
     compute_panel_url
@@ -1522,7 +1350,10 @@ restore_last_good() {
 CA_TMP=""
 
 cleanup() {
+    local rc=$?
     [ -z "$CA_TMP" ] || rm -f "$CA_TMP"
+    [ -z "${LOCK_DIR:-}" ] || rm -rf "$LOCK_DIR"
+    [ -z "$TRACE_ID" ] || jlog info operation_end "exit status $rc" "" ""
     stop_listener 2>/dev/null || true
     unset AUDITDSEC_PROBE_TOKEN 2>/dev/null || true
     # This run stopped the installation's own proxy for the port checks and
@@ -1547,7 +1378,6 @@ NOT_AFTER=""
 TLS_UNTRUSTED=no
 TLS_TRUSTED=no
 RELOAD_PROBLEM=no
-PUBLISHED=no
 # ROUTE is empty unless this server cannot reach its own public address (some
 # clouds do not loop it back). Then every local check is sent to the loopback
 # address instead, with the same name in the URL, so the certificate and its
@@ -1628,7 +1458,7 @@ verify_stack() {
         PAGE_STATE="not checked"
         return 0
     fi
-    step "Checking that the panel actually answers"
+    sub "Checking that the panel actually answers"
 
     local url="$PANEL_URL" local_url="http://127.0.0.1:$PORT" soft=0
     local trust=()      # curl arguments naming the CA to verify against
@@ -1775,10 +1605,7 @@ verify_stack() {
         fi
     fi
 
-    external_tls_check || {
-        local erc=$?
-        [ "$erc" -le "$soft" ] || soft="$erc"
-    }
+    external_tls_check   # advice only: it never fails the run
 
     # A certificate that does not verify defeats the point of the two modes
     # that exist to get a trusted one, so it is a failure, not a footnote.
@@ -1791,63 +1618,6 @@ verify_stack() {
     return "$soft"
 }
 
-# external_tls_check: the final check, from outside, on the real port and
-# with certificate verification. 0 published, 1 not reachable (the setup does
-# not work), 2 reachable but not verifiable or the check could not run.
-external_tls_check() {
-    case "$MODE" in tunnel) EXT_TLS_STATE="not applicable (tunnel)"; return 0 ;; esac
-    if [ "$NO_EXTERNAL" = yes ]; then
-        EXT_TLS_STATE="NOT checked (--no-external-check)"
-        return 0
-    fi
-    if [ ${#TARGETS[@]} -eq 0 ]; then
-        EXT_TLS_STATE="NOT checked (the addresses to check are not known in this run)"
-        return 0
-    fi
-    step "Checking the panel from outside"
-    local t addr fam worst=0
-    for t in "${TARGETS[@]}"; do
-        addr="${t% *}"; fam="${t#* }"
-        remote_check tls "$addr" "$HTTPS_PORT" "$fam"
-        case "$RC_RESULT" in
-            reachable)
-                [ -z "$RC_NOT_AFTER" ] || NOT_AFTER="$RC_NOT_AFTER"
-                if [ "$RC_TLS_VERIFIED" = yes ]; then
-                    ok "$(hostport "$addr" "$HTTPS_PORT"): reached from outside, certificate verified (valid until ${RC_NOT_AFTER:-?})"
-                elif [ "$MODE" = selfsigned ] || [ "$ACME" = staging ]; then
-                    ok "$(hostport "$addr" "$HTTPS_PORT"): reached from outside; the certificate is not publicly trusted, as expected for $([ "$MODE" = selfsigned ] && echo 'a self-signed setup' || echo 'staging')"
-                else
-                    report tls_validation_failed "$(hostport "$addr" "$HTTPS_PORT")" \
-                        "TLS handshake from the RemoteProbe provider, verifying the chain for $SITE" \
-                        "the panel answers, but its certificate does not verify from outside: ${RC_TLS_ERROR:-unknown reason}" \
-                        "make sure the certificate was issued by the production CA for $SITE (logs: $(compose_prefix) logs caddy$([ "$MODE" = ip ] && echo ' certbot')), then run again"
-                    [ "$worst" -ge 2 ] || worst=2
-                fi ;;
-            refused|timeout|wrong_endpoint)
-                report external_port_unreachable "$(hostport "$addr" "$HTTPS_PORT")" \
-                    "HTTPS request from the RemoteProbe provider to the started panel" \
-                    "$RC_RESULT${RC_DETAIL:+: $RC_DETAIL}. The same port was reached by the temporary listener a moment ago." \
-                    "look at: $(compose_prefix) logs --tail 40 caddy (the proxy may have failed to bind the port), and at firewall rules changed in the meantime"
-                worst=1 ;;
-            *)
-                EXT_REASON="${RC_DETAIL:-no answer}"
-                report external_check_unavailable "$(hostport "$addr" "$HTTPS_PORT")" \
-                    "asking the RemoteProbe provider $PROBE_URL" "${RC_DETAIL:-the provider did not answer}" \
-                    "check the provider and run again; the panel is running but is not reported as published"
-                [ "$worst" -ge 2 ] || worst=2 ;;
-        esac
-    done
-    case "$worst" in
-        0) if [ "$MODE" = selfsigned ] || [ "$ACME" = staging ]; then
-               EXT_TLS_STATE="reached from outside (certificate not publicly trusted)"
-           else
-               EXT_TLS_STATE="reached from outside over verified TLS"
-           fi ;;
-        1) EXT_TLS_STATE="NOT reached from outside" ;;
-        *) EXT_TLS_STATE="NOT verified from outside" ;;
-    esac
-    return "$worst"
-}
 
 # ssh_command works out the address the person actually reaches this server
 # by, for the tunnel mode.
@@ -1867,116 +1637,7 @@ ssh_command() {
 
 # ----------------------------------------------------------------- summary ---
 
-decide_published() {
-    PUBLISHED=no
-    [ "$DO_START" = yes ] && [ "$DO_VERIFY" = yes ] || return 0
-    [ "$RESTORED" = no ] && [ -z "$FAIL_CODE" ] || return 0
-    case "$MODE" in domain|ip) ;; *) return 0 ;; esac
-    [ "$ACME" = production ] && [ "$NO_EXTERNAL" = no ] && [ "$TLS_UNTRUSTED" = no ] && [ "$RELOAD_PROBLEM" = no ] || return 0
-    [ "$EXT_TLS_STATE" = "reached from outside over verified TLS" ] || return 0
-    PUBLISHED=yes
-}
 
-summary() {
-    local line
-    decide_published
-    line="$(installer_printf '%*s' 70 '' | tr ' ' '-')"
-    installer_printf '\n%s\n' "$line"
-    if [ "$RESTORED" = yes ] && [ "$RESTORE" = yes ]; then
-        installer_printf '%sThe last verified configuration is running again.%s\n' "$B" "$N"
-    elif [ "$RESTORED" = yes ]; then
-        installer_printf '%sThe new settings did not work; the previous ones are running again.%s\n' "$R$B" "$N"
-    elif [ "$PUBLISHED" = yes ] && [ "$SETUP_STATE" = bootstrap ]; then
-        installer_printf '%sThe panel is published and waits for first-time setup.%s\n' "$G$B" "$N"
-    elif [ "$PUBLISHED" = yes ]; then
-        installer_printf '%sThe panel is published.%s\n' "$G$B" "$N"
-    elif [ -n "$FAIL_CODE" ]; then
-        installer_printf '%sNOT published: %s%s\n' "$R$B" "$FAIL_CODE" "$N"
-    elif [ "$DO_START" != yes ]; then
-        installer_printf '%sConfigured, not started (--no-start). Not published.%s\n' "$B" "$N"
-    elif [ "$DO_VERIFY" != yes ]; then
-        installer_printf '%sStarted, not checked (--no-verify). Not reported as published.%s\n' "$Y$B" "$N"
-    elif [ "$MODE" = tunnel ]; then
-        installer_printf '%sThe panel is up on this server'"'"'s loopback (SSH tunnel mode).%s\n' "$G$B" "$N"
-    elif [ "$ACME" = staging ]; then
-        installer_printf '%sStarted on the Let'"'"'s Encrypt STAGING CA: a dry run, not published.%s\n' "$Y$B" "$N"
-    elif [ "$MODE" = selfsigned ]; then
-        installer_printf '%sStarted with a self-signed certificate: every browser warns. Not published.%s\n' "$Y$B" "$N"
-    elif [ "$NO_EXTERNAL" = yes ]; then
-        installer_printf '%sStarted, but NOT verified from outside (--no-external-check). Not published.%s\n' "$Y$B" "$N"
-    else
-        installer_printf '%sStarted, but not published.%s\n' "$Y$B" "$N"
-    fi
-    installer_printf '%s\n\n' "$line"
-
-    if [ -n "$FAIL_REASON" ]; then
-        installer_printf '  What went wrong: %s\n' "$FAIL_REASON"
-        [ "$RESTORED" != yes ] || installer_printf '  The failed settings are in %s.failed (same permissions as %s).\n' "$ENV_FILE" "$ENV_FILE"
-        installer_printf '  Run again after fixing it: %s\n\n' "$(retry_command)"
-    fi
-
-    installer_printf '  Page:      %s\n' "$(installer_text "${PAGE_STATE:-not checked}")"
-    installer_printf '  Sign-in:   %s\n' "$(installer_text "${LOGIN_STATE:-not checked}")"
-    [ -z "$LOGIN_ROUTE" ] || installer_printf '             sent %s\n' "$(installer_text "$LOGIN_ROUTE")"
-    if [ "$MODE" != tunnel ]; then
-        installer_printf '  Port:      %s (%s)\n' "$HTTPS_PORT" "$([ "$HTTPS_SOURCE" = manual ] && installer_text 'given by you' || { [ "$HTTPS_SOURCE" = auto ] && installer_text 'picked automatically' || installer_text 'kept'; })"
-        installer_printf '  Outside:   port %s; panel %s\n' "$(installer_text "${EXT_PORT_STATE:-not checked}")" "$(installer_text "${EXT_TLS_STATE:-not checked}")"
-        [ -z "$ACME_PORT_STATE" ] || installer_printf '  Challenge: %s\n' "$(installer_text "$ACME_PORT_STATE")"
-        installer_printf '  TLS:       %s\n' "$(installer_text "${TLS_STATE:-not checked}")"
-        [ -z "$NOT_AFTER" ] || installer_printf '  Expires:   %s\n' "$NOT_AFTER"
-    fi
-    [ -z "$RENEW_STATE" ] || installer_printf '  Renewal:   %s\n' "$(installer_text "$RENEW_STATE")"
-    case "$MODE" in
-        domain) installer_printf '             Caddy renews the certificate itself, about 30 days before it ends.\n' ;;
-        ip)     installer_printf '             Address certificates last about 6 days; the certbot container renews them\n'
-                installer_printf '             and checks every minute that port %s serves the file on disk. Port 80\n' "$HTTPS_PORT"
-                installer_printf '             must stay open and unused for the renewals.\n' ;;
-        selfsigned)
-                installer_printf '  Trust:     each browser warns. Compare the fingerprint it shows with:\n'
-                installer_printf '               printf "" | openssl s_client -connect %s 2>/dev/null | openssl x509 -noout -fingerprint -sha256\n' "$(hostport "$SITE" "$HTTPS_PORT")" ;;
-    esac
-    if [ "$ACME" = staging ] && [ "$RESTORED" != yes ]; then
-        installer_printf '\n  %sSTAGING.%s Browsers do not trust this certificate, on purpose. Switch with:\n' "$Y$B" "$N"
-        installer_printf '    ./install.sh --production     (nothing is deleted)\n'
-    fi
-
-    installer_printf '\n  Diagnostics:\n'
-    installer_printf '    %s ps\n' "$(compose_prefix)"
-    installer_printf '    %s logs --tail 80 auditdsec\n' "$(compose_prefix)"
-    case "$MODE" in domain|ip|selfsigned) installer_printf '    %s logs --tail 40 caddy\n' "$(compose_prefix)" ;; esac
-    [ "$MODE" != ip ] || installer_printf '    %s exec certbot python3 /hooks/certtool.py status\n' "$(compose_prefix)"
-    local img facts
-    img="${IMAGE:-$(env_get AUDITDSEC_IMAGE)}"
-    if [ -n "$img" ]; then
-        facts="$(image_facts "$img")"
-        installer_printf '  Image:     %s\n' "$img"
-        installer_printf '             version %s, commit %s\n' "${facts%%|*}" "$(installer_printf '%s' "$facts" | cut -d'|' -f2)"
-        installer_printf '             digest %s\n' "${facts##*|}"
-        [ -z "$(env_get PANEL_IMAGE_PREVIOUS)" ] || installer_printf '             previous image (for going back): %s\n' "$(env_get PANEL_IMAGE_PREVIOUS)"
-    fi
-    installer_printf '  Run ./install.sh again to change anything: data, certificates and credentials are kept.\n'
-    [ ! -s "$LAST_GOOD" ] || installer_printf '  Back to the last verified configuration: ./install.sh --restore\n'
-
-    # The sign-in and the link come last, so they are what stays on screen.
-    installer_printf '\n'
-    if [ "$SETUP_STATE" = bootstrap ] && [ "$RESTORED" != yes ] && [ "$DO_START" = yes ]; then
-        installer_printf '  First login:  %sadmin%s / %sadmin%s\n' "$B" "$N" "$B" "$N"
-        installer_printf '                It opens only the mandatory setup screen: choose your login (or tick\n'
-        installer_printf '                "keep admin") and a password of 8+ characters with a lower-case and an\n'
-        installer_printf '                upper-case letter. Do it now: whoever signs in first can choose them.\n'
-    elif [ "$SETUP_STATE" = ready ] || [ -n "$(env_get AUDITDSEC_WEB_PASSWORD_HASH)" ]; then
-        installer_printf '  Sign in with the login and password you chose (admin / admin no longer works).\n'
-    fi
-    if [ "$MODE" = tunnel ]; then
-        installer_printf '  On your computer, run and leave open:  %s\n' "$(ssh_command)"
-    fi
-    if [ "$PUBLISHED" = yes ] || [ "$MODE" = tunnel ] || [ "$RESTORED" = yes ]; then
-        installer_printf '  Link: %s%s%s\n' "$B" "$PANEL_URL" "$N"
-    else
-        installer_printf '  Link (NOT published): %s\n' "$PANEL_URL"
-    fi
-    installer_printf '%s\n' "$line"
-}
 
 # -------------------------------------------------------------------- main ---
 
@@ -1985,18 +1646,32 @@ exit_status() {
 }
 
 main() {
+    # Reading the state and the help need no privileges; everything else does,
+    # and is refused before anything is read or written.
     if [ "$STATUS_ONLY" = yes ]; then
         if [ "$JSON" = yes ]; then status_json; else print_status; fi
         return 0
     fi
+    need_root
+    log_start
+    if [ "$LOGS_MODE" = yes ]; then logs_command "$LOGS_TRACE"; return 0; fi
     acquire_lock
+    log_maintain
+    jlog info operation_start "$OPERATION started"
     emit_event stage running start "started"
+
+    if [ "$REMOTE_CHECK" = yes ]; then
+        local rcc=0
+        remote_check_command || rcc=$?
+        return "$rcc"
+    fi
+
     if [ "$RESTORE" = yes ]; then
+        steps_begin 2
         preflight_light
         [ -s "$LAST_GOOD" ] || die "there is no verified configuration to go back to ($LAST_GOOD)"
         restore_last_good || die "the previous configuration would not start"
-        NO_EXTERNAL=yes   # the restored setup was verified when it was saved
-        [ -z "$PROBE_URL" ] || [ -z "$PROBE_TOKEN_FILE" ] || [ ! -r "$PROBE_TOKEN_FILE" ] || NO_EXTERNAL=no
+        step "Checking the panel"
         local rrc=0
         verify_stack || rrc=$?
         summary
@@ -2009,7 +1684,7 @@ main() {
             if [ -z "$ACTION" ]; then say "Nothing was changed."; return 0; fi
         fi
         if [ -n "$ACTION" ]; then
-            valid_action "$ACTION" || die "unknown action '$ACTION': use check, domain, ip, tunnel, credentials or update"
+            valid_action "$ACTION" || die "unknown action '$ACTION': use check, update, domain, ip, tunnel, credentials or logs"
             local arc=0
             run_action || arc=$?
             [ "$arc" != 99 ] || arc=0   # 99: the action continues as an ordinary change
@@ -2019,16 +1694,22 @@ main() {
         die "--action needs an existing installation; run ./install.sh without it first"
     fi
 
+    steps_begin 6
     stage preflight "checking this server"
-    preflight
-    choose_mode                       # 2. domain or IP
-    stage dns "checking the address"
-    ask_site                          # 3. DNS or the address
-    setup_probe
-    stage port "checking the public port"
-    select_port                       # 4. the public port, checked from outside
+    step "Checking this server"
+    preflight_env
+    step "How the panel opens"
+    choose_mode                       # domain, IP address or tunnel
+    stage image "downloading the application image"
+    step "Downloading the application image"
+    ensure_image
+    stage dns "checking the address and ports"
+    step "Checking the address and ports"
+    ask_site                          # DNS or the address
+    setup_probe                       # optional outside check
+    select_port                       # the public HTTPS port
     stage challenge "checking what the certificate needs"
-    check_challenge                   # 5. what the certificate needs
+    check_challenge
     ask_email
     settle_acme
     ask_telegram
@@ -2036,11 +1717,14 @@ main() {
     ask_enforce
     ask_password
     ensure_enforce_image              # before anything is written
+    compute_panel_url
+    confirm_plan
 
     announce_change
     backup_current                    # what a rollback goes back to
     stage apply "writing the configuration and starting"
-    write_config                      # 6. configure and start
+    step "Starting"
+    write_config
     build_compose_files
 
     local vrc=0 started=yes
@@ -2049,6 +1733,7 @@ main() {
         [ -n "$FAIL_CODE" ] || report service_start_failed "$(compose_prefix)" "starting the stack" "it did not start" "see the messages above"
     else
         stage verify "checking the new address"
+        step "Checking the panel"
         verify_stack || vrc=$?
     fi
 
@@ -2062,7 +1747,8 @@ main() {
             stage rollback "restoring the previous configuration"
             if restore_last_good "$rsrc"; then
                 TLS_UNTRUSTED=no; LOGIN_STATE=""; LOGIN_ROUTE=""; TLS_STATE=""; RENEW_STATE=""; RELOAD_PROBLEM=no
-                PAGE_STATE=""; PASSWORD=""; EXT_TLS_STATE=""; NO_EXTERNAL=yes
+                PAGE_STATE=""; PASSWORD=""; EXT_TLS_STATE=""; EXT_STATE=""; EXT_CONFIGURED=no
+                step "Checking the restored panel"
                 verify_stack || true
                 FAIL_CODE="$code"; FAIL_REASON="$reason"
             fi
@@ -2070,16 +1756,25 @@ main() {
             say ""
             say "There is no earlier working configuration to go back to."
         fi
+        step "Result"
         summary
         if [ "$RESTORED" = yes ]; then emit_event result rolled_back "$FAIL_CODE" "$FAIL_REASON"; else emit_event result failed "$FAIL_CODE" "$FAIL_REASON"; fi
+        jlog error result "$FAIL_CODE: $FAIL_REASON" "$FAIL_CODE"
         return "$(exit_status 1)"
     fi
 
     if [ "$DO_START" = yes ] && [ "$DO_VERIFY" = yes ] && [ "$vrc" = 0 ] && [ -z "$FAIL_CODE" ]; then
         save_last_good
     fi
+    step "Result"
     summary
-    if [ -n "$FAIL_CODE" ] || [ "$vrc" != 0 ]; then emit_event result failed "$FAIL_CODE" "$FAIL_REASON"; else emit_event result ok "" "$PANEL_URL"; fi
+    if [ -n "$FAIL_CODE" ] || [ "$vrc" != 0 ]; then
+        emit_event result failed "$FAIL_CODE" "$FAIL_REASON"
+        jlog error result "${FAIL_CODE:-verify}: $FAIL_REASON" "${FAIL_CODE:-verify_failed}"
+    else
+        emit_event result ok "" "$PANEL_URL"
+        jlog info result "ok: $PANEL_URL"
+    fi
     return "$(exit_status "$vrc")"
 }
 
@@ -2092,10 +1787,10 @@ run_action() {
     case "$ACTION" in
         check)
             ACTION_DONE=yes
+            steps_begin 1
             preflight_light
             load_state_from_env
-            NO_EXTERNAL=yes
-            [ -z "$PROBE_URL" ] || [ -z "$PROBE_TOKEN_FILE" ] || [ ! -r "$PROBE_TOKEN_FILE" ] || NO_EXTERNAL=no
+            step "Checking the panel"
             local crc=0
             verify_stack || crc=$?
             summary
@@ -2103,6 +1798,7 @@ run_action() {
             return "$(exit_status "$crc")" ;;
         credentials)
             ACTION_DONE=yes
+            steps_begin 1
             preflight_light
             load_state_from_env
             installer_lines <<'EOF'
@@ -2113,6 +1809,7 @@ Telegram and every other setting are kept.
 EOF
             confirm "Reset the login and password?" || { say "Nothing was changed."; return 0; }
             stage apply "resetting the credentials"
+            step "Resetting the login and password"
             if compose run --rm auditdsec reset-credentials -yes; then
                 ok "reset; open the panel and choose a new login and password"
                 emit_event result ok "" "credentials reset"
@@ -2127,6 +1824,10 @@ EOF
             fi
             apply_action_defaults
             return 99 ;;
+        logs)
+            ACTION_DONE=yes
+            logs_menu
+            return 0 ;;
         enable-control|disable-control)
             ACTION_DONE=yes
             preflight_light

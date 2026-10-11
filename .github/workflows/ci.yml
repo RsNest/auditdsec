@@ -50,11 +50,14 @@ jobs:
           python3 -m pip install --quiet "cryptography==44.0.2"
           python3 -B -m unittest deploy/test_certtool.py
       - name: shellcheck
-        run: shellcheck -S warning install.sh deploy/*.sh scripts/e2e/stage0/*.sh scripts/check-installer-access.sh
+        run: shellcheck -S warning install.sh deploy/*.sh scripts/e2e/stage0/*.sh scripts/check-installer-access.sh scripts/check-installer-ui.sh
       - name: installer language
         run: bash scripts/check-installer-language.sh
       - name: installer access change
-        run: bash scripts/check-installer-access.sh
+        # The installer refuses to run without root, so its checks run as root.
+        run: sudo -E bash scripts/check-installer-access.sh
+      - name: installer interface and log
+        run: sudo -E bash scripts/check-installer-ui.sh
       - name: panel review policy
         run: node scripts/check-panel-review.cjs
       - name: release notes

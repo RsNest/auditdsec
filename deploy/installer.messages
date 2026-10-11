@@ -432,3 +432,195 @@ Removing the panel's link to the control service	Удаление связи п�
 Restart the panel now? (a short interruption)	Перезапустить панель сейчас? (короткий перерыв)
 the panel did not start	панель не запустилась
 The panel no longer reaches the service. To stop it on this server:	Панель больше не обращается к службе. Чтобы остановить её на этом сервере:
+
+# Installer rework: stages, failure block, menu, plan, result, logs.
+Stage:	Этап:
+Where:	Где:
+Check:	Проверка:
+Result:	Итог:
+Do next:	Что делать:
+Retry:	Повтор:
+Still works:	Что работает:
+nothing on this server was changed by this run	этот запуск ничего не изменил на сервере
+Trace:	Trace ID:
+Log:	Лог:
+Stopped before any change. Nothing that was working before was removed.	Остановлено до каких-либо изменений. Ничего из того, что работало, не удалено.
+cannot talk to the Docker daemon; is it running?	не удаётся связаться с Docker; он запущен?
+Latest operations (time, trace ID, kind). Show one with ./install.sh --logs TRACE_ID	Последние операции (время, trace ID, вид). Одну из них покажет ./install.sh --logs TRACE_ID
+a trace ID is 16 to 32 characters 0-9 a-f	trace ID — от 16 до 32 символов 0-9 a-f
+There are no logs in %s yet.	В %s пока нет логов.
+Starting the containers	Запуск контейнеров
+Checking the panel	Проверка панели
+unknown action '%s': use check, update, domain, ip, tunnel, credentials or logs	неизвестное действие «%s»: допустимы check, update, domain, ip, tunnel, credentials или logs
+Checking this server	Проверка сервера
+How the panel opens	Как открывать панель
+Downloading the application image	Загрузка образа приложения
+Checking the address and ports	Проверка адреса и портов
+Checking the restored panel	Проверка восстановленной панели
+Result	Результат
+Resetting the login and password	Сброс логина и пароля
+Usage: sudo ./install.sh [options]	Использование: sudo ./install.sh [параметры]
+Run as root. With no options it asks what it needs, in this order: how the	Запускайте от root. Без параметров задаёт вопросы в таком порядке: как
+panel opens (domain, IP address or SSH tunnel), the address, the HTTPS port,	открывать панель (домен, IP-адрес или SSH-туннель), адрес, порт HTTPS,
+then what the certificate needs. On an existing installation it shows a menu.	затем что нужно сертификату. На готовой установке показывает меню.
+  --https-port N|auto                  the PUBLIC HTTPS port of the panel. The default is	  --https-port N|auto                  ПУБЛИЧНЫЙ порт HTTPS панели. По умолчанию
+                                          443; when it is taken you are asked for another	                                          443; если он занят, спросит другой
+                                          one. A port you give is never replaced: if it does	                                          порт. Заданный вами порт не заменяется: если он не
+                                          not work, the run stops. auto (only when you ask	                                          подходит, запуск останавливается. auto (только по
+                                          for it) tries 443, then up to 16 random high ports.	                                          вашему запросу) пробует 443, затем до 16 случайных портов.
+Optional outside check (a RemoteProbe)	Необязательная проверка снаружи (RemoteProbe)
+  --no-external-check                  do not use it even if configured	  --no-external-check                  не использовать её, даже если настроена
+  --remote-check                       run only that check against the installed panel	  --remote-check                       выполнить только эту проверку для установленной панели
+                                          (exit 0 reached, 11 not reached, 16 certificate not	                                          (код 0 — достигнута, 11 — не достигнута, 16 — сертификат
+                                          verified, 12 no provider or no answer)	                                          не подтверждён, 12 — нет провайдера или он не ответил)
+  Without a provider the installer checks everything it can from this server and	  Без провайдера установщик проверяет всё, что может, с этого сервера и
+  says what it did not check. The installation does not depend on it.	  говорит, что не проверял. Установка от него не зависит.
+Technical modes	Технические режимы
+  --status [--json]                    show the current mode, address and certificate; change	  --status [--json]                    показать режим, адрес и сертификат; ничего не
+                                          nothing, needs no root. --json prints only JSON.	                                          меняет, root не нужен. --json печатает только JSON.
+  --logs [TRACE_ID]                    without an ID: the latest operations; with one: every log	  --logs [TRACE_ID]                    без ID — последние операции; с ID — все записи этой
+                                          line of that operation from all components	                                          операции из всех компонентов
+  --action ACTION                      on an existing installation, without the menu: check, update,	  --action ACTION                      на готовой установке без меню: check, update,
+                                          domain, ip, tunnel, credentials or logs. Saved settings	                                          domain, ip, tunnel, credentials или logs. Сохранённые настройки
+                                          (Telegram, credentials, e-mail, enforcement) are reused.	                                          (Telegram, логин, e-mail, блокировка) используются повторно.
+Logs: /var/log/auditseclogs (AUDITSEC_LOG_DIR), see docs/LOGS.md. Colours and the	Логи: /var/log/auditseclogs (AUDITSEC_LOG_DIR), см. docs/LOGS.md. Цвета и
+banner appear only on a terminal; NO_COLOR=1 turns colours off, NO_BANNER=1 the banner.	баннер — только в терминале; NO_COLOR=1 отключает цвета, NO_BANNER=1 — баннер.
+Exit status: 0 when every required check passed; otherwise the code of the	Код выхода: 0, если все обязательные проверки прошли; иначе код первой
+  11 external_port_unreachable   (--remote-check) the provider could not reach the panel	  11 external_port_unreachable   (--remote-check) провайдер не достучался до панели
+  12 external_check_unavailable  (--remote-check) no provider, or it did not answer	  12 external_check_unavailable  (--remote-check) нет провайдера или он не ответил
+Telegram	Telegram
+Choose 0-7	Выберите 0-7
+pick a number from 0 to 7	выберите число от 0 до 7
+Diagnostics and logs	Диагностика и логи
+Log directory:	Каталог логов:
+Trace ID to show (Enter to leave)	Какой trace ID показать (Enter — выйти)
+the installation path (%s) has characters a service file cannot hold; move the installation to a plain path	путь установки (%s) содержит символы, которые нельзя записать в файл службы; перенесите установку в обычный путь
+cannot create a container from %s to copy the control service out	не удаётся создать контейнер из %s, чтобы достать службу управления
+  2) Update auditdsec — agent and web panel	  2) Обновить auditdsec — агент и веб-панель
+  3) Connect or change the domain	  3) Подключить или сменить домен
+  4) Switch to this server's IP address (and choose the port)	  4) Перейти на IP-адрес сервера (и выбрать порт)
+  5) Switch to an SSH tunnel (no public access)	  5) Перейти на SSH-туннель (без публичного доступа)
+  6) Change the login and password	  6) Сменить логин и пароль
+  7) Diagnostics and logs	  7) Диагностика и логи
+  sudo systemctl disable --now auditdsec-ctl	  sudo systemctl disable --now auditdsec-ctl
+Choose 1-4	Выберите 1-4
+Pick a number from 1 to 4.	Выберите число от 1 до 4.
+Choose 0-3	Выберите 0-3
+Pick a number from 0 to 3.	Выберите число от 0 до 3.
+Press Enter to check again, type another domain, or 0 to cancel	Enter — проверить снова, введите другой домен или 0 для отмены
+That is not a domain name.	Это не доменное имя.
+The outside check is switched off (--no-external-check).	Проверка снаружи отключена (--no-external-check).
+The RemoteProbe token file %s cannot be read: the outside check is skipped.	Файл токена RemoteProbe %s не читается: проверка снаружи пропущена.
+The RemoteProbe CA file %s cannot be read: the outside check is skipped.	Файл CA для RemoteProbe %s не читается: проверка снаружи пропущена.
+The panel's HTTPS port	HTTPS-порт панели
+port %s stays as it is (this installation's own proxy holds it)	порт %s остаётся прежним (его держит прокси этой же установки)
+Port %s cannot be used: %s	Порт %s использовать нельзя: %s
+Another port (1-65535), or 0 to cancel	Другой порт (1-65535) или 0 для отмены
+no port was chosen	порт не выбран
+port %s can be bound here (reachability from outside was not checked: no outside-check provider is configured)	порт %s можно занять здесь (доступность снаружи не проверялась: провайдер проверки не настроен)
+port %s chosen automatically (--https-port auto)	порт %s выбран автоматически (--https-port auto)
+The outside-check provider could not reach port %s: %s	Провайдер проверки снаружи не достучался до порта %s: %s
+Continuing: this server cannot prove or disprove reachability from the internet. Check the firewall of this server and of the provider.	Продолжаю: этот сервер не может ни подтвердить, ни опровергнуть доступность из интернета. Проверьте файрвол сервера и хостинг-провайдера.
+The outside-check provider did not answer: %s	Провайдер проверки снаружи не ответил: %s
+%s (%s). If Let's Encrypt cannot reach it either, the certificate will not be issued and the previous configuration will be restored.	%s (%s). Если Let's Encrypt тоже не достучится, сертификат не будет выпущен, а прежняя конфигурация вернётся.
+How should the panel be reached?	Как открывать панель?
+  1) A domain name (recommended)	  1) Доменное имя (рекомендуется)
+     https://panel.example.com with a certificate every browser trusts,	     https://panel.example.com с сертификатом, которому доверяют все браузеры,
+     issued by Let's Encrypt and renewed automatically.	     выпускает Let's Encrypt, продлевается автоматически.
+     Needs: a domain whose A/AAAA records point at this server, and	     Нужны: домен, чьи A/AAAA-записи указывают на этот сервер, и
+     ports 80 and 443 open on it.	     открытые на нём порты 80 и 443.
+  2) This server's public IP address	  2) Публичный IP-адрес этого сервера
+     https://203.0.113.9 with a trusted certificate for the address	     https://203.0.113.9 с доверенным сертификатом на адрес
+     (valid about 6 days, renewed automatically).	     (действует около 6 дней, продлевается автоматически).
+     Needs: a public IP and port 80 open for the renewals.	     Нужны: публичный IP и открытый порт 80 для продлений.
+  3) An SSH tunnel (nothing is opened to the internet)	  3) SSH-туннель (в интернет ничего не открывается)
+     The panel listens only on this server; you open it from your computer	     Панель слушает только на этом сервере; вы открываете её с компьютера
+     with ssh -L. Needs: SSH access to this server.	     через ssh -L. Нужен SSH-доступ к серверу.
+  4) More options (test certificate, self-signed)	  4) Другие варианты (тестовый сертификат, самоподписанный)
+More options (not for everyday use)	Другие варианты (не для обычной работы)
+  1) A domain with a TEST certificate (Let's Encrypt staging)	  1) Домен с ТЕСТОВЫМ сертификатом (Let's Encrypt staging)
+     The page works, but browsers show a warning: the test authority is not	     Страница работает, но браузеры предупреждают: тестовому центру
+     trusted. Good for trying the setup without using up Let's Encrypt limits.	     не доверяют. Подходит, чтобы попробовать, не тратя лимиты Let's Encrypt.
+  2) This server's IP with a TEST certificate (Let's Encrypt staging)	  2) IP сервера с ТЕСТОВЫМ сертификатом (Let's Encrypt staging)
+     The same, for an address.	     То же самое для адреса.
+  3) A self-signed certificate on this server's IP	  3) Самоподписанный сертификат на IP сервера
+     The traffic is encrypted, but every browser warns and you compare the	     Трафик зашифрован, но каждый браузер предупреждает, а отпечаток
+     fingerprint yourself.	     вы сверяете сами.
+  0) Back	  0) Назад
+Nothing that holds the port was stopped and the firewall was not changed.	Ничего, что держит порт, не остановлено, файрвол не менялся.
+Choose another HTTPS port; the link will contain it (https://name:PORT).	Выберите другой HTTPS-порт; он будет в ссылке (https://имя:ПОРТ).
+warning: the diagnostic log is unavailable:	предупреждение: диагностический лог недоступен:
+Asking the outside-check provider to reach the panel	Прошу провайдера проверки снаружи обратиться к панели
+The outside-check provider did not answer%s. The panel itself is not affected.	Провайдер проверки снаружи не ответил%s. На саму панель это не влияет.
+an SSH tunnel is not reachable from outside by design; there is nothing to check	SSH-туннель по замыслу недоступен снаружи; проверять нечего
+No RemoteProbe provider is configured (--probe-url and --probe-token-file at install time).	Провайдер RemoteProbe не настроен (--probe-url и --probe-token-file при установке).
+The provider did not answer%s	Провайдер не ответил%s
+This will be done:	Будет сделано:
+The panel at https://%s%s (a domain)	Панель по адресу https://%s%s (домен)
+The panel at https://%s%s (an IP address)	Панель по адресу https://%s%s (IP-адрес)
+The panel at https://%s%s with a SELF-SIGNED certificate	Панель по адресу https://%s%s с САМОПОДПИСАННЫМ сертификатом
+The panel only on this server (SSH tunnel); nothing is opened to the internet	Панель только на этом сервере (SSH-туннель); в интернет ничего не открывается
+Certificate: a TEST certificate from Let's Encrypt staging (browsers will warn)	Сертификат: ТЕСТОВЫЙ от Let's Encrypt staging (браузеры будут предупреждать)
+Certificate: a trusted certificate from Let's Encrypt, renewed automatically	Сертификат: доверенный от Let's Encrypt, продлевается автоматически
+Expiry notices go to: %s	Уведомления об окончании сертификата придут на: %s
+Bans: applied with nftables	Блокировки: применяются через nftables
+Bans: only recorded	Блокировки: только записываются
+Nothing else on this server is stopped or changed; no firewall rule is added.	Больше ничего на сервере не останавливается и не меняется; правила файрвола не добавляются.
+Apply this now?	Применить сейчас?
+The last verified configuration is running again.	Снова работает последняя проверенная конфигурация.
+The new settings did not work; the previous ones are running again.	Новые настройки не сработали; снова работают прежние.
+Not completed	Не завершено
+Configured, not started (--no-start).	Настроено, не запущено (--no-start).
+Started, but not checked (--no-verify).	Запущено, но не проверено (--no-verify).
+auditdsec is running and waits for first-time setup.	auditdsec работает и ждёт первоначальной настройки.
+auditdsec is running.	auditdsec работает.
+Started, but a required check did not pass.	Запущено, но обязательная проверка не прошла.
+What went wrong:	Что не так:
+The failed settings are in %s.failed (same permissions as %s).	Неудавшиеся настройки сохранены в %s.failed (права как у %s).
+Run again after fixing it:	Запустите снова после исправления:
+Application:	Приложение:
+Sign-in:	Вход:
+sent %s	отправлено %s
+HTTPS:	HTTPS:
+Expires:	Действует до:
+Port:	Порт:
+the standard port	стандартный порт
+Outside:	Снаружи:
+Challenge:	Проверка домена:
+Renewal:	Продление:
+Caddy renews the certificate itself, about 30 days before it ends.	Caddy продлевает сертификат сам, примерно за 30 дней до окончания.
+Address certificates last about 6 days; the certbot container renews them and checks every minute that port %s serves the file on disk. Port 80 must stay open and unused for the renewals.	Сертификаты на адрес живут около 6 дней; их продлевает контейнер certbot и каждую минуту проверяет, что порт %s отдаёт файл с диска. Порт 80 должен оставаться открытым и свободным для продлений.
+Trust:	Доверие:
+each browser warns. Compare the fingerprint it shows with:	каждый браузер предупреждает. Сверьте показанный им отпечаток с:
+TEST CERTIFICATE.	ТЕСТОВЫЙ СЕРТИФИКАТ.
+Browsers do not trust it, on purpose. Switch with:	Браузеры ему не доверяют — так задумано. Переключиться:
+nothing is deleted	ничего не удаляется
+Diagnostics:	Диагностика:
+Logs of this operation:	Логи этой операции:
+Image:	Образ:
+previous image (for going back):	прежний образ (для возврата):
+Run ./install.sh again to change anything: data, certificates and credentials are kept.	Чтобы что-то изменить, запустите ./install.sh снова: данные, сертификаты и учётные данные сохраняются.
+Back to the last verified configuration: ./install.sh --restore	Вернуться к последней проверенной конфигурации: ./install.sh --restore
+First login:	Первый вход:
+It opens only the mandatory setup screen: choose your login (or tick "keep admin") and a password of 8+ characters with a lower-case and an upper-case letter. Do it now: whoever signs in first can choose them.	Он открывает только обязательный экран настройки: выберите свой логин (или отметьте «оставить admin») и пароль от 8 символов со строчной и заглавной буквой. Сделайте это сразу: выбрать их может тот, кто войдёт первым.
+Sign in with the login and password you chose (admin / admin no longer works).	Входите с выбранными вами логином и паролем (admin / admin больше не работает).
+On your computer, run and leave open:	На своём компьютере выполните и оставьте открытым:
+Link:	Ссылка:
+Configured link (the checks above did not pass):	Настроенная ссылка (проверки выше не прошли):
+Understandable Linux audit alerts, brute-force protection and a web panel.	Понятные уведомления аудита Linux, защита от подбора паролей и веб-панель.
+ERROR: the installer was not run as root.	ОШИБКА: установщик запущен не от root.
+Run the command with administrator rights:	Запустите команду с правами администратора:
+sudo is not installed here: sign in as root and run ./install.sh again.	sudo здесь не установлен: войдите как root и запустите ./install.sh снова.
+SELF-SIGNED: encrypted, but every browser warns	САМОПОДПИСАННЫЙ: зашифровано, но каждый браузер предупреждает
+TEST certificate (Let's Encrypt staging): browsers warn on purpose	ТЕСТОВЫЙ сертификат (Let's Encrypt staging): браузеры предупреждают намеренно
+NOT trusted: %s	НЕ доверенный: %s
+confirmed (%s)	подтверждено (%s)
+check failed: %s	проверка не прошла: %s
+not checked (--no-external-check)	не проверялось (--no-external-check)
+not checked: no outside-check provider is configured. The panel may well be reachable; this server alone cannot prove it.	не проверялось: провайдер проверки снаружи не настроен. Панель вполне может быть доступна, но один этот сервер доказать этого не может.
+confirmed from the provider's network point (this does not prove reachability from the whole internet)	подтверждено из сети провайдера проверки (это не доказывает доступность из всего интернета)
+the check did not pass: %s. The panel works on this server; check the firewall of this server and of your provider.	проверка не прошла: %s. Панель работает на сервере; проверьте файрвол сервера и хостинг-провайдера.
+the checking service was unavailable: %s	сервис проверки был недоступен: %s
+port 80 is free here; reachability from the internet was not checked	порт 80 свободен здесь; доступность из интернета не проверялась
+port 80 is held by this installation's proxy; reachability from the internet was not re-checked	порт 80 держит прокси этой установки; доступность из интернета заново не проверялась
+Link (NOT published):	Ссылка (не опубликована):
