@@ -27,7 +27,10 @@ services:
       # The agent's own plain-HTTP upstream (loopback only). Not the public port.
       AUDITDSEC_WEB_LISTEN: 127.0.0.1:${PANEL_UPSTREAM_PORT:-${PANEL_PORT:-9477}}
       # What a person types: written by ./install.sh with the real public port.
-      AUDITDSEC_WEB_PUBLIC_URL: ${PANEL_PUBLIC_URL:-https://${PANEL_SITE:-${PANEL_DOMAIN:?set PANEL_SITE in .env, or run ./install.sh}}}
+      # Compose evaluates nested defaults even when the outer value is set.
+      # A required legacy variable here would reject a valid PANEL_SITE.
+      # deploy-check rejects an empty site before the containers are started.
+      AUDITDSEC_WEB_PUBLIC_URL: ${PANEL_PUBLIC_URL:-https://${PANEL_SITE:-${PANEL_DOMAIN:-}}}
       AUDITDSEC_WEB_PUBLIC_HTTPS_PORT: ${PANEL_HTTPS_PORT:-443}
       # What the agent watches in the certificate served at that link: verify
       # (chain and expiry), expiry (staging, self-signed, a private CA) or off.
@@ -48,7 +51,7 @@ services:
     mem_limit: 128m
     pids_limit: 128
     environment:
-      PANEL_SITE: ${PANEL_SITE:-${PANEL_DOMAIN:?set PANEL_SITE in .env, or run ./install.sh}}
+      PANEL_SITE: ${PANEL_SITE:-${PANEL_DOMAIN:-}}
       PANEL_EMAIL: ${PANEL_EMAIL:-}
       PANEL_SITE_ADDR: ${PANEL_SITE_ADDR:-${PANEL_SITE:-${PANEL_DOMAIN:-}}}
       PANEL_HTTPS_PORT: ${PANEL_HTTPS_PORT:-443}
