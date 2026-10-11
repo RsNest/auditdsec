@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/RsNest/auditdsec/internal/config"
@@ -143,6 +144,9 @@ func CheckDeployment(doc []byte, e DeployExpect) ([]string, error) {
 		}
 		if caddy.NetworkMode != "host" {
 			bad("the proxy is not in the host network (network_mode=%q)", caddy.NetworkMode)
+		}
+		if strings.TrimSpace(caddy.Environment["PANEL_SITE"]) == "" {
+			bad("the proxy has no panel address: set PANEL_SITE in .env, or run ./install.sh (PANEL_DOMAIN is supported for older installations)")
 		}
 		if got := caddy.Environment["PANEL_UPSTREAM"]; got != upstream {
 			bad("the proxy would send requests to %q, not to %s", got, upstream)

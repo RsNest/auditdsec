@@ -42,7 +42,7 @@ export COMPOSE_PROJECT_NAME=adslab NO_COLOR=1 PANEL_NO_EGRESS=1 NO_BANNER=1
 say() { printf '\n== %s\n' "$*"; }
 check() { # DESCRIPTION COMMAND...
     local d="$1"; shift
-    if "$@" >/dev/null 2>&1; then PASS=$((PASS + 1)); printf '  ok    %s\n' "$d"; else FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$d"; fi
+    if "$@" >/dev/null 2>&1; then PASS=$((PASS + 1)); printf '  ok    %s\n' "$d"; else FAIL=$((FAIL + 1)); note_fail "$d"; printf '  FAIL  %s\n' "$d"; fi
 }
 equal() { # DESCRIPTION GOT EXPECTED
     if [ "$2" = "$3" ]; then PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; else FAIL=$((FAIL + 1)); note_fail "$1 (got <$2>, expected <$3>)"; printf '  FAIL  %s (got <%s>, expected <%s>)\n' "$1" "$2" "$3"; fi
@@ -92,10 +92,12 @@ out="$(cd "$WORK" && HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:
     ./install.sh --lang en --yes --no-build --no-external-check --mode selfsigned --site 127.0.0.1 --https-port "$HP" --upstream-port "$UP" 2>&1)"; rc=$?
 equal "install exits 0" "$rc" 0
 if [ "$rc" != 0 ]; then
-    printf '%s
-' "$out" | sed 's/^/      | /' | head -80
+    printf '%s\n' "$out" | sed 's/^/      | /' | head -80
     docker ps -a --format '      | container {{.Names}} {{.Status}}' ; docker logs --tail 30 auditdsec 2>&1 | sed 's/^/      | agent: /'
     docker logs --tail 30 auditdsec-caddy 2>&1 | sed 's/^/      | caddy: /'
+    # All subsequent scenarios require a working first installation. Stop at
+    # its cause instead of waiting on nonexistent containers for minutes.
+    exit 1
 fi
 contains "the result says the panel runs" "$out" "auditdsec is running"
 equal "agent network mode" "$(netmode auditdsec)" host

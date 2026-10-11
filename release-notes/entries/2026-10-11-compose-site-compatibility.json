@@ -1,0 +1,20 @@
+{
+  "id": "2026-10-11-compose-site-compatibility",
+  "date": "2026-10-11",
+  "title": { "en": "Public panel installation accepts the current address setting", "ru": "Публичная панель устанавливается с текущей настройкой адреса" },
+  "fixed": {
+    "en": ["Compose no longer requires legacy PANEL_DOMAIN when PANEL_SITE is set. Domain and IP installations work with either variable name."],
+    "ru": ["Compose больше не требует старую PANEL_DOMAIN при заданной PANEL_SITE. Установка на домен и IP работает с обоими именами переменной."]
+  },
+  "added": {
+    "en": ["An empty proxy address is diagnosed before startup. CI checks both variable names and stops at the first installation failure instead of reporting cascading failures."],
+    "ru": ["Пустой адрес прокси выявляется до запуска. CI проверяет оба имени переменной и останавливается на первом сбое установки вместо серии зависимых ошибок."]
+  },
+  "actions": {
+    "en": ["Update the installer files before retrying a failed installation."],
+    "ru": ["Обновите файлы установщика перед повтором неудачной установки."]
+  },
+  "breaking": [],
+  "requires": { "installer_update": true, "migration": "none" },
+  "evidence": ["deploy/compose.proxy.yml", "cmd/auditdsec/deploycmd.go", "scripts/check-compose-site.py", "scripts/e2e/compose-consistency/run.sh"]
+}

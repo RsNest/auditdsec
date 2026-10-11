@@ -1,10 +1,29 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 )
+
+func TestProxyWithoutSiteIsRejected(t *testing.T) {
+	var cfg composeConfig
+	if err := json.Unmarshal(fixture(t, "domain"), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	caddy := cfg.Services["caddy"]
+	delete(caddy.Environment, "PANEL_SITE")
+	cfg.Services["caddy"] = caddy
+	doc, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	problems, err := CheckDeployment(doc, DeployExpect{Mode: "domain", UpstreamPort: "19477", HTTPSPort: "8443"})
+	if err != nil || !strings.Contains(strings.Join(problems, "\n"), "set PANEL_SITE") {
+		t.Fatalf("missing site was not diagnosed: %v %v", problems, err)
+	}
+}
 
 // The fixtures are the output of the real `docker compose config --format json`
 // for the file sets the installer builds (see docs/VERIFY.md); the checker is
